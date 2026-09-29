@@ -477,8 +477,9 @@ Future<WipeReportDto> transportWipePreview() =>
 ///   conversations in the emptied store as fresh invitations. Comms cannot come
 ///   back that way (post-erase they drop unrouted, `NoConversationForAlias`),
 ///   and the window is bounded by the cursor's own write cadence and the
-///   walk's page budget (LINK-Q3; it was `MAX_CATCHUP_PAGES`), which a replay
-///   after a lock now also runs — but it is a real, accepted residual, not a free
+///   walk's replay (LINK-Q3: a gap's oldest hour, then what followed each
+///   arm's mark; it was `MAX_CATCHUP_PAGES`), which a replay after a lock now
+///   also runs — but it is a real, accepted residual, not a free
 ///   omission. The node lane has no epoch guard; closing it means an erase
 ///   check inside the fold's own lock scope, which is a change to the live
 ///   intake path and is deliberately NOT made at the end of this sitting

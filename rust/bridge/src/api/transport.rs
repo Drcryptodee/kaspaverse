@@ -2004,15 +2004,18 @@ pub async fn transport_start() -> Result<(), AppError> {
     let fill_monitor = monitor.clone();
     let fill_hub = hub.clone();
     tokio::spawn(async move {
-        // V2b auto-fill (D-074) — SEQUENCED after the walk's first run so node
-        // truth folds first: a fill row's txid is an indexer CLAIM (we hold
+        // V2b auto-fill (D-074) — SEQUENCED after the walk settles (its first
+        // run, or the runs a budget landing chains, D-344) so node truth folds
+        // first: a fill row's txid is an indexer CLAIM (we hold
         // only its payload, so the pinned recompute cannot check it); folding
         // node rows first means a mislabeled hint cannot suppress a message the
         // node was about to deliver (consensus-audit finding, V2b). Config-gated
         // inside (defaults OFF, the §0 lock); a first-ever run (no cursor) still
         // fills — that IS the restore-from-seed case the V0 casualty lived.
-        // Deliberately unconditional on gap size: the walk covers about an
-        // hour, the indexer the rest, and txid dedup makes the overlap free.
+        // Deliberately unconditional on gap size: the walk covers a gap's
+        // oldest hour and everything after the arm's mark (what it skips, its
+        // log names), the indexer the rest, and txid dedup makes the overlap
+        // free.
         if !fill_monitor
             .intake_settled(epoch, kaspaverse_chain::INTAKE_SETTLE_WAIT)
             .await
@@ -7466,8 +7469,9 @@ pub fn transport_wipe_preview() -> Result<WipeReportDto, AppError> {
 ///   conversations in the emptied store as fresh invitations. Comms cannot come
 ///   back that way (post-erase they drop unrouted, `NoConversationForAlias`),
 ///   and the window is bounded by the cursor's own write cadence and the
-///   walk's page budget (LINK-Q3; it was `MAX_CATCHUP_PAGES`), which a replay
-///   after a lock now also runs — but it is a real, accepted residual, not a free
+///   walk's replay (LINK-Q3: a gap's oldest hour, then what followed each
+///   arm's mark; it was `MAX_CATCHUP_PAGES`), which a replay after a lock now
+///   also runs — but it is a real, accepted residual, not a free
 ///   omission. The node lane has no epoch guard; closing it means an erase
 ///   check inside the fold's own lock scope, which is a change to the live
 ///   intake path and is deliberately NOT made at the end of this sitting

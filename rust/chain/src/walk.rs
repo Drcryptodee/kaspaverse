@@ -88,10 +88,13 @@ use crate::transport::{self, TransportEvent};
 /// block's hash, time, DAA and blue score (Low), which the tracker needs.
 const WALK_VERBOSITY: RpcDataVerbosityLevel = RpcDataVerbosityLevel::High;
 
-/// Pages one run may walk before it stops and re-seeds at the sink. A page is
-/// about four minutes of chain at 10 BPS, so sixteen is about an hour: the
-/// acceptance spine's own budget (`MAX_VCC_CATCHUP_PAGES`), so both walks
-/// recover the same window and past it the same gap notice speaks. Priced on
+/// Pages one run may walk before it stops and re-seeds. A page is about four
+/// minutes of chain at 10 BPS, so sixteen is about an hour: the acceptance
+/// spine's own budget (`MAX_VCC_CATCHUP_PAGES`), so both walks recover the same
+/// window and past it the same gap notice speaks. A spent budget lands on an
+/// arm's mark ([`Walk::mark_arm`], which names what is still skipped), so the
+/// skip is the part of the gap before the app could receive; past this arm's
+/// mark it skips nothing. Priced on
 /// LINK-Q2's E2 (D-340): accepted transactions at High cost about 28 MB per
 /// hour of chain on today's quiet mainnet, so a spent budget is about 30 MB;
 /// the 48-page `get_blocks` catch-up it replaces fetched twenty minutes of FULL
@@ -233,16 +236,25 @@ pub type VerdictFuture<'a> = Pin<Box<dyn Future<Output = Verdict> + Send + 'a>>;
 pub trait WalkMatcher: Send + Sync {
     fn fold_page<'a>(&'a self, page: &'a WalkPage) -> VerdictFuture<'a>;
 
-    /// **The walk skipped chain**: it re-seeded at the node's sink `to` from
-    /// the cursor `from` it could not walk on from (an unknown cursor, a spent
-    /// budget, a page the node could not serve). Never called for a first seed,
-    /// which skips nothing. A matcher that must see every accepted transaction
-    /// — P3.4's watcher — marks its state stale here (`consensus-auditor`: a
-    /// watcher that cannot hear a skip is a BLOCK at P3.4). The transport
-    /// matcher has nothing to do; the skip reaches the log (the hub's gap
-    /// notice is worked out once per start, so a mid-session skip stops there).
-    /// An `arm` onto a different cursor file jumps without it: that is a new
-    /// store, not a skip in this one.
+    /// **The walk moved its cursor other than by folding**: it re-seeded at
+    /// `to` (an arm's mark, or the node's sink) from the cursor `from` it could
+    /// not walk on from (an unknown cursor, a spent budget, a page the node
+    /// could not serve). **`to` may lie ahead of `from`, behind it, or off the
+    /// chain**: a mark the chain reorganised away, a lagging node's sink, a mark
+    /// carried across a lock. Mark landings happen at most once per mark, so at
+    /// most two per arm; a sink re-seed can land behind once per failure streak,
+    /// and a spent budget with no mark read once per arm (it sets `present`)
+    /// (`consensus-auditor`, rounds 7 to 9). A matcher that must see every
+    /// accepted transaction (P3.4's watcher) marks its state stale here and
+    /// re-derives (a watcher that cannot hear a skip is a BLOCK at P3.4); and
+    /// since the next page's `removed` list may name blocks it never folded
+    /// (the node returns the start and its off-chain ancestors), un-accepting a
+    /// block it never folded must be a no-op. Never called for a first seed,
+    /// nor for a spent budget past the arm's mark: neither skips anything. The
+    /// transport matcher has nothing to do; the skip reaches the log (the hub's
+    /// gap notice is worked out once per start, so a mid-session skip stops
+    /// there). An `arm` onto a different cursor file jumps without it: that is
+    /// a new store, not a skip in this one.
     fn on_gap(&self, _from: Hash, _to: Hash) {}
 }
 
@@ -294,6 +306,12 @@ pub(crate) trait ChainSource: Send + Sync {
         from: Hash,
     ) -> std::result::Result<GetVirtualChainFromBlockV2Response, PageError>;
     async fn sink(&self) -> std::result::Result<Hash, String>;
+    /// The arm's mark ([`Walk::mark_arm`]): the node's sink as an arm's walk
+    /// begins. Production reads it exactly as [`Self::sink`]; a source with
+    /// none (the default) leaves every re-seed at the sink of the moment.
+    async fn mark(&self) -> std::result::Result<Hash, String> {
+        Err("no mark".to_string())
+    }
 }
 
 #[async_trait]
@@ -325,6 +343,10 @@ impl ChainSource for LinkSource {
             Ok(Err(e)) => Err(e.to_string()),
             Err(_) => Err(format!("no answer in {} s", WALK_PAGE_TIMEOUT.as_secs())),
         }
+    }
+
+    async fn mark(&self) -> std::result::Result<Hash, String> {
+        self.sink().await
     }
 }
 
@@ -400,6 +422,60 @@ struct State {
     failed_runs: u32,
     /// No run starts before this after a failed one ([`FAILED_RUN_BACKOFF`]).
     retry_after: Option<tokio::time::Instant>,
+    /// Landing points for a re-seed that skips ([`Walk::mark_arm`]): the node's
+    /// sink as an arm's walk began, with the unix ms it was read. `carried` is
+    /// the oldest one an earlier arm on this cursor file never reached (a lock
+    /// came first); `own` is this arm's. Each is used once, and dropped when a
+    /// folded page carries it or the walk reaches the tip.
+    carried: Option<(Hash, u64)>,
+    own: Option<(Hash, u64)>,
+    /// This arm's own mark was read, or its window closed (the arm's first
+    /// page answered): asked for at each run's start until then, and once more
+    /// with that page.
+    mark_read: bool,
+    /// The walk is past this arm's own mark (a folded page carried it, a
+    /// re-seed landed on it, or the walk reached the tip): all that is left
+    /// was accepted while the app could receive, and a spent budget skips none
+    /// of it.
+    present: bool,
+}
+
+/// Where a re-seed that skips went ([`Walk::landing`]).
+enum Landing {
+    /// Landed on an arm's mark: the cursor it left and that cursor's time,
+    /// the mark and the unix ms it was read. Written under the same lock that
+    /// took the mark, so a hold cannot fall between the two (both auditors,
+    /// round 7).
+    Landed {
+        was: Hash,
+        was_time: Option<u64>,
+        mark: Hash,
+        at: u64,
+    },
+    /// Past this arm's own mark: nothing left to skip.
+    Present,
+    /// No mark: the node's sink, as before the marks.
+    Sink,
+}
+
+/// What a skip did, for the run that asked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Skipped {
+    /// Landed on a mark: the node still owes the chain from it.
+    Landed,
+    /// Past this arm's mark with the budget spent: nothing skipped.
+    Stayed,
+    /// Re-seeded at the sink, or nothing to do (the arm changed).
+    Other,
+}
+
+/// Why the walk cannot go on from its cursor as it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cause {
+    /// The catch-up budget is spent.
+    Budget,
+    /// The node does not know the cursor, or could not serve its page.
+    Failure,
 }
 
 enum Step {
@@ -423,8 +499,8 @@ enum Fetched {
 pub(crate) struct Walk {
     state: Mutex<State>,
     poke: Notify,
-    /// The epoch of the last run that ended, whatever it found: the V2b fill
-    /// waits on it so node truth folds first (D-074's order).
+    /// The epoch whose walk has settled ([`Self::settle`]): the V2b fill waits
+    /// on it so node truth folds first (D-074's order).
     settled: watch::Sender<u64>,
     matchers: Vec<Arc<dyn WalkMatcher>>,
     /// [`mono_ms`] at the last page the node answered (0 = none): the witness.
@@ -453,6 +529,10 @@ impl Walk {
                 epoch: 0,
                 failed_runs: 0,
                 retry_after: None,
+                carried: None,
+                own: None,
+                mark_read: false,
+                present: false,
             }),
             poke: Notify::new(),
             settled,
@@ -474,7 +554,8 @@ impl Walk {
     pub(crate) fn arm(&self, path: PathBuf) -> u64 {
         let (epoch, cursor) = {
             let mut s = self.state();
-            if s.path.as_ref() != Some(&path) || s.cursor.is_none() {
+            let same_store = s.path.as_ref() == Some(&path);
+            if !same_store || s.cursor.is_none() {
                 s.cursor = read_cursor(&path);
                 s.cursor_time_ms = None;
                 s.path = Some(path);
@@ -483,6 +564,18 @@ impl Walk {
             s.epoch += 1;
             s.failed_runs = 0;
             s.retry_after = None;
+            // A lock that came before this store's last arm reached its mark
+            // leaves that mark owed: the next arm lands there first, so what was
+            // accepted while it walked is walked (`wallet-security-auditor`,
+            // round 6). The older of the two is kept; another store carries none.
+            s.carried = if same_store {
+                s.carried.or(s.own)
+            } else {
+                None
+            };
+            s.own = None;
+            s.mark_read = false;
+            s.present = false;
             (s.epoch, s.cursor)
         };
         self.running_since_mono_ms
@@ -540,8 +633,9 @@ impl Walk {
         self.state().cursor
     }
 
-    /// Wait until a run begun under `epoch` (or a later one) has ended, for at
-    /// most `within`. `false` on the timeout.
+    /// Wait until the walk under `epoch` (or a later arm) has settled, for at
+    /// most `within`; a budget that lands on a mark walks on unsettled
+    /// ([`Self::settle`]). `false` on the timeout.
     pub(crate) async fn settled(&self, epoch: u64, within: Duration) -> bool {
         let mut rx = self.settled.subscribe();
         tokio::time::timeout(within, rx.wait_for(|done| *done >= epoch))
@@ -576,6 +670,7 @@ impl Walk {
             self.settle(epoch);
             return;
         }
+        self.mark_arm(source, epoch).await;
         // A re-seed the third failure owed but could not make: paid now,
         // before the page that has already failed three times is asked for
         // again — asking would kill the next socket the same way.
@@ -584,7 +679,7 @@ impl Walk {
                 "the node could not serve the page in {MAX_FAILED_RUNS} runs (the re-seed was \
                  owed: no sink could be read when the last one failed)"
             );
-            self.reseed(source, epoch, Some(&why)).await;
+            self.skip(source, epoch, &why, Cause::Failure).await;
             self.settle(epoch);
             return;
         }
@@ -605,7 +700,7 @@ impl Walk {
                         "the node does not know cursor {from} ({})",
                         link::sanitize_node_text(&error)
                     );
-                    self.reseed(source, epoch, Some(&why)).await;
+                    self.skip(source, epoch, &why, Cause::Failure).await;
                     break;
                 }
                 Fetched::TimedOut => {
@@ -626,6 +721,10 @@ impl Walk {
                 // Nothing bound: no pause, no count — the next publish pokes.
                 Fetched::NoSocket | Fetched::Stopped => break,
             };
+            // A mark refused because no socket was bound yet (a warm resume
+            // arms before the re-race binds) is asked for once more, now that
+            // a page has proved the socket (`consensus-auditor`, round 6).
+            self.mark_arm(source, epoch).await;
             let page = WalkPage::new(from, response);
             let verdict = {
                 let _fold = self.fold_gate.lock().await;
@@ -635,7 +734,7 @@ impl Walk {
                 if !self.still_at(epoch, from) {
                     break;
                 }
-                self.note_progress();
+                self.note_progress(epoch, from);
                 self.fold(&page).await
             };
             if verdict == Verdict::Held {
@@ -643,9 +742,8 @@ impl Walk {
                 break;
             }
             let long = page.added_len() >= WALK_TIP_PAGE_THRESHOLD;
-            if let Some((last, time_ms)) = page.last() {
-                self.commit(from, last, time_ms, long || pages > 0);
-            }
+            let at_tip = !long && page.aligned == page.added_len();
+            self.commit(epoch, &page, long || pages > 0, at_tip);
             if page.aligned < page.added_len() {
                 log::warn!(
                     "walk: the page from {from} lines up for {} of {} chain blocks — folded that far",
@@ -662,14 +760,28 @@ impl Walk {
                 let why = format!(
                     "the catch-up budget ({MAX_WALK_PAGES} pages, about an hour of chain) is spent"
                 );
-                self.reseed(source, epoch, Some(&why)).await;
+                match self.skip(source, epoch, &why, Cause::Budget).await {
+                    // The node still owes the chain from the mark: the next run
+                    // walks on at once, and this arm is not settled until a run
+                    // ends at the tip, so the V2b fill waits for node truth
+                    // (D-074's order; both auditors, round 7).
+                    Skipped::Landed => {
+                        self.poke();
+                        return;
+                    }
+                    Skipped::Stayed => self.poke(),
+                    Skipped::Other => {}
+                }
                 break;
             }
         }
         self.settle(epoch);
     }
 
-    /// A run begun under `epoch` has ended, whatever it found.
+    /// A run begun under `epoch` has ended: at the tip, on a failure, at the
+    /// sink, or with a budget spent past the arm's mark. A budget that lands on
+    /// a mark does not settle: the node still owes the chain from it, and the
+    /// next run walks on at once (D-074's order; both auditors, round 7).
     fn settle(&self, epoch: u64) {
         self.settled.send_if_modified(|done| {
             if *done < epoch {
@@ -682,7 +794,8 @@ impl Walk {
     }
 
     /// A run from `from` failed: keep the cursor, pause the next run, and after
-    /// [`MAX_FAILED_RUNS`] re-seed at the sink. The sink often cannot be read
+    /// [`MAX_FAILED_RUNS`] skip ([`Self::skip`]: an arm's mark ahead, else the
+    /// sink). The sink often cannot be read
     /// at that moment (the page's socket has just died and nothing is bound
     /// yet), so an unmade re-seed stays owed and the next run pays it before
     /// the page is asked for again (`consensus-auditor`, round 3).
@@ -709,7 +822,7 @@ impl Walk {
         if failed >= MAX_FAILED_RUNS {
             let why =
                 format!("the node could not serve the page from {from} in {failed} runs ({kind})");
-            self.reseed(source, epoch, Some(&why)).await;
+            self.skip(source, epoch, &why, Cause::Failure).await;
         }
     }
 
@@ -787,16 +900,46 @@ impl Walk {
         Verdict::Folded
     }
 
-    /// Move the committed cursor from `from` to `to`, unless something else
-    /// moved it meanwhile. Written at once when `force` or when the walk is no
-    /// longer running (a hold already flushed the older value), else throttled.
-    fn commit(&self, from: Hash, to: Hash, time_ms: Option<u64>, force: bool) {
+    /// Move the committed cursor from the page's start to its last chain
+    /// block, unless something else moved it meanwhile (an empty page at the
+    /// tip moves nothing). **A mark the page carries is passed with it, and at
+    /// the tip every mark, whatever the arm**: a fold that finishes
+    /// after a hold still commits, and a mark it passed must never be carried
+    /// to the next arm and landed on behind the cursor (both auditors, round
+    /// 7). This arm's own mark passes the older one too and, under this arm,
+    /// makes the rest present. Written at once when `force` or when the walk is
+    /// no longer running (a hold already flushed the older value), else
+    /// throttled.
+    fn commit(&self, epoch: u64, page: &WalkPage, force: bool, at_tip: bool) {
         let mut s = self.state();
-        if s.cursor != Some(from) {
+        if s.cursor != Some(page.from) {
             return;
         }
-        s.cursor = Some(to);
-        s.cursor_time_ms = time_ms;
+        let moved = if let Some((to, time_ms)) = page.last() {
+            s.cursor = Some(to);
+            s.cursor_time_ms = time_ms;
+            true
+        } else {
+            false
+        };
+        let carries = |mark: Option<(Hash, u64)>| {
+            mark.is_some_and(|(mark, _)| page.blocks().any(|(block, _)| block == mark))
+        };
+        // At the tip every mark is behind the cursor, one no page can carry
+        // included (reorganised away, or read at the cursor): the same rule,
+        // under the same lock, whatever the arm (both auditors, round 8).
+        if at_tip || carries(s.own) {
+            s.own = None;
+            s.carried = None;
+            if s.epoch == epoch {
+                s.present = true;
+            }
+        } else if carries(s.carried) {
+            s.carried = None;
+        }
+        if !moved {
+            return;
+        }
         let now = now_unix_secs();
         if force
             || s.mode != Mode::Running
@@ -826,9 +969,152 @@ impl Walk {
         );
     }
 
+    /// **The arm's mark**: the node's sink as this arm's walk begins, the
+    /// landing point for a re-seed that skips, so a skip is the part of the gap
+    /// before the app could receive and not what was accepted after. Read at
+    /// the start of each run of the arm until its first page answers (only
+    /// when there is a cursor to replay from: a first seed skips nothing), and
+    /// once more with that page if every read so far was refused (a warm
+    /// resume arms before the socket binds, `consensus-auditor`, round 6);
+    /// never after, so a node that answers pages and refuses its sink cannot
+    /// make it a read per chain move on the funds lane's socket. Before the
+    /// first page the reads ride the failed runs' pause. **Found by LINK-Q3's
+    /// parity window** (2026-09-29): the dev install, closed about eleven
+    /// hours, walked its oldest hour, and a message accepted during that
+    /// catch-up was on the stream and never on the walk: the spent budget had
+    /// re-seeded at the sink as it stood two minutes later. The old block scan
+    /// never had this hole (its stream ran beside its catch-up).
+    ///
+    /// **What is still skipped** (both auditors, rounds 6 and 7), each named
+    /// in the log when it happens:
+    /// - the middle arm's window of a catch-up interrupted by two locks (two
+    ///   landing points are kept, the oldest and the newest);
+    /// - a carried mark when the process dies between the lock and the next
+    ///   arm (marks live in memory; persisting one would carry a stale mark
+    ///   into a file);
+    /// - the present stretch beyond one budget when a lock falls after this
+    ///   arm's mark was passed but before the tip (a long outage while armed);
+    /// - the seconds between an unlock and the socket binding when the mark is
+    ///   read with the first page, which count as absence;
+    /// - whatever a sink re-seed passes when no mark could be read.
+    async fn mark_arm(&self, source: &dyn ChainSource, epoch: u64) {
+        {
+            let s = self.state();
+            if s.mode != Mode::Running || s.epoch != epoch || s.cursor.is_none() || s.mark_read {
+                return;
+            }
+        }
+        if let Ok(mark) = source.mark().await {
+            let mut s = self.state();
+            if s.mode == Mode::Running && s.epoch == epoch && !s.mark_read {
+                s.own = Some((mark, now_unix_ms()));
+                s.mark_read = true;
+            }
+        }
+    }
+
+    /// Where a skip goes: the oldest unreached mark (the one a lock left, then
+    /// this arm's own), taken once; a mark at the cursor is reached, not a
+    /// place to land. A landing is written here, under the lock that took the
+    /// mark. After a failed run the pause stands: a timed-out reply may still
+    /// be streaming on the one socket, and no sink read comes first any more to
+    /// pace the next page (`consensus-auditor`, round 6). `None` when the arm
+    /// changed under the run.
+    fn landing(&self, epoch: u64, cause: Cause) -> Option<Landing> {
+        let mut s = self.state();
+        if s.mode != Mode::Running || s.epoch != epoch {
+            return None;
+        }
+        let Some(cursor) = s.cursor else {
+            return Some(Landing::Sink);
+        };
+        let mut next = s.carried.take().filter(|(mark, _)| *mark != cursor);
+        if next.is_none() {
+            if let Some(own) = s.own.take() {
+                s.present = true;
+                next = Some(own).filter(|(mark, _)| *mark != cursor);
+            }
+        }
+        let Some((mark, at)) = next else {
+            return Some(if s.present {
+                Landing::Present
+            } else {
+                Landing::Sink
+            });
+        };
+        let was_time = s.cursor_time_ms;
+        s.cursor = Some(mark);
+        s.cursor_time_ms = None;
+        s.failed_runs = 0;
+        if cause == Cause::Budget {
+            s.retry_after = None;
+        }
+        Self::flush(&mut s);
+        Some(Landing::Landed {
+            was: cursor,
+            was_time,
+            mark,
+            at,
+        })
+    }
+
+    /// The walk cannot go on from its cursor as it is: a spent budget, a
+    /// cursor the node does not know, or a page it could not serve. It lands on
+    /// an arm's mark when one is ahead; past this arm's own mark a spent budget
+    /// skips nothing, since all that is left was accepted while the app could
+    /// receive (the next run walks on, at the bytes a live walk would have
+    /// spent); otherwise it re-seeds at the sink and names the gap.
+    async fn skip(&self, source: &dyn ChainSource, epoch: u64, why: &str, cause: Cause) -> Skipped {
+        match self.landing(epoch, cause) {
+            None => Skipped::Other,
+            Some(Landing::Landed {
+                was,
+                was_time,
+                mark,
+                at,
+            }) => {
+                for matcher in &self.matchers {
+                    matcher.on_gap(was, mark);
+                }
+                // Wording only, never a decision: the device clock against a
+                // block's time (`consensus-auditor`, round 8).
+                match was_time {
+                    Some(t) if t > at => log::warn!(
+                        "walk: re-walking from an arm's mark {mark} — {why}; the cursor {was} was \
+                         already past it (a mark the chain reorganised away, or a lagging node), \
+                         so this skips nothing"
+                    ),
+                    _ => {
+                        let span = match was_time {
+                            Some(t) => format!("{} min", at.saturating_sub(t) / 60_000),
+                            None => "its length unknown to this session".to_string(),
+                        };
+                        log::warn!(
+                            "walk: re-seeded at an arm's mark {mark} — {why}; messages accepted \
+                             between {was} and that arm ({span}) are not replayed from this node, \
+                             and everything accepted since is walked"
+                        );
+                    }
+                }
+                Skipped::Landed
+            }
+            Some(Landing::Present) if cause == Cause::Budget => {
+                log::info!(
+                    "walk: {why} past the arm's mark — nothing is skipped; the next run walks on"
+                );
+                Skipped::Stayed
+            }
+            Some(_) => {
+                self.reseed(source, epoch, Some(why)).await;
+                Skipped::Other
+            }
+        }
+    }
+
     /// Put the cursor at the node's sink. With no cursor this is the first
-    /// run (nothing to replay); otherwise `why` says what is being skipped and
-    /// the log names the gap, as the old catch-up did.
+    /// run (nothing to replay, and all that follows is live); otherwise `why`
+    /// says what is being skipped and the log names the gap, as the old
+    /// catch-up did. Every mark is behind the sink, so none is kept.
     async fn reseed(&self, source: &dyn ChainSource, epoch: u64, why: Option<&str>) {
         let sink = match source.sink().await {
             Ok(sink) => sink,
@@ -862,6 +1148,10 @@ impl Walk {
             s.cursor_time_ms = None;
             s.failed_runs = 0;
             s.retry_after = None;
+            s.carried = None;
+            s.own = None;
+            s.mark_read = true;
+            s.present = true;
             Self::flush(&mut s);
             was
         };
@@ -889,14 +1179,25 @@ impl Walk {
         }
     }
 
-    /// A page answered: the witness's stretch and the failure streak end.
-    fn note_progress(&self) {
+    /// A page answered from `from` under `epoch`: the witness's stretch ends,
+    /// and, still under that arm at that cursor, the failure streak ends and
+    /// the mark's read window closes. The arm check keeps a hold and an arm
+    /// that fell between the gate's check and here from handing the new arm a
+    /// closed window (both auditors, round 8).
+    fn note_progress(&self, epoch: u64, from: Hash) {
         self.last_progress_mono_ms
             .store(mono_ms(), Ordering::Relaxed);
         self.quiet_warned.store(false, Ordering::Relaxed);
         let mut s = self.state();
+        if s.epoch != epoch || s.cursor != Some(from) {
+            return;
+        }
         s.failed_runs = 0;
         s.retry_after = None;
+        // The mark is not asked for again under this arm: a node that answers
+        // pages and refuses its sink would otherwise be asked on every chain
+        // move (the pacing the sink read in `reseed` has, for the same spin).
+        s.mark_read = true;
     }
 
     /// A socket was published: the witness's stretch starts clean. The
@@ -1196,6 +1497,10 @@ pub(crate) mod tests {
             >,
         >,
         sink: Mutex<Option<Hash>>,
+        /// The sink as an arm begins ([`ChainSource::mark`]); none by default,
+        /// so every older test re-seeds at `sink` exactly as before.
+        mark: Mutex<Option<Hash>>,
+        mark_calls: AtomicU64,
         calls: Mutex<Vec<Hash>>,
     }
 
@@ -1245,6 +1550,13 @@ pub(crate) mod tests {
                 .lock()
                 .unwrap()
                 .ok_or_else(|| "no sink".to_string())
+        }
+        async fn mark(&self) -> std::result::Result<Hash, String> {
+            self.mark_calls.fetch_add(1, Ordering::SeqCst);
+            self.mark
+                .lock()
+                .unwrap()
+                .ok_or_else(|| "no mark".to_string())
         }
     }
 
@@ -1635,6 +1947,812 @@ pub(crate) mod tests {
         let gaps = recorder.gaps.lock().unwrap().clone();
         assert_eq!(gaps.len(), 1, "the skip is told to every matcher");
         assert_eq!(gaps[0].1, h(250));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Queue `MAX_WALK_PAGES + 2` long pages chained from `from` (page `n`
+    /// opens with chain block `h(first + n)`), so a run from it spends its
+    /// budget; returns each page's last chain block.
+    fn queue_long_gap(chain: &FakeChain, from: Hash, first: u8) -> Vec<Hash> {
+        let mut from = from;
+        let mut lasts = Vec::new();
+        for n in 0..MAX_WALK_PAGES + 2 {
+            let page = long_page(first + n as u8);
+            let last = *page.added_chain_block_hashes.last().unwrap();
+            chain.queue(from, Ok(page));
+            lasts.push(last);
+            from = last;
+        }
+        lasts
+    }
+
+    /// The page where a spent budget leaves the cursor.
+    const BUDGET_END: usize = MAX_WALK_PAGES as usize - 1;
+
+    /// **A spent budget lands on the arm's mark, never past what came after
+    /// the arm** (LINK-Q3's parity window, 2026-09-29). The dev install, closed
+    /// about eleven hours, walked its oldest hour; a message accepted during
+    /// that catch-up was on the stream and never on the walk, because the
+    /// budget re-seeded at the sink as it stood two minutes later. The mark is
+    /// the sink read as the arm began: the walk lands there and walks on.
+    #[tokio::test]
+    async fn a_spent_budget_reseeds_at_the_arms_mark_and_walks_what_came_after() {
+        let dir = test_dir("mark");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("scan.cursor");
+        write_cursor(&path, &h(1));
+        let chain = FakeChain::default();
+        *chain.mark.lock().unwrap() = Some(h(200)); // the sink as the arm began
+        *chain.sink.lock().unwrap() = Some(h(250)); // the sink by the budget's end
+        let lasts = queue_long_gap(&chain, h(1), 20);
+        chain.queue(h(200), Ok(response(Vec::new(), blocks(201, 2))));
+        let recorder = Arc::new(Recorder::default());
+        let walk = walk_with(&recorder);
+        walk.arm(path.clone());
+        walk.run_to_tip(&chain).await;
+        assert_eq!(
+            walk.cursor(),
+            Some(h(200)),
+            "the budget lands on the arm's mark"
+        );
+        assert_eq!(read_cursor(&path), Some(h(200)));
+        assert_eq!(
+            recorder.gaps.lock().unwrap().clone(),
+            vec![(lasts[BUDGET_END], h(200))]
+        );
+        walk.run_to_tip(&chain).await;
+        assert_eq!(
+            walk.cursor(),
+            Some(h(202)),
+            "what came after the arm is walked"
+        );
+        assert_eq!(
+            recorder.seen.lock().unwrap().last().unwrap().clone(),
+            (h(200), vec![], vec![h(201), h(202)])
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A cursor the node does not know lands on the mark too**, and the walk
+    /// goes on from it.
+    #[tokio::test]
+    async fn an_unknown_cursor_reseeds_at_the_arms_mark() {
+        let dir = test_dir("mark-unknown");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_cursor(&dir.join("scan.cursor"), &h(1));
+        let chain = FakeChain::default();
+        *chain.mark.lock().unwrap() = Some(h(40));
+        *chain.sink.lock().unwrap() = Some(h(90));
+        chain.queue(
+            h(1),
+            Err(format!(
+                "RPC Server (remote error) -> {}",
+                ConsensusError::HeaderNotFound(h(1))
+            )),
+        );
+        chain.queue(h(40), Ok(response(Vec::new(), blocks(41, 2))));
+        let recorder = Arc::new(Recorder::default());
+        let walk = walk_with(&recorder);
+        walk.arm(dir.join("scan.cursor"));
+        walk.run_to_tip(&chain).await;
+        assert_eq!(walk.cursor(), Some(h(40)));
+        assert_eq!(recorder.gaps.lock().unwrap().clone(), vec![(h(1), h(40))]);
+        walk.run_to_tip(&chain).await;
+        assert_eq!(walk.cursor(), Some(h(42)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A first page that never answers still lands on the mark read as the
+    /// arm began** (the read at the run's start: without it no page answers,
+    /// nothing is read, and the sink skips the minutes since the arm), and
+    /// **the failed runs' pause stands after landing**: a timed-out reply may
+    /// still be streaming, and no sink read comes first to pace the next page.
+    #[tokio::test(start_paused = true)]
+    async fn a_page_that_never_answers_still_lands_on_the_mark_and_keeps_the_pause() {
+        let dir = test_dir("mark-never");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_cursor(&dir.join("scan.cursor"), &h(1));
+        let chain = FakeChain::default();
+        *chain.mark.lock().unwrap() = Some(h(40));
+        *chain.sink.lock().unwrap() = Some(h(88));
+        for _ in 0..MAX_FAILED_RUNS {
+            chain.queue(h(1), Err(LOST.to_string()));
+        }
+        chain.queue(h(40), Ok(response(Vec::new(), blocks(41, 2))));
+        let recorder = Arc::new(Recorder::default());
+        let walk = walk_with(&recorder);
+        walk.arm(dir.join("scan.cursor"));
+        for run in 1..=MAX_FAILED_RUNS {
+            walk.run_to_tip(&chain).await;
+            if run < MAX_FAILED_RUNS {
+                tokio::time::sleep(FAILED_RUN_BACKOFF_CAP).await;
+            }
+        }
+        assert_eq!(
+            walk.cursor(),
+            Some(h(40)),
+            "the third failure lands on the mark"
+        );
+        assert_eq!(recorder.gaps.lock().unwrap().clone(), vec![(h(1), h(40))]);
+        walk.run_to_tip(&chain).await; // inside the third failure's pause
+        assert_eq!(
+            chain.calls().len(),
+            MAX_FAILED_RUNS as usize,
+            "the pause stands"
+        );
+        tokio::time::sleep(FAILED_RUN_BACKOFF_CAP).await;
+        walk.run_to_tip(&chain).await;
+        assert_eq!(walk.cursor(), Some(h(42)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A scripted node whose sink cannot be read until a page has answered:
+    /// the socket binds while the arm's first run waits for it (a warm resume).
+    struct BindingChain {
+        chain: FakeChain,
+        answered: AtomicBool,
+    }
+
+    #[async_trait]
+    impl ChainSource for BindingChain {
+        async fn page(
+            &self,
+            from: Hash,
+        ) -> std::result::Result<GetVirtualChainFromBlockV2Response, PageError> {
+            let page = self.chain.page(from).await;
+            if page.is_ok() {
+                self.answered.store(true, Ordering::SeqCst);
+            }
+            page
+        }
+        async fn sink(&self) -> std::result::Result<Hash, String> {
+            self.chain.sink().await
+        }
+        async fn mark(&self) -> std::result::Result<Hash, String> {
+            if self.answered.load(Ordering::SeqCst) {
+                Ok(h(200))
+            } else {
+                Err("link: no bound socket".to_string())
+            }
+        }
+    }
+
+    /// **A mark refused before the socket binds is read with the first page**
+    /// (`consensus-auditor`, round 6): the arm's run starts before the re-race
+    /// binds, the read is refused, and the page answers moments later.
+    #[tokio::test(start_paused = true)]
+    async fn a_mark_refused_before_the_socket_binds_is_read_with_the_first_page() {
+        let dir = test_dir("mark-bind");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_cursor(&dir.join("scan.cursor"), &h(1));
+        let chain = BindingChain {
+            chain: FakeChain::default(),
+            answered: AtomicBool::new(false),
+        };
+        *chain.chain.sink.lock().unwrap() = Some(h(250));
+        chain.chain.queue(h(1), Err(NOSOCKET.to_string()));
+        queue_long_gap(&chain.chain, h(1), 20);
+        let recorder = Arc::new(Recorder::default());
+        let walk = walk_with(&recorder);
+        walk.arm(dir.join("scan.cursor"));
+        walk.run_to_tip(&chain).await;
+        assert_eq!(
+            walk.cursor(),
+            Some(h(200)),
+            "the mark read with the first page"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A mark passed mid-catch-up is reached, and the budget then skips
+    /// nothing** (both auditors, round 6): landing on a passed mark would
+    /// rewind the walk, and all that is left was accepted while the app could
+    /// receive. The next run walks on.
+    #[tokio::test]
+    async fn a_mark_passed_mid_catch_up_is_reached_and_the_budget_skips_nothing() {
+        let dir = test_dir("mark-mid");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_cursor(&dir.join("scan.cursor"), &h(1));
+        let chain = FakeChain::default();
+        *chain.mark.lock().unwrap() = Some(h(20 + BUDGET_END as u8 - 1)); // in the page before the last
+        *chain.sink.lock().unwrap() = Some(h(250));
+        let lasts = queue_long_gap(&chain, h(1), 20);
+        let recorder = Arc::new(Recorder::default());
+        let walk = walk_with(&recorder);
+        walk.arm(dir.join("scan.cursor"));
+        walk.run_to_tip(&chain).await;
+        assert_eq!(
+            walk.cursor(),
+            Some(lasts[BUDGET_END]),
+            "nothing skipped, no rewind"
+        );
+        assert!(recorder.gaps.lock().unwrap().is_empty());
+        walk.run_to_tip(&chain).await;
+        assert_eq!(
+            walk.cursor(),
+            Some(*lasts.last().unwrap()),
+            "the next run walks on"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Past the mark, a page the node cannot serve re-seeds at the sink**,
+    /// never back at the mark (`wallet-security-auditor`, round 6: that would
+    /// re-ask pages beside the one that failed).
+    #[tokio::test(start_paused = true)]
+    async fn past_the_mark_a_failed_page_reseeds_at_the_sink() {
+        let dir = test_dir("mark-past-fail");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_cursor(&dir.join("scan.cursor"), &h(1));
+        let chain = FakeChain::default();
+        *chain.mark.lock().unwrap() = Some(h(20)); // in the first page
+        *chain.sink.lock().unwrap() = Some(h(250));
+        let first = long_page(20);
+        let past = *first.added_chain_block_hashes.last().unwrap();
+        chain.queue(h(1), Ok(first));
+        for _ in 0..MAX_FAILED_RUNS {
+            chain.queue(past, Err(LOST.to_string()));
+        }
+        let recorder = Arc::new(Recorder::default());
+        let walk = walk_with(&recorder);
+        walk.arm(dir.join("scan.cursor"));
+        for run in 1..=MAX_FAILED_RUNS {
+            walk.run_to_tip(&chain).await;
+            if run < MAX_FAILED_RUNS {
+                tokio::time::sleep(FAILED_RUN_BACKOFF_CAP).await;
+            }
+        }
+        assert_eq!(walk.cursor(), Some(h(250)));
+        assert_eq!(recorder.gaps.lock().unwrap().clone(), vec![(past, h(250))]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Past the tip, a spent budget skips nothing**: the walk reached the
+    /// tip, so every mark is behind it (one the chain reorganised away too,
+    /// which no page ever carries), and a long stretch later (a socket down
+    /// for an hour while the app stayed open) is walked, not skipped.
+    #[tokio::test]
+    async fn past_the_tip_a_spent_budget_skips_nothing() {
+        let dir = test_dir("mark-tip");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_cursor(&dir.join("scan.cursor"), &h(1));
+        let chain = FakeChain::default();
+        *chain.mark.lock().unwrap() = Some(h(199)); // reorganised away: in no page
+        *chain.sink.lock().unwrap() = Some(h(250));
+        chain.queue(h(1), Ok(response(Vec::new(), blocks(2, 9)))); // to h(10): the tip
+        let lasts = queue_long_gap(&chain, h(10), 20);
+        let recorder = Arc::new(Recorder::default());
+        let walk = walk_with(&recorder);
+        walk.arm(dir.join("scan.cursor"));
+        walk.run_to_tip(&chain).await;
+        assert_eq!(walk.cursor(), Some(h(10)));
+        assert!(
+            walk.take_poke(Duration::from_millis(1)).await,
+            "the arm's own poke"
+        );
+        walk.run_to_tip(&chain).await; // an hour of chain later
+        assert_eq!(
+            walk.cursor(),
+            Some(lasts[BUDGET_END]),
+            "nothing skipped, no rewind"
+        );
+        assert!(recorder.gaps.lock().unwrap().is_empty());
+        assert!(
+            walk.take_poke(Duration::from_millis(1)).await,
+            "the next run walks on at once"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Landing on the arm's own mark makes the rest present**: the mark is
+    /// used once, and a second spent budget under the same arm walks on.
+    #[tokio::test]
+    async fn landing_on_the_arms_mark_makes_the_rest_present() {
+        let dir = test_dir("mark-once");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_cursor(&dir.join("scan.cursor"), &h(1));
+        let chain = FakeChain::default();
+        *chain.mark.lock().unwrap() = Some(h(200));
+        *chain.sink.lock().unwrap() = Some(h(250));
+        queue_long_gap(&chain, h(1), 20);
+        let lasts = queue_long_gap(&chain, h(200), 60);
+        let recorder = Arc::new(Recorder::default());
+        let walk = walk_with(&recorder);
+        walk.arm(dir.join("scan.cursor"));
+        walk.run_to_tip(&chain).await;
+        assert_eq!(walk.cursor(), Some(h(200)));
+        walk.run_to_tip(&chain).await;
+        assert_eq!(
+            walk.cursor(),
+            Some(lasts[BUDGET_END]),
+            "the second budget skips nothing"
+        );
+        assert_eq!(recorder.gaps.lock().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A mark that is the cursor itself is not a place to land**: the page
+    /// from the cursor failed three times and the arm's mark is that same
+    /// block, so the re-seed goes to the sink rather than asking again.
+    #[tokio::test(start_paused = true)]
+    async fn a_mark_at_the_cursor_is_not_used() {
+        let dir = test_dir("mark-cursor");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_cursor(&dir.join("scan.cursor"), &h(1));
+        let chain = FakeChain::default();
+        *chain.mark.lock().unwrap() = Some(h(1));
+        *chain.sink.lock().unwrap() = Some(h(88));
+        for _ in 0..MAX_FAILED_RUNS {
+            chain.queue(h(1), Err(LOST.to_string()));
+        }
+        let recorder = Arc::new(Recorder::default());
+        let walk = walk_with(&recorder);
+        walk.arm(dir.join("scan.cursor"));
+        for _ in 0..MAX_FAILED_RUNS {
+            walk.run_to_tip(&chain).await;
+            tokio::time::sleep(FAILED_RUN_BACKOFF_CAP).await;
+        }
+        assert_eq!(walk.cursor(), Some(h(88)));
+        assert_eq!(recorder.gaps.lock().unwrap().clone(), vec![(h(1), h(88))]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A catch-up a lock interrupted lands first on the mark that lock left**
+    /// (`wallet-security-auditor`, round 6): with the lock grace at 0 every app
+    /// switch is a re-arm, and landing only on the new arm's mark would skip
+    /// what was accepted while the first arm walked. The new arm still reads
+    /// its own, the second landing point.
+    #[tokio::test]
+    async fn an_interrupted_catch_up_lands_first_on_the_mark_its_lock_left() {
+        let dir = test_dir("mark-carry");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("scan.cursor");
+        write_cursor(&path, &h(1));
+        let chain = FakeChain::default();
+        *chain.mark.lock().unwrap() = Some(h(40));
+        *chain.sink.lock().unwrap() = Some(h(250));
+        chain.queue(h(1), Ok(response(Vec::new(), blocks(2, 2)))); // held
+        let first = queue_long_gap(&chain, h(1), 20);
+        let second = queue_long_gap(&chain, h(40), 100);
+        chain.queue(h(60), Ok(response(Vec::new(), blocks(61, 2))));
+        let recorder = Arc::new(Recorder::default());
+        let walk = walk_with(&recorder);
+        recorder.hold.store(true, Ordering::SeqCst);
+        walk.arm(path.clone());
+        walk.run_to_tip(&chain).await; // reads h(40), then the vault locks
+        assert_eq!(walk.cursor(), Some(h(1)));
+        recorder.hold.store(false, Ordering::SeqCst);
+        *chain.mark.lock().unwrap() = Some(h(60));
+        walk.arm(path);
+        walk.run_to_tip(&chain).await;
+        assert_eq!(walk.cursor(), Some(h(40)), "first the mark the lock left");
+        walk.run_to_tip(&chain).await;
+        assert_eq!(walk.cursor(), Some(h(60)), "then this arm's own");
+        walk.run_to_tip(&chain).await;
+        assert_eq!(walk.cursor(), Some(h(62)));
+        assert_eq!(
+            recorder.gaps.lock().unwrap().clone(),
+            vec![(first[BUDGET_END], h(40)), (second[BUDGET_END], h(60))]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Each arm starts away**: the last arm reached the tip, the vault
+    /// locked, and hours passed. The new arm could not read a mark, so its
+    /// spent budget re-seeds at the sink and names the absence, rather than
+    /// walking it as if the app had been open (the last arm's `present` must
+    /// not survive into this one).
+    #[tokio::test(start_paused = true)]
+    async fn each_arm_starts_away_again() {
+        let dir = test_dir("mark-away");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("scan.cursor");
+        write_cursor(&path, &h(1));
+        let chain = FakeChain::default();
+        *chain.mark.lock().unwrap() = Some(h(10));
+        *chain.sink.lock().unwrap() = Some(h(250));
+        chain.queue(h(1), Ok(response(Vec::new(), blocks(2, 9)))); // to h(10): the tip
+        let lasts = queue_long_gap(&chain, h(10), 20);
+        let recorder = Arc::new(Recorder::default());
+        let walk = walk_with(&recorder);
+        walk.arm(path.clone());
+        walk.run_to_tip(&chain).await;
+        assert_eq!(walk.cursor(), Some(h(10)));
+        walk.hold("test: locked for the night");
+        *chain.mark.lock().unwrap() = None; // the new arm cannot read one
+        walk.arm(path);
+        walk.run_to_tip(&chain).await;
+        assert_eq!(
+            walk.cursor(),
+            Some(h(250)),
+            "the absence is skipped, and named"
+        );
+        assert_eq!(
+            recorder.gaps.lock().unwrap().clone(),
+            vec![(lasts[BUDGET_END], h(250))]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A budget landing leaves the arm unsettled and walks on at once**
+    /// (D-074's order; both auditors, round 7): the node still owes the chain
+    /// from the mark, and the V2b fill waits for node truth, so the arm settles
+    /// only when a run ends at the tip.
+    #[tokio::test]
+    async fn a_budget_landing_leaves_the_arm_unsettled_and_walks_on() {
+        let dir = test_dir("mark-settle");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_cursor(&dir.join("scan.cursor"), &h(1));
+        let chain = FakeChain::default();
+        *chain.mark.lock().unwrap() = Some(h(200));
+        *chain.sink.lock().unwrap() = Some(h(250));
+        queue_long_gap(&chain, h(1), 20);
+        chain.queue(h(200), Ok(response(Vec::new(), blocks(201, 2))));
+        let recorder = Arc::new(Recorder::default());
+        let walk = walk_with(&recorder);
+        let epoch = walk.arm(dir.join("scan.cursor"));
+        assert!(
+            walk.take_poke(Duration::from_millis(1)).await,
+            "the arm's own poke"
+        );
+        walk.run_to_tip(&chain).await;
+        assert_eq!(walk.cursor(), Some(h(200)));
+        assert!(
+            !walk.settled(epoch, Duration::from_millis(1)).await,
+            "not settled at the mark"
+        );
+        assert!(
+            walk.take_poke(Duration::from_millis(1)).await,
+            "the next run walks on at once"
+        );
+        walk.run_to_tip(&chain).await;
+        assert_eq!(walk.cursor(), Some(h(202)));
+        assert!(
+            walk.settled(epoch, Duration::from_millis(1)).await,
+            "settled at the tip"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Arm with the vault as `held` says (the recorder answers `Held`).
+    fn arm_held(walk: &Walk, recorder: &Recorder, path: &Path, held: bool) {
+        recorder.hold.store(held, Ordering::SeqCst);
+        walk.arm(path.to_path_buf());
+    }
+
+    /// **A carried mark a page passes is dropped** (`wallet-security-auditor`,
+    /// round 7): the lock's mark is passed mid-catch-up, and the spent budget
+    /// lands on this arm's own mark, never back on the passed one.
+    #[tokio::test]
+    async fn a_carried_mark_a_page_passes_is_dropped() {
+        let dir = test_dir("mark-carried-pass");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("scan.cursor");
+        write_cursor(&path, &h(1));
+        let chain = FakeChain::default();
+        *chain.mark.lock().unwrap() = Some(h(25)); // in the second arm's sixth page
+        *chain.sink.lock().unwrap() = Some(h(250));
+        chain.queue(h(1), Ok(response(Vec::new(), blocks(2, 2)))); // held
+        let lasts = queue_long_gap(&chain, h(1), 20);
+        let recorder = Arc::new(Recorder::default());
+        let walk = walk_with(&recorder);
+        arm_held(&walk, &recorder, &path, true);
+        walk.run_to_tip(&chain).await;
+        *chain.mark.lock().unwrap() = Some(h(200));
+        arm_held(&walk, &recorder, &path, false);
+        walk.run_to_tip(&chain).await;
+        assert_eq!(
+            walk.cursor(),
+            Some(h(200)),
+            "the arm's own mark, not the passed one"
+        );
+        assert_eq!(
+            recorder.gaps.lock().unwrap().clone(),
+            vec![(lasts[BUDGET_END], h(200))]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Two locks keep the first arm's mark** (`wallet-security-auditor`,
+    /// round 7): of the two landing points, the oldest unreached one is carried.
+    #[tokio::test]
+    async fn two_locks_keep_the_first_arms_mark() {
+        let dir = test_dir("mark-two-locks");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("scan.cursor");
+        write_cursor(&path, &h(1));
+        let chain = FakeChain::default();
+        *chain.sink.lock().unwrap() = Some(h(250));
+        chain.queue(h(1), Ok(response(Vec::new(), blocks(2, 2)))); // held
+        chain.queue(h(1), Ok(response(Vec::new(), blocks(2, 2)))); // held again
+        queue_long_gap(&chain, h(1), 100);
+        let recorder = Arc::new(Recorder::default());
+        let walk = walk_with(&recorder);
+        for mark in [40, 50] {
+            *chain.mark.lock().unwrap() = Some(h(mark));
+            arm_held(&walk, &recorder, &path, true);
+            walk.run_to_tip(&chain).await;
+        }
+        *chain.mark.lock().unwrap() = Some(h(60));
+        arm_held(&walk, &recorder, &path, false);
+        walk.run_to_tip(&chain).await;
+        assert_eq!(
+            walk.cursor(),
+            Some(h(40)),
+            "the first arm's mark comes first"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Reaching the arm's own mark drops the carried one too**, even one the
+    /// chain reorganised away (no page ever carries it): past the own mark the
+    /// budget skips nothing, and never rewinds onto the older mark.
+    #[tokio::test]
+    async fn reaching_the_arms_mark_drops_a_carried_one_no_page_carries() {
+        let dir = test_dir("mark-carried-gone");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("scan.cursor");
+        write_cursor(&path, &h(1));
+        let chain = FakeChain::default();
+        *chain.mark.lock().unwrap() = Some(h(199)); // reorganised away: in no page
+        *chain.sink.lock().unwrap() = Some(h(250));
+        chain.queue(h(1), Ok(response(Vec::new(), blocks(2, 2)))); // held
+        let lasts = queue_long_gap(&chain, h(1), 20);
+        let recorder = Arc::new(Recorder::default());
+        let walk = walk_with(&recorder);
+        arm_held(&walk, &recorder, &path, true);
+        walk.run_to_tip(&chain).await;
+        *chain.mark.lock().unwrap() = Some(h(25)); // in the sixth page
+        arm_held(&walk, &recorder, &path, false);
+        walk.run_to_tip(&chain).await;
+        assert_eq!(
+            walk.cursor(),
+            Some(lasts[BUDGET_END]),
+            "nothing skipped, no rewind"
+        );
+        assert!(recorder.gaps.lock().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A matcher that locks the vault while it folds the page carrying `mark`,
+    /// and still answers `Folded` (the lock landed after the hub's last event,
+    /// or the page had none).
+    struct LocksOnMark {
+        walk: Mutex<Option<std::sync::Weak<Walk>>>,
+        mark: Hash,
+    }
+
+    impl WalkMatcher for LocksOnMark {
+        fn fold_page<'a>(&'a self, page: &'a WalkPage) -> VerdictFuture<'a> {
+            Box::pin(async move {
+                if page.blocks().any(|(block, _)| block == self.mark) {
+                    let walk = self.walk.lock().unwrap().clone();
+                    if let Some(walk) = walk.and_then(|w| w.upgrade()) {
+                        walk.hold("test: locked while the mark's page folds");
+                    }
+                }
+                Verdict::Folded
+            })
+        }
+    }
+
+    /// **A mark a fold passes is dropped even when a lock lands during that
+    /// fold** (`consensus-auditor`, round 7): the fold still commits, so the
+    /// mark is behind the cursor and must not be carried to the next arm and
+    /// landed on there.
+    #[tokio::test]
+    async fn a_mark_passed_by_a_fold_a_lock_interrupts_is_never_carried() {
+        let dir = test_dir("mark-race");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("scan.cursor");
+        write_cursor(&path, &h(1));
+        let chain = FakeChain::default();
+        *chain.mark.lock().unwrap() = Some(h(25)); // in the sixth page
+        *chain.sink.lock().unwrap() = Some(h(250));
+        let first = queue_long_gap(&chain, h(1), 20);
+        queue_long_gap(&chain, *first.last().unwrap(), 60);
+        let recorder = Arc::new(Recorder::default());
+        let locker = Arc::new(LocksOnMark {
+            walk: Mutex::new(None),
+            mark: h(25),
+        });
+        let walk = Walk::new(vec![
+            recorder.clone() as Arc<dyn WalkMatcher>,
+            locker.clone() as Arc<dyn WalkMatcher>,
+        ]);
+        *locker.walk.lock().unwrap() = Some(Arc::downgrade(&walk));
+        walk.arm(path.clone());
+        walk.run_to_tip(&chain).await;
+        assert_eq!(
+            walk.cursor(),
+            Some(first[5]),
+            "the fold that ended after the lock committed"
+        );
+        *chain.mark.lock().unwrap() = Some(h(200));
+        walk.arm(path);
+        walk.run_to_tip(&chain).await;
+        assert_eq!(
+            walk.cursor(),
+            Some(h(200)),
+            "never back onto the passed mark"
+        );
+        let tos: Vec<Hash> = recorder.gaps.lock().unwrap().iter().map(|g| g.1).collect();
+        assert_eq!(tos, vec![h(200)]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A tip a lock interrupts still drops every mark** (both auditors, round
+    /// 8): the lock lands inside the fold of the arm's tip page and the fold
+    /// still answers, so the commit moves the cursor to the tip; a mark no page
+    /// carries (reorganised away) is behind it all the same, and the next arm
+    /// must never land on it.
+    #[tokio::test]
+    async fn a_tip_a_lock_interrupts_still_drops_every_mark() {
+        let dir = test_dir("mark-tip-race");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("scan.cursor");
+        write_cursor(&path, &h(1));
+        let chain = FakeChain::default();
+        *chain.mark.lock().unwrap() = Some(h(199)); // reorganised away: in no page
+        *chain.sink.lock().unwrap() = Some(h(250));
+        chain.queue(h(1), Ok(response(Vec::new(), blocks(2, 2)))); // the tip, to h(3)
+        queue_long_gap(&chain, h(3), 20);
+        let recorder = Arc::new(Recorder::default());
+        let locker = Arc::new(LocksOnMark {
+            walk: Mutex::new(None),
+            mark: h(2),
+        });
+        let walk = Walk::new(vec![
+            recorder.clone() as Arc<dyn WalkMatcher>,
+            locker.clone() as Arc<dyn WalkMatcher>,
+        ]);
+        *locker.walk.lock().unwrap() = Some(Arc::downgrade(&walk));
+        walk.arm(path.clone());
+        walk.run_to_tip(&chain).await;
+        assert_eq!(
+            walk.cursor(),
+            Some(h(3)),
+            "the tip page committed after the lock"
+        );
+        *chain.mark.lock().unwrap() = Some(h(200));
+        walk.arm(path);
+        walk.run_to_tip(&chain).await;
+        assert_eq!(
+            walk.cursor(),
+            Some(h(200)),
+            "the arm's own mark, never h(199)"
+        );
+        let tos: Vec<Hash> = recorder.gaps.lock().unwrap().iter().map(|g| g.1).collect();
+        assert_eq!(tos, vec![h(200)]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A carried mark a fold passes is dropped even when a lock lands during
+    /// that fold** (`consensus-auditor`, round 8): the lock's mark is passed
+    /// by a page whose fold a second lock interrupts; the third arm lands on
+    /// the second arm's mark, never back on the passed one.
+    #[tokio::test]
+    async fn a_carried_mark_a_fold_a_lock_interrupts_passes_is_dropped() {
+        let dir = test_dir("mark-carried-race");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("scan.cursor");
+        write_cursor(&path, &h(1));
+        let chain = FakeChain::default();
+        *chain.mark.lock().unwrap() = Some(h(25)); // passed in the second arm's sixth page
+        *chain.sink.lock().unwrap() = Some(h(250));
+        chain.queue(h(1), Ok(response(Vec::new(), blocks(2, 2)))); // held
+        let first = queue_long_gap(&chain, h(1), 20);
+        queue_long_gap(&chain, *first.last().unwrap(), 60);
+        let recorder = Arc::new(Recorder::default());
+        let locker = Arc::new(LocksOnMark {
+            walk: Mutex::new(None),
+            mark: h(25),
+        });
+        let walk = Walk::new(vec![
+            recorder.clone() as Arc<dyn WalkMatcher>,
+            locker.clone() as Arc<dyn WalkMatcher>,
+        ]);
+        *locker.walk.lock().unwrap() = Some(Arc::downgrade(&walk));
+        recorder.hold.store(true, Ordering::SeqCst);
+        walk.arm(path.clone());
+        walk.run_to_tip(&chain).await; // reads h(25), then the vault locks
+        recorder.hold.store(false, Ordering::SeqCst);
+        *chain.mark.lock().unwrap() = Some(h(150)); // in no page
+        walk.arm(path.clone());
+        walk.run_to_tip(&chain).await; // passes h(25) in a fold a lock interrupts
+        assert_eq!(walk.cursor(), Some(first[5]));
+        *chain.mark.lock().unwrap() = Some(h(200));
+        walk.arm(path);
+        walk.run_to_tip(&chain).await;
+        assert_eq!(
+            walk.cursor(),
+            Some(h(150)),
+            "the second arm's mark, never h(25)"
+        );
+        let tos: Vec<Hash> = recorder.gaps.lock().unwrap().iter().map(|g| g.1).collect();
+        assert!(
+            !tos.contains(&h(25)),
+            "no landing on the passed mark: {tos:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A mark never crosses to another cursor file**: that is another store,
+    /// not a gap in this one.
+    #[tokio::test]
+    async fn a_mark_never_crosses_to_another_cursor_file() {
+        let dir = test_dir("mark-store");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_cursor(&dir.join("a.cursor"), &h(1));
+        write_cursor(&dir.join("b.cursor"), &h(1));
+        let chain = FakeChain::default();
+        *chain.mark.lock().unwrap() = Some(h(40));
+        *chain.sink.lock().unwrap() = Some(h(250));
+        chain.queue(h(1), Ok(response(Vec::new(), blocks(2, 2)))); // held
+        queue_long_gap(&chain, h(1), 20);
+        let recorder = Arc::new(Recorder::default());
+        let walk = walk_with(&recorder);
+        recorder.hold.store(true, Ordering::SeqCst);
+        walk.arm(dir.join("a.cursor"));
+        walk.run_to_tip(&chain).await; // reads h(40) for store a, then locks
+        recorder.hold.store(false, Ordering::SeqCst);
+        *chain.mark.lock().unwrap() = None; // store b's arm cannot read one
+        walk.arm(dir.join("b.cursor"));
+        walk.run_to_tip(&chain).await;
+        assert_eq!(
+            walk.cursor(),
+            Some(h(250)),
+            "no mark from store a: the sink"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The mark is read until the arm's first page answers, and never for a
+    /// first seed**: after a read, or after that page, it is not asked for
+    /// again (a node that answers pages and refuses its sink would otherwise be
+    /// asked on every chain move, on the funds lane's socket).
+    #[tokio::test]
+    async fn the_mark_is_read_until_the_arms_first_page_and_never_for_a_first_seed() {
+        let dir = test_dir("mark-reads");
+        std::fs::create_dir_all(&dir).unwrap();
+        let chain = FakeChain::default();
+        *chain.sink.lock().unwrap() = Some(h(9));
+        *chain.mark.lock().unwrap() = Some(h(9));
+        let recorder = Arc::new(Recorder::default());
+        let walk = walk_with(&recorder);
+        walk.arm(dir.join("seed.cursor"));
+        walk.run_to_tip(&chain).await;
+        assert_eq!(walk.cursor(), Some(h(9)));
+        walk.run_to_tip(&chain).await;
+        assert_eq!(
+            chain.mark_calls.load(Ordering::SeqCst),
+            0,
+            "a first seed reads no mark"
+        );
+
+        // Read at the run's start: not again under the same arm.
+        write_cursor(&dir.join("read.cursor"), &h(1));
+        chain.queue(h(1), Ok(response(Vec::new(), blocks(2, 2))));
+        let walk = walk_with(&recorder);
+        walk.arm(dir.join("read.cursor"));
+        walk.run_to_tip(&chain).await;
+        walk.run_to_tip(&chain).await;
+        assert_eq!(chain.mark_calls.load(Ordering::SeqCst), 1, "one read");
+
+        // Refused: once at the start, once with the first page, then closed.
+        *chain.mark.lock().unwrap() = None;
+        write_cursor(&dir.join("refused.cursor"), &h(1));
+        chain.queue(h(1), Ok(response(Vec::new(), blocks(2, 2))));
+        let walk = walk_with(&recorder);
+        walk.arm(dir.join("refused.cursor"));
+        walk.run_to_tip(&chain).await;
+        walk.run_to_tip(&chain).await;
+        walk.run_to_tip(&chain).await;
+        assert_eq!(
+            chain.mark_calls.load(Ordering::SeqCst),
+            3,
+            "a refused mark is asked for twice, never after the arm's first answered page"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2373,7 +3491,7 @@ pub(crate) mod tests {
             !walk.quiet_warned.load(Ordering::Relaxed),
             "unarmed: silent"
         );
-        walk.arm(test_dir("witness").join("scan.cursor"));
+        let epoch = walk.arm(test_dir("witness").join("scan.cursor"));
         walk.running_since_mono_ms.store(1, Ordering::Relaxed);
         walk.note_ticks("ivy.example", 1, stall);
         assert!(
@@ -2385,7 +3503,7 @@ pub(crate) mod tests {
             walk.quiet_warned.load(Ordering::Relaxed),
             "a stretch the length of the stall line"
         );
-        walk.note_progress();
+        walk.note_progress(epoch, h(1)); // the witness, whatever the cursor
         assert!(
             !walk.quiet_warned.load(Ordering::Relaxed),
             "a page answered re-arms it"

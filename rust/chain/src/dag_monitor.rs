@@ -245,11 +245,13 @@ fn hygiene_may_degrade(mode: &RaceMode, empty_rounds: u32) -> bool {
     empty_rounds >= 2 && matches!(mode, RaceMode::Cold)
 }
 
-/// How long the V2b fill waits for the message walk's first run after an arm,
+/// How long the V2b fill waits for the message walk to settle after an arm,
 /// so node truth folds before any indexer claim (D-074's order). A run that
 /// cannot reach its node ends in about eight seconds (the walk's retries); one
 /// whose page times out ends at the page timeout (60 s); a full catch-up is up
-/// to sixteen pages. Past this the fill runs anyway, as it did after a
+/// to three runs of sixteen pages (a landing on the mark a lock left, one on
+/// the arm's own, then the tip), since a budget that lands on a mark walks on
+/// unsettled (D-344). Past this the fill runs anyway, as it did after a
 /// catch-up that ended early.
 pub const INTAKE_SETTLE_WAIT: Duration = Duration::from_secs(120);
 
@@ -1189,10 +1191,12 @@ impl DagMonitor {
         self.inner.walk.quiesce().await;
     }
 
-    /// Wait (at most `within`) until the walk's first run after the arm that
-    /// returned `epoch` has ended — reached the tip, gave up on an unreachable
-    /// node, or spent its budget. The V2b fill waits on it so node truth folds
-    /// before any indexer claim (D-074's order). `false` on the timeout.
+    /// Wait (at most `within`) until the walk under the arm that returned
+    /// `epoch` has settled: a run reached the tip, gave up on an unreachable
+    /// node, re-seeded at the sink, or spent a budget past the arm's mark (a
+    /// budget that lands on a mark walks on unsettled, D-344). The V2b fill
+    /// waits on it so node truth folds before any indexer claim (D-074's
+    /// order). `false` on the timeout.
     pub async fn intake_settled(&self, epoch: u64, within: Duration) -> bool {
         self.inner.walk.settled(epoch, within).await
     }
