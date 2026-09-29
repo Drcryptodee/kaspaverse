@@ -7,7 +7,7 @@ how the manifests are parsed, what "moved" means, and how the result is rendered
 It never touches the network. Invoked only by upstream_revs.sh — not a CLI of its own.
 
 Usage (internal): upstream_revs.py MODE REPLY_DIR RECORD_PATH OUR_PIN CAPTURE_DIR KCC_LINE KCC_EXIT
-  MODE ∈ compare | record | sweep | print
+  MODE ∈ compare | record | sweep | print | watch-ack
 Exit: 0 clean / SKIP / NO RECORD · 1 if anything MOVED (or --record refused).
 """
 import datetime as _dt
@@ -174,6 +174,7 @@ def observe_watch(record):
             cur["state"] = "merged" if reply.get("merged_at") else reply.get("state")
             cur["title"] = reply.get("title") or cur["title"]
             cur["url"] = reply.get("html_url") or cur["url"]
+            cur["comments"] = reply_count(reply)
             cur["observed_at_utc"] = NOW
         else:
             cur["state"] = None  # unobserved this run (unreachable / unparseable)
@@ -181,7 +182,17 @@ def observe_watch(record):
     return obs
 
 
+def reply_count(reply):
+    """The thread's comment count: an issue's `comments`; a PR's `comments` plus its review
+    comments. None when the reply carries neither (an old fixture), so nothing is compared."""
+    parts = [reply.get(k) for k in ("comments", "review_comments") if isinstance(reply.get(k), int)]
+    return sum(parts) if parts else None
+
+
 def compare_watch(record, wobs):
+    """A watched thread MOVED when its state changed or it gained a comment (D-346: the D-329
+    rule is about maintainer REPLIES, and a reply is a comment, not a state change). A record
+    without a count (written before D-346) compares state only until `--watch-ack` sets one."""
     moved = []
     for repo, num, kind, entry in watch_items(record):
         cur = wobs.get(repo, {}).get(num) or {}
@@ -190,7 +201,24 @@ def compare_watch(record, wobs):
         old = entry.get("state")
         if old is not None and old != cur["state"]:
             moved.append((repo, num, old, cur["state"], cur.get("title") or ""))
+            continue
+        oc, nc = entry.get("comments"), cur.get("comments")
+        if oc is not None and nc is not None and nc > oc:
+            moved.append((repo, num, f"{cur['state']}, comments {oc}", str(nc), cur.get("title") or ""))
     return moved
+
+
+def watch_entry(entry, kind, cur, rec_at):
+    """The record's row for one watched thread after this run observed it."""
+    keep = dict(entry)
+    if cur.get("state") is not None:
+        keep.update({"kind": kind, "state": cur["state"], "title": cur.get("title"), "url": cur.get("url"), "observed_at_utc": NOW})
+        if cur.get("comments") is not None:
+            keep["comments"] = cur["comments"]
+        if entry.get("state") not in (None, cur["state"]) or entry.get("comments") not in (None, cur.get("comments")):
+            keep["previous"] = {"state": entry.get("state"), "recorded_at_utc": rec_at,
+                                **({"comments": entry["comments"]} if entry.get("comments") is not None else {})}
+    return keep
 
 
 def get(d, path):
@@ -402,6 +430,36 @@ def main():
             print("Watched: " + " · ".join(wl))
         return 1 if (moved or wmoved) else 0
 
+    if MODE == "watch-ack":
+        # The WATCH lines being acknowledged print first, so the ack's output records what was read.
+        for repo, num, old, new_, title in wmoved:
+            print(f"UPSTREAM WATCH  {repo}#{num} {old}→{new_}  {title}".rstrip())
+        # Only the NAMED threads are acknowledged (state + count); every other thread only gains a
+        # comment baseline where it had none, so a state move another skill still owes stays loud.
+        named = set(os.environ.get("UPSTREAM_ACK", "").split())
+        known = {f"{r}#{n}" for r, n, _k, _e in watch_items(record)}
+        if named - known:
+            print(f"UPSTREAM --watch-ack REFUSED: not on the watch list: {', '.join(sorted(named - known))}")
+            return 1
+        acked, based, unseen = [], 0, []
+        for repo, num, kind, entry in watch_items(record):
+            cur = wobs.get(repo, {}).get(num) or {}
+            if cur.get("state") is None:
+                unseen.append(f"{repo}#{num}")
+                continue
+            if f"{repo}#{num}" in named:
+                record["watch"][repo][num] = watch_entry(entry, kind, cur, rec_at)
+                acked.append(f"{repo}#{num}")
+            elif entry.get("comments") is None and cur.get("comments") is not None:
+                record["watch"][repo][num]["comments"] = cur["comments"]
+                based += 1
+        with open(RECORD_PATH, "w", encoding="utf-8") as fh:
+            json.dump(record, fh, indent=1, sort_keys=True)
+            fh.write("\n")
+        tail = f"; not observed: {', '.join(unseen)}" if unseen else ""
+        print(f"UPSTREAM watch acknowledged {', '.join(acked) or 'none'}; {based} comment baselines set at {NOW} (sources untouched){tail}")
+        return 0
+
     # compare / record
     exit_code = 0
     if moved or wmoved:
@@ -446,12 +504,7 @@ def main():
         new["watch"] = {}
         for repo, num, kind, entry in watch_items(record):
             cur = wobs.get(repo, {}).get(num) or {}
-            keep = dict(entry)
-            if cur.get("state") is not None:
-                keep.update({"kind": kind, "state": cur["state"], "title": cur.get("title"), "url": cur.get("url"), "observed_at_utc": NOW})
-                if entry.get("state") not in (None, cur["state"]):
-                    keep["previous"] = {"state": entry.get("state"), "recorded_at_utc": rec_at}
-            new["watch"].setdefault(repo, {})[num] = keep
+            new["watch"].setdefault(repo, {})[num] = watch_entry(entry, kind, cur, rec_at)
         os.makedirs(os.path.dirname(RECORD_PATH) or ".", exist_ok=True)
         with open(RECORD_PATH, "w", encoding="utf-8") as fh:
             json.dump(new, fh, indent=1, sort_keys=True)
@@ -471,7 +524,7 @@ def trim(fn, data):
     if fn.endswith(".releases.json") and isinstance(data, list):
         return [{"tag_name": r.get("tag_name"), "prerelease": r.get("prerelease"), "published_at": r.get("published_at")} for r in data]
     if fn.startswith("watch.") and isinstance(data, dict):
-        return {k: data.get(k) for k in ("number", "state", "merged_at", "title", "html_url")}
+        return {k: data.get(k) for k in ("number", "state", "merged_at", "title", "html_url", "comments", "review_comments")}
     if isinstance(data, dict) and "sha" in data:
         c = data.get("commit") or {}
         return {"sha": data["sha"], "commit": {"committer": {"date": (c.get("committer") or {}).get("date")},

@@ -25,6 +25,8 @@
 #   tools/upstream_revs.sh --print           the live observation as JSON
 #   tools/upstream_revs.sh --manifest-revs F rusty-kaspa / silverscript `rev =` pins from a Cargo.toml
 #   tools/upstream_revs.sh --watch-add owner/repo N [pull|issue]   watch an upstream PR/issue our triggers name
+#   tools/upstream_revs.sh --watch-ack [owner/repo#N ...]  record the NAMED threads' state + comment count as read;
+#                                            others only gain a comment baseline; sources untouched
 #   tools/upstream_revs.sh --selftest        the mutation table, offline, from tools/fixtures/upstream_revs/
 #   tools/upstream_revs.sh --from-fixture D  read API replies from D instead of the network
 #   tools/upstream_revs.sh --capture-fixture D  observe live and write trimmed replies to D
@@ -40,7 +42,7 @@ RECORD="${KASPAVERSE_UPSTREAM_RECORD:-$ROOT/docs/research/UPSTREAM_REVS.json}"  
 FIXTURE_DEFAULT="$ROOT/tools/fixtures/upstream_revs"
 MODE=compare; FIXTURE=""; CAPTURE=""
 
-usage() { sed -n '20,31p' "$SELF"; }
+usage() { sed -n '20,33p' "$SELF"; }
 manifest_revs() {
   PYTHONDONTWRITEBYTECODE=1 python3 - "$1" "$ROOT/tools" <<'PY'
 import sys; sys.path.insert(0, sys.argv[2]); import upstream_revs as u
@@ -161,6 +163,35 @@ json.dump(d, open(dst, "w"), indent=1, sort_keys=True)
 print(f"{repo}#{num}")
 PY
   run "a watched PR's state change is a MOVED"       'UPSTREAM WATCH  [a-z-]+/[a-z-]+#[0-9]+ planted-old-state→' 1 "$work/rw.json" "$work/fx"
+  # a reply is a comment, not a state change (D-346): plant a comment on one watched thread's reply
+  cp -R "$work/fx" "$work/fx-cm"
+  python3 - "$work/fx-cm" "$R" "$work/rc.json" <<'PY'
+import json, os, sys
+fx, src, dst = sys.argv[1:4]; d = json.load(open(src))
+repo, num = next((r, n) for r, items in sorted(d["watch"].items()) for n in sorted(items))
+p = os.path.join(fx, f"watch.{repo.replace('/', '__')}.{num}.json")
+r = json.load(open(p)); r["comments"], r["review_comments"] = 1, None; json.dump(r, open(p, "w"))
+d["watch"][repo][num].pop("comments", None); json.dump(d, open(dst, "w"), indent=1, sort_keys=True)
+PY
+  run "a record without a count stays silent on comments" 'UPSTREAM clean' 0 "$work/rc.json" "$work/fx-cm"
+  run "--watch-ack sets a missing count as a baseline" 'UPSTREAM watch acknowledged none; [1-9][0-9]* comment baselines set at .* \(sources untouched\)' 0 "$work/rc.json" "$work/fx-cm" --watch-ack
+  run "…and after it the record reads clean"          'UPSTREAM clean' 0 "$work/rc.json" "$work/fx-cm"
+  python3 - "$work/fx-cm" "$work/rc.json" <<'PY'
+import json, os, sys
+fx, rec = sys.argv[1:3]; d = json.load(open(rec))
+repo, num = next((r, n) for r, items in sorted(d["watch"].items()) for n in sorted(items))
+p = os.path.join(fx, f"watch.{repo.replace('/', '__')}.{num}.json")
+r = json.load(open(p)); r["comments"] = 2; json.dump(r, open(p, "w"))
+PY
+  run "a new comment on a watched thread is a WATCH"  'UPSTREAM WATCH  [a-z-]+/[a-z-]+#[0-9]+ [a-z]+, comments 1→2' 1 "$work/rc.json" "$work/fx-cm"
+  # an ack names its threads: an unnamed state move stays loud, a named one is recorded
+  wt=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(next(f"{r}#{n}" for r,i in sorted(d["watch"].items()) for n in sorted(i)))' "$work/rw.json")
+  cp "$work/rw.json" "$work/ra.json"
+  run "an unnamed ack leaves a state move loud"       'UPSTREAM WATCH  [a-z-]+/[a-z-]+#[0-9]+ planted-old-state→' 0 "$work/ra.json" "$work/fx" --watch-ack
+  run "…which still reads as a WATCH"                 'UPSTREAM WATCH  [a-z-]+/[a-z-]+#[0-9]+ planted-old-state→' 1 "$work/ra.json" "$work/fx"
+  run "a named ack records it"                        "UPSTREAM watch acknowledged ${wt}; " 0 "$work/ra.json" "$work/fx" --watch-ack "$wt"
+  run "…and the record reads clean"                   'UPSTREAM clean' 0 "$work/ra.json" "$work/fx"
+  run "an ack of an unwatched thread is refused"      'UPSTREAM --watch-ack REFUSED: not on the watch list: nobody/nothing#1' 1 "$work/ra.json" "$work/fx" --watch-ack nobody/nothing#1
   rm -rf "$work"
   if [ "$fails" = 0 ]; then echo "upstream revs selftest: PASS ($rows rows)"; return 0; fi
   echo "upstream revs selftest: $fails of $rows FAILED"; return 1
@@ -169,6 +200,7 @@ PY
 while [ $# -gt 0 ]; do
   case "$1" in
     --record) MODE=record ;;
+    --watch-ack) MODE=watch-ack; shift; export UPSTREAM_ACK="$*"; break ;;
     --sweep-table) MODE=sweep ;;
     --print) MODE=print ;;
     --manifest-revs) shift; manifest_revs "$1"; exit $? ;;
