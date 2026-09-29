@@ -22,12 +22,25 @@ import '../widgets/status_beacon.dart' show formatAge;
 /// ≈ 20 min). A gap inside this window heals without any indexer — no notice.
 const int nodeRewindCoverMinutes = 20;
 
+/// The notice for history the message walk SKIPPED (LINK-Q4): the node will
+/// not replay it. No length and no "Away" — see [historyNotice].
+const String skippedHistoryNotice =
+    'Some message history was skipped — messages in it may be missing. '
+    'Tap to recover them.';
+
 /// The honest residual notice (D-074: **never silence**). Returns the banner
 /// text, or null when history is whole as far as the mechanism can know.
 /// Pure — unit-tested against every (gap × fill-posture) cell:
 ///
 /// - No gap signal (first run / unresolved yet / gap within the node rewind):
 ///   no notice.
+/// - **A gap the message walk SKIPPED** (LINK-Q4, [GapAgeDto.skipped]): the
+///   node will not replay it, so the rewind window does not apply — the skip
+///   line ([skippedHistoryNotice]) speaks whatever the skip's length, with no
+///   length and no "Away" (it may happen with the app in front), until a
+///   fill completes after it or the next unlock reads the gap afresh, as the
+///   away reading always has. A skip whose start is past the pruning horizon
+///   is a long absence and reads as one.
 /// - A gap beyond the rewind with fill OFF: the notice invites the fix.
 /// - Fill ON but the run failed, was incomplete, or hasn't happened yet: the
 ///   notice stays — an enabled fill is a mechanism, not a guarantee.
@@ -38,6 +51,19 @@ String? historyNotice({
   required FillReportDto? report,
 }) {
   if (gap == null) return null;
+  // **A skip has its own face** (LINK-Q4, `ux-auditor` BG-8/BG-20): the walk
+  // may skip with the app in front, so it is never "Away", and its length is
+  // never printed — a skip of seconds would read "Away 0 s". Healed only by a
+  // fill that completed after it: a skip marks an earlier fill incomplete.
+  if (gap.skipped && !gap.beyondHorizon) {
+    final healed =
+        config != null &&
+        config.enabled &&
+        report != null &&
+        report.ran &&
+        report.complete;
+    return healed ? null : skippedHistoryNotice;
+  }
   final minutes = gap.gapMinutes?.toInt();
   if (!gap.beyondHorizon &&
       (minutes == null || minutes <= nodeRewindCoverMinutes)) {

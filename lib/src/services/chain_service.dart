@@ -52,18 +52,28 @@ class ChainService with WidgetsBindingObserver {
   static Future<void> Function(bool stalled) reconnectFn = (stalled) =>
       dagReconnect(stalled: stalled);
 
-  /// OS network signal relay (C5/D-089): MainActivity's
-  /// `ConnectivityManager` default-network callback arrives on this channel;
-  /// the handler forwards the bool to Rust, which owns ALL semantics
-  /// (redial / log-only / passive). Pure relay — no policy lives in Dart.
+  /// OS network signal relay (C5/D-089; four kinds since LINK-Q4):
+  /// MainActivity's `ConnectivityManager` default-network callback arrives on
+  /// this channel as a kind word; the handler forwards the kind to Rust, which
+  /// owns ALL semantics (redial / swap behind / passive / hint). Pure relay —
+  /// no policy lives in Dart, and an unknown word is dropped, never guessed.
   static const MethodChannel _networkChannel = MethodChannel(
     'org.kaspaverse.app/network',
   );
 
+  /// The channel's words, and the only four that cross (a kind, never an
+  /// identity — INV-3).
+  static const Map<String, NetworkEventKind> networkEventKinds = {
+    'available': NetworkEventKind.available,
+    'lost': NetworkEventKind.lost,
+    'moved': NetworkEventKind.moved,
+    'changed': NetworkEventKind.changed,
+  };
+
   /// Test seam for the network-signal bridge call (no native lib in tests).
   @visibleForTesting
-  static Future<void> Function(bool available) networkChangedBridge =
-      (available) => dagNetworkChanged(available: available);
+  static Future<void> Function(NetworkEventKind kind) networkEventBridge =
+      (kind) => dagNetworkEvent(kind: kind);
 
   /// D-187 node-pin seams: read the user's node choice, and set or clear it.
   /// Rust owns validation and the live re-link — Dart never parses a URL and
@@ -282,9 +292,12 @@ class ChainService with WidgetsBindingObserver {
       // signal is an accelerator, never load-bearing — a failed forward is
       // swallowed (the watchdog and the race's own retry still recover).
       _networkChannel.setMethodCallHandler((call) async {
-        if (call.method == 'networkChanged' && call.arguments is bool) {
+        final kind = call.method == 'networkEvent' && call.arguments is String
+            ? networkEventKinds[call.arguments as String]
+            : null;
+        if (kind != null) {
           try {
-            await networkChangedBridge(call.arguments as bool);
+            await networkEventBridge(kind);
           } catch (_) {}
         }
         return null;

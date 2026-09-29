@@ -81,12 +81,25 @@ const NO_LISTENER: ListenerId = ListenerId::MAX;
 /// mutex per call — the bind pointer is swapped at most once per reconnect).
 pub(crate) struct LinkRpc {
     current: Mutex<Option<Arc<KaspaRpcClient>>>,
+    /// The last few sockets released, as (identity, whether the cause of
+    /// their retirement judged the link) — newest last, at most
+    /// [`RETIREMENTS_KEPT`]. The message walk reads it to tell a page that
+    /// died with a socket the link lost from one that died under our own hand
+    /// (LINK-Q4, [`Self::retired_judged`]).
+    retired: Mutex<std::collections::VecDeque<(usize, bool)>>,
 }
+
+/// How many released sockets [`LinkRpc`] remembers the cause of. A page call
+/// holds its own `Arc` to its socket for as long as it runs, so the identity
+/// it compares cannot be reused while it waits; eight covers every retirement
+/// a sixty-second page could see (a bind lives at least a probe's dial).
+const RETIREMENTS_KEPT: usize = 8;
 
 impl LinkRpc {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             current: Mutex::new(None),
+            retired: Mutex::new(std::collections::VecDeque::new()),
         })
     }
 
@@ -99,9 +112,37 @@ impl LinkRpc {
 
     /// Release the retired socket. Calls in flight keep their own `Arc` (they
     /// finish or error against the dying client); calls that arrive afterwards
-    /// get [`NO_BOUND_SOCKET`] until the race binds again.
-    pub(crate) fn unbind(&self) {
-        *self.current.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    /// get [`NO_BOUND_SOCKET`] until the race binds again. `judged` says
+    /// whether the cause of the retirement judged the LINK (a silence swap,
+    /// the watchdog, the socket's own death) rather than our own hand (a
+    /// pause, a repin, a tap, a stop): a page that dies with a socket our hand
+    /// retired proves nothing about the page (LINK-Q4).
+    pub(crate) fn unbind(&self, judged: bool) {
+        let released = self
+            .current
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(client) = released {
+            let mut retired = self.retired.lock().unwrap_or_else(PoisonError::into_inner);
+            if retired.len() >= RETIREMENTS_KEPT {
+                retired.pop_front();
+            }
+            retired.push_back((Arc::as_ptr(&client) as usize, judged));
+        }
+    }
+
+    /// Whether the socket `identity` ([`Self::bound_identity`]) was retired
+    /// for a cause that judged the link — `None` when it is not among the
+    /// last [`RETIREMENTS_KEPT`] released (still bound, or long gone).
+    pub(crate) fn retired_judged(&self, identity: usize) -> Option<bool> {
+        self.retired
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .rev()
+            .find(|(id, _)| *id == identity)
+            .map(|(_, judged)| *judged)
     }
 
     /// Refuse a subscribe against the never-registered sentinel — loudly, so a
@@ -307,12 +348,80 @@ mod tests {
         );
         link.bind(client);
         assert!(Arc::ptr_eq(&as_api, &(link.clone() as Arc<dyn RpcApi>)));
-        link.unbind();
+        link.unbind(false);
         // Same handle, still usable, still honest about having no socket.
         let err = as_api
             .get_sink_call(None, GetSinkRequest {})
             .await
             .expect_err("unbound again");
         assert!(err.to_string().contains("no bound socket"));
+    }
+
+    /// **A released socket keeps its cause** (LINK-Q4): the walk asks, by the
+    /// identity it saw before its page, whether that socket left for a cause
+    /// that judged the link. Each socket answers for itself, the newest
+    /// release wins for a reused identity, the memory is bounded, and a socket
+    /// never released answers nothing.
+    #[test]
+    fn a_released_socket_keeps_the_cause_it_left_for() {
+        let link = LinkRpc::new();
+        let socket = || {
+            Arc::new(
+                KaspaRpcClient::new_with_args(
+                    WrpcEncoding::Borsh,
+                    Some("wss://example.invalid/kaspa/mainnet/wrpc/borsh"),
+                    None,
+                    Some(NetworkId::new(NetworkType::Mainnet)),
+                    None,
+                )
+                .expect("client constructs without connecting"),
+            )
+        };
+        let (paused, died) = (socket(), socket());
+        link.bind(paused.clone());
+        let paused_id = link.bound_identity().expect("bound");
+        link.unbind(false);
+        link.bind(died.clone());
+        let died_id = link.bound_identity().expect("bound");
+        assert_eq!(
+            link.retired_judged(died_id),
+            None,
+            "still bound: not released"
+        );
+        link.unbind(true);
+        assert_eq!(link.retired_judged(paused_id), Some(false), "our own hand");
+        assert_eq!(link.retired_judged(died_id), Some(true), "the link's loss");
+        link.unbind(true);
+        assert_eq!(
+            link.retired_judged(died_id),
+            Some(true),
+            "an unbind with nothing bound records nothing"
+        );
+
+        // `paused` and `died` are the two oldest; six more fill the memory
+        // exactly to its bound, and both are still remembered.
+        let kept: Vec<_> = (0..RETIREMENTS_KEPT - 2).map(|_| socket()).collect();
+        for client in &kept {
+            link.bind(client.clone());
+            link.unbind(true);
+        }
+        assert_eq!(
+            link.retired_judged(paused_id),
+            Some(false),
+            "at the bound: kept"
+        );
+        let one_more = socket();
+        link.bind(one_more.clone());
+        link.unbind(true);
+        assert_eq!(
+            link.retired_judged(paused_id),
+            None,
+            "one past it: the oldest is forgotten"
+        );
+        assert_eq!(
+            link.retired_judged(died_id),
+            Some(true),
+            "the next oldest is kept"
+        );
     }
 }

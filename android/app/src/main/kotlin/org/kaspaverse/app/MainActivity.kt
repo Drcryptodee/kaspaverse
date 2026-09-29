@@ -4,7 +4,11 @@ import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
+import android.net.LinkProperties
 import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.wifi.WifiInfo
+import android.os.Build
 import android.view.WindowManager
 import androidx.activity.result.contract.ActivityResultContracts
 import io.flutter.embedding.android.FlutterFragmentActivity
@@ -34,8 +38,9 @@ class MainActivity : FlutterFragmentActivity() {
 
     private val channel = "org.kaspaverse.app/ceremony"
 
-    // OS default-network signal (C5/D-089, ruling 3: zero new dependencies).
-    // Only a boolean crosses this channel — availability, never identity.
+    // OS default-network signal (C5/D-089, ruling 3: zero new dependencies;
+    // four kinds since LINK-Q4, D-337 (ii)). Only a kind word crosses this
+    // channel — never a network handle, an address, an SSID or a BSSID.
     private val networkChannelName = "org.kaspaverse.app/network"
     private var networkChannel: MethodChannel? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
@@ -413,21 +418,88 @@ class MainActivity : FlutterFragmentActivity() {
                 }
             }
 
-        // C5 (D-089): relay the OS default-network transitions to Dart → Rust.
-        // Callbacks arrive on a ConnectivityManager binder thread — marshal to
-        // the main thread before touching the channel (host-side crash class).
+        // C5 (D-089) → LINK-Q4 (D-337 (ii)): relay what the phone's DEFAULT
+        // network did to Dart → Rust, which owns every decision. Callbacks
+        // arrive on a ConnectivityManager thread — marshal to the main thread
+        // before touching the channel or this callback's state (host-side crash
+        // class; every field below is read and written there only).
+        //
+        // Four words, read at the Android 13 source (ConnectivityService
+        // `applyNetworkReassignment`): when the default moves from A to B the
+        // default callback gets `onAvailable(B)` and NO `onLost(A)` — `onLost`
+        // comes only when nothing replaces the default. So a move is
+        // recognised here: `onAvailable` for a different network while the
+        // last one was never lost. And `onAvailable` is also delivered for the
+        // current default the moment the callback registers, which Rust reads
+        // as a state report rather than a change.
+        //  - "available": a default network is up after none (or at register)
+        //  - "lost":      the default is gone and nothing replaced it
+        //  - "moved":     a different network became the default
+        //  - "changed":   the default's addresses or Wi-Fi frequency changed in
+        //                 place — a hint (a band hop within one SSID keeps the
+        //                 network; its frequency is not location-redacted,
+        //                 `WifiInfo.makeCopy`, so no new permission)
         networkChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger, networkChannelName,
         )
         if (networkCallback == null) {
             val cm = getSystemService(ConnectivityManager::class.java)
             val callback = object : ConnectivityManager.NetworkCallback() {
+                private var current: Network? = null
+                private var addresses: Set<String>? = null
+                private var frequency: Int? = null
+
+                private fun send(kind: String) {
+                    networkChannel?.invokeMethod("networkEvent", kind)
+                }
+
                 override fun onAvailable(network: Network) {
-                    runOnUiThread { networkChannel?.invokeMethod("networkChanged", true) }
+                    runOnUiThread {
+                        val kind = if (current != null && current != network) "moved" else "available"
+                        current = network
+                        // Fresh baselines: Android follows onAvailable with the
+                        // network's capabilities and link properties, which
+                        // are its starting state, not a change.
+                        addresses = null
+                        frequency = null
+                        send(kind)
+                    }
                 }
 
                 override fun onLost(network: Network) {
-                    runOnUiThread { networkChannel?.invokeMethod("networkChanged", false) }
+                    runOnUiThread {
+                        // Only the default we hold can be lost here; a stale
+                        // loss says nothing about the network the phone is on.
+                        if (network != current) return@runOnUiThread
+                        current = null
+                        addresses = null
+                        frequency = null
+                        send("lost")
+                    }
+                }
+
+                override fun onLinkPropertiesChanged(network: Network, properties: LinkProperties) {
+                    val now = properties.linkAddresses.mapNotNull { it.address?.hostAddress }.toSet()
+                    runOnUiThread {
+                        if (network != current) return@runOnUiThread
+                        val was = addresses
+                        addresses = now
+                        if (was != null && was != now) send("changed")
+                    }
+                }
+
+                override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
+                    val mhz = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        (capabilities.transportInfo as? WifiInfo)?.frequency?.takeIf { it > 0 }
+                    } else {
+                        null
+                    }
+                    runOnUiThread {
+                        if (network != current || mhz == null) return@runOnUiThread
+                        val was = frequency
+                        frequency = mhz
+                        if (was != null && was != mhz) send("changed")
+                    }
                 }
             }
             cm.registerDefaultNetworkCallback(callback)

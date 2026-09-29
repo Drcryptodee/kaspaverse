@@ -179,7 +179,12 @@ Widget _blocked({bool empty = false}) {
   return BlockedAddressesScreen(messaging: MessagingService.instance);
 }
 
-Widget _chats({bool requests = false, bool empty = false, int? gapMinutes}) {
+Widget _chats({
+  bool requests = false,
+  bool empty = false,
+  int? gapMinutes,
+  bool skipped = false,
+}) {
   MessagingService.conversationsFn = () async => empty
       ? const []
       : [
@@ -258,7 +263,11 @@ Widget _chats({bool requests = false, bool empty = false, int? gapMinutes}) {
   // one surface built for it would have no frame at all (D-309).
   MessagingService.gapAgeFn = () async => gapMinutes == null
       ? null
-      : GapAgeDto(gapMinutes: BigInt.from(gapMinutes), beyondHorizon: false);
+      : GapAgeDto(
+          gapMinutes: BigInt.from(gapMinutes),
+          beyondHorizon: false,
+          skipped: skipped,
+        );
   MessagingService.fillConfigFn = () async =>
       const FillConfigDto(enabled: false, endpoint: '', defaultEndpoint: '');
   MessagingService.fillStatusFn = () async => null;
@@ -1821,6 +1830,13 @@ void main() {
     framedSurface(
       'messages__settings_notice',
       () => _chats(gapMinutes: 235),
+      act: _openMessageSettings,
+    );
+    // **A skip's own line** (LINK-Q4): history the walk skipped, which the
+    // node will not replay — no length, no "Away".
+    framedSurface(
+      'messages__settings_notice_skip',
+      () => _chats(gapMinutes: 0, skipped: true),
       act: _openMessageSettings,
     );
     // And the other half of the same truth: the list says it with the dot on

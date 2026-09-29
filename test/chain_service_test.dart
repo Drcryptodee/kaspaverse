@@ -150,44 +150,55 @@ void main() {
     expect(service.error.value, isNull);
   });
 
-  group('OS network signal relay (C5/D-089)', () {
+  group('OS network signal relay (C5/D-089; kinds since LINK-Q4)', () {
     // Drive the platform channel exactly as MainActivity's native
     // invokeMethod would; the relay must reach the bridge seam untouched —
-    // Rust owns the semantics, Dart carries the bool.
-    Future<void> nativeNetworkChanged(Object? payload) async {
+    // Rust owns the semantics, Dart carries the kind.
+    Future<void> nativeNetworkEvent(
+      Object? payload, {
+      String method = 'networkEvent',
+    }) async {
       final messenger =
           TestWidgetsFlutterBinding.instance.defaultBinaryMessenger;
       await messenger.handlePlatformMessage(
         'org.kaspaverse.app/network',
         const StandardMethodCodec().encodeMethodCall(
-          MethodCall('networkChanged', payload),
+          MethodCall(method, payload),
         ),
         (_) {},
       );
     }
 
-    test('networkChanged reaches the bridge with the OS bool', () async {
-      final forwarded = <bool>[];
-      ChainService.networkChangedBridge = (available) async =>
-          forwarded.add(available);
+    test('every kind word reaches the bridge as its kind', () async {
+      final forwarded = <NetworkEventKind>[];
+      ChainService.networkEventBridge = (kind) async => forwarded.add(kind);
       ChainService.instance.start();
 
-      await nativeNetworkChanged(true);
-      await nativeNetworkChanged(false);
-      expect(forwarded, [true, false]);
+      for (final word in ['available', 'lost', 'moved', 'changed']) {
+        await nativeNetworkEvent(word);
+      }
+      expect(forwarded, [
+        NetworkEventKind.available,
+        NetworkEventKind.lost,
+        NetworkEventKind.moved,
+        NetworkEventKind.changed,
+      ]);
     });
 
-    test('a non-bool payload and a bridge failure are swallowed', () async {
+    test('an unknown word, a non-string, the old bool method and a bridge '
+        'failure are all swallowed, never guessed', () async {
       var calls = 0;
-      ChainService.networkChangedBridge = (available) async {
+      ChainService.networkEventBridge = (kind) async {
         calls++;
         throw const AppError(message: 'bridge down');
       };
       ChainService.instance.start();
 
-      await nativeNetworkChanged('garbage'); // ignored: not a bool
+      await nativeNetworkEvent('roamed'); // not one of the four
+      await nativeNetworkEvent(true); // not a word
+      await nativeNetworkEvent(true, method: 'networkChanged'); // retired
       expect(calls, 0);
-      await nativeNetworkChanged(true); // forwarded; failure swallowed
+      await nativeNetworkEvent('lost'); // forwarded; failure swallowed
       expect(calls, 1);
     });
   });

@@ -8,9 +8,9 @@ import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'send.dart';
 
-// These functions are ignored because they are not marked as `pub`: `abandon_wiped_walk`, `accept_provenance_ok`, `accept_target_missing`, `acceptance_already_parked`, `acceptance_verdict`, `adopt_alias_from_sender`, `any`, `apply_intent`, `apply_parked_acceptance`, `await_spendable_at`, `backfill_invitation_sender`, `bound_preview`, `branch_token`, `build`, `bytes`, `chain_stamp`, `clamp_display`, `clear_side_files`, `clear`, `comm_already_parked`, `comm_is_dismissed`, `comm_sendable`, `complete_acceptance_from_sender`, `complete_parked_acceptance`, `confinement_ceiling`, `contains`, `decrypt_drop`, `drain_exclusions`, `dropped`, `erase_epoch`, `fill_walks`, `fold_stash_row`, `forget_alias`, `format_kas`, `frame_dto`, `friendly_prepare_error`, `gated_walk_start`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `handshake_reuses`, `handshake_slots`, `hold`, `holds`, `hub`, `invitation_is_acceptable`, `invite_expired`, `keys`, `kind_of_intent`, `lift_block_on_contact`, `locate_and_adopt`, `may_unhide`, `merge_handshake_commit`, `new`, `new`, `new`, `notice`, `now_unix_ms`, `open_with_fallback`, `order_priority_for_owner`, `outcome`, `park_acceptance`, `park_comm`, `park`, `pending_accept_target`, `ping_notice_inputs`, `ping`, `plan_comm`, `prepare_comm_plaintext`, `prepare_transport_send`, `preview_line`, `purge_comms_keeping_handshake`, `purge_contact_rows`, `quarantine_unreadable_block_list`, `read_marks`, `refuse_blocked_knock_comms`, `resolve_gap_age`, `resolve_handshake_sender`, `restored_conversation`, `resume_from`, `resweep_invitation_senders`, `revival_refusal`, `revive_or_drop`, `revived_conversation`, `row_source_label`, `row_source`, `run_fill`, `schedule_sender_locate`, `seal_erasure`, `split_frame`, `stash_intent`, `stash_row_is_free`, `stash_supersedes`, `stashable_rows`, `sweep_parked_acceptances`, `tail_start`, `take_by_alias`, `take_intent`, `take_parked_acceptance`, `take_parked_comm`, `take_parked_siblings`, `take`, `take`, `thread_pings`, `thread_row`, `to_core_branch`, `to_dto`, `to_key_branch`, `try_take`, `tx_status_dto`, `unceremonious_refusal`, `unhide_on_inbound`, `warn_store`, `watch_acceptance`, `widen_key_window`, `x_only_of`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `AcceptanceVerdict`, `CommPlan`, `DropReason`, `EventOrigin`, `FoldOutcome`, `HeldFloor`, `HubSink`, `KeyWindow`, `LocatingGuard`, `ParkedAcceptance`, `ParkedComm`, `ParkedComms`, `PinPolicy`, `RateWindow`, `TransportHub`, `TransportIntent`, `UncerimoniousRefusal`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `drop`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fold`
+// These functions are ignored because they are not marked as `pub`: `abandon_wiped_walk`, `accept_provenance_ok`, `accept_target_missing`, `acceptance_already_parked`, `acceptance_verdict`, `adopt_alias_from_sender`, `any`, `apply_intent`, `apply_parked_acceptance`, `await_spendable_at`, `backfill_invitation_sender`, `block_time`, `bound_preview`, `branch_token`, `build`, `bytes`, `chain_stamp`, `clamp_display`, `clear_side_files`, `clear`, `comm_already_parked`, `comm_is_dismissed`, `comm_sendable`, `complete_acceptance_from_sender`, `complete_parked_acceptance`, `confinement_ceiling`, `contains`, `counted_fill`, `decrypt_drop`, `drain_exclusions`, `dropped`, `erase_epoch`, `fill_walks`, `fold_skip`, `fold_stash_row`, `forget_alias`, `format_kas`, `frame_dto`, `friendly_prepare_error`, `gated_walk_start`, `handle_inbound_comm`, `handle_inbound_handshake`, `handle_inbound`, `handshake_reuses`, `handshake_slots`, `hold`, `holds`, `hub`, `invitation_is_acceptable`, `invite_expired`, `keys`, `kind_of_intent`, `lift_block_on_contact`, `locate_and_adopt`, `may_unhide`, `merge_gap_age`, `merge_handshake_commit`, `merged_gap`, `new`, `new`, `new`, `notice`, `now_unix_ms`, `open_with_fallback`, `order_priority_for_owner`, `outcome`, `park_acceptance`, `park_comm`, `park`, `pending_accept_target`, `ping_notice_inputs`, `ping`, `plan_comm`, `prepare_comm_plaintext`, `prepare_transport_send`, `preview_line`, `purge_comms_keeping_handshake`, `purge_contact_rows`, `quarantine_unreadable_block_list`, `read_marks`, `refuse_blocked_knock_comms`, `resolve_gap_age`, `resolve_handshake_sender`, `resolve_skipped_gap`, `restored_conversation`, `resume_from`, `resweep_invitation_senders`, `revival_refusal`, `revive_or_drop`, `revived_conversation`, `row_source_label`, `row_source`, `run_fill`, `schedule_sender_locate`, `seal_erasure`, `skip_reading`, `split_frame`, `stash_intent`, `stash_row_is_free`, `stash_supersedes`, `stashable_rows`, `store_fill_report`, `sweep_parked_acceptances`, `tail_start`, `take_by_alias`, `take_intent`, `take_parked_acceptance`, `take_parked_comm`, `take_parked_siblings`, `take`, `take`, `thread_pings`, `thread_row`, `to_core_branch`, `to_dto`, `to_key_branch`, `try_take`, `tx_status_dto`, `unceremonious_refusal`, `unhide_on_inbound`, `walk_skipped_since`, `warn_store`, `watch_acceptance`, `widen_key_window`, `x_only_of`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `AcceptanceVerdict`, `BlockTime`, `CommPlan`, `DropReason`, `EventOrigin`, `FoldOutcome`, `HeldFloor`, `HubSink`, `KeyWindow`, `LocatingGuard`, `ParkedAcceptance`, `ParkedComm`, `ParkedComms`, `PinPolicy`, `RateWindow`, `TransportHub`, `TransportIntent`, `UncerimoniousRefusal`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `drop`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fold`, `skipped`
 
 /// The gap-age computed at this open (`None` until resolved / first run).
 /// Pull surface for V2b's notice; also logged + span-marked when resolved.
@@ -1040,13 +1040,26 @@ class GapAgeDto {
   /// unrecoverable from any normal node.
   final bool beyondHorizon;
 
-  const GapAgeDto({this.gapMinutes, required this.beyondHorizon});
+  /// True when the message walk SKIPPED part of the history this session
+  /// (LINK-Q4): a spent catch-up budget, a cursor the node did not know, or
+  /// a page it could not serve three times. The node will not replay what
+  /// was skipped, so the notice speaks whatever the gap's length, on a line
+  /// of its own. `gap_minutes` is then the longer of the open's gap and any
+  /// skip's span, which the skip line does not print.
+  final bool skipped;
+
+  const GapAgeDto({
+    this.gapMinutes,
+    required this.beyondHorizon,
+    required this.skipped,
+  });
 
   static Future<GapAgeDto> default_() =>
       RustLib.instance.api.crateApiTransportGapAgeDtoDefault();
 
   @override
-  int get hashCode => gapMinutes.hashCode ^ beyondHorizon.hashCode;
+  int get hashCode =>
+      gapMinutes.hashCode ^ beyondHorizon.hashCode ^ skipped.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1054,7 +1067,8 @@ class GapAgeDto {
       other is GapAgeDto &&
           runtimeType == other.runtimeType &&
           gapMinutes == other.gapMinutes &&
-          beyondHorizon == other.beyondHorizon;
+          beyondHorizon == other.beyondHorizon &&
+          skipped == other.skipped;
 }
 
 /// Per-txid display status for EVERY message in a conversation — the cheap

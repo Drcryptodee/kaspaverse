@@ -193,6 +193,12 @@ pub enum StrikeReason {
     /// (R2 D2 — the pinned ws client re-dials on its own). A strike earned by
     /// our own churn is exactly as unjust as one earned by a dead Wi-Fi.
     SelfInflicted,
+    /// WITHHELD (LINK-Q4): the socket's silence sat under our own catch-up
+    /// page in flight on it — a large reply holds every notification behind
+    /// it on the one socket, so the stall may be our load, not the node's
+    /// (`consensus-auditor` item 18, L70). The watchdog still executes; the
+    /// strike is recorded, not charged.
+    OwnLoad,
     /// Read back from a ledger written before R2 — the record predates the
     /// reason field, so its `why` is genuinely unknown rather than absent.
     #[default]
@@ -214,6 +220,7 @@ impl StrikeReason {
             Self::LinkBlackout => "link-blackout",
             Self::OsLostAdjacent => "os-lost-adjacent",
             Self::SelfInflicted => "self-inflicted",
+            Self::OwnLoad => "own-load",
             Self::Unknown => "unknown",
         }
     }
@@ -236,6 +243,7 @@ impl StrikeReason {
             "link-blackout" => Self::LinkBlackout,
             "os-lost-adjacent" => Self::OsLostAdjacent,
             "self-inflicted" => Self::SelfInflicted,
+            "own-load" => Self::OwnLoad,
             _ => Self::Unknown,
         }
     }
@@ -369,6 +377,62 @@ pub fn phone_fault_in_round(failed: &[(String, StrikeReason)]) -> bool {
     hosts.len() >= DNS_CORRELATION_MIN
 }
 
+/// **Did nothing answer this round at all?** — the second phone-side witness
+/// beside [`phone_fault_in_round`] (LINK-Q4, D-340 item 9). True when no
+/// resolver walk returned a node, no candidate's failure came from past its
+/// dial, every node failure is one that brings no byte back (a dial timeout,
+/// DNS, `ENETUNREACH`), and at least [`DNS_CORRELATION_MIN`] DISTINCT hosts
+/// failed. `answered` is [`RaceOutcome::answered`]. Pure; the caller supplies
+/// the round.
+///
+/// **Why a timeout can witness here when it cannot elsewhere.** One node
+/// timing out is that node's business, and a WINNING round still convicts
+/// every timeout in it: a live winner proved the network. A round in which
+/// every candidate on the immediate lane AND every resolver walk (five of
+/// them, each over the sixteen beacons) got nothing back is not four dead
+/// nodes and five hung beacons at once; it is the phone. The field case is
+/// LINK-Q1's 10:59:43 band hop, which Android never reported (a roam within
+/// one SSID keeps the network): `ivy` won a probe, its bind timed out three
+/// seconds later, and the next two rounds found four hosts and five walks
+/// silent. Replayed over the recorded captures with the shipped gate (the
+/// sitting's `replay_dark.py`): CONN-F1's 14 days stamp 2,200 of 2,315 barren
+/// rounds, 82 more than the DNS rule's 2,118, and withhold 6 more of their 89
+/// in-absentia convictions (2 were already withheld); LINK-Q1's 9 hours stamp
+/// 6 of 6 and withhold 1 more of 2 — the fixture. Every one withheld followed
+/// a death by at most ten seconds with every host and every walk dark; no
+/// recorded barren round ran inside a silence hunt, so the gate's reach there
+/// changed no recorded outcome.
+///
+/// Stamped only by a round with no live prover, as the DNS rule is (the
+/// monitor's gate), and read only by [`judge_admissibility`]'s in-absentia
+/// arm: it never withholds a strike a winning round earned.
+pub fn nothing_answered_in_round(failed: &[(String, StrikeReason)], answered: usize) -> bool {
+    if answered > 0 {
+        return false;
+    }
+    let no_bytes = |reason: &StrikeReason| {
+        matches!(
+            reason,
+            StrikeReason::DialTimeout | StrikeReason::DnsFailure | StrikeReason::Unreachable
+        )
+    };
+    if !failed.iter().all(|(_, reason)| no_bytes(reason)) {
+        return false;
+    }
+    let hosts: HashSet<&str> = failed.iter().map(|(url, _)| endpoint_host(url)).collect();
+    hosts.len() >= DNS_CORRELATION_MIN
+}
+
+/// Did a probe fail before its dial completed? Our own wrapper names the
+/// stage — `probe dial <url>: …` for the connect, `probe info …` and
+/// `probe <url>: …` once the socket was up — and only a failed dial can mean
+/// that nothing came back from the far side. Anything else (including a
+/// client that could not even be built) counts as having answered, which is
+/// the conservative direction for [`nothing_answered_in_round`].
+fn failed_at_the_dial(text: &str) -> bool {
+    text.starts_with("probe dial ")
+}
+
 /// The heartbeat-silence threshold past which a CONNECTED socket is judged
 /// stalled — the Rust authority for the claim `chain_service.dart`'s
 /// `watchdogStallSecs` (same value) makes from its process-lifetime view.
@@ -457,6 +521,43 @@ pub fn silence_deadline_after(landed: u32) -> Option<std::time::Duration> {
     let secs = SILENCE_DEADLINE.as_secs().checked_shl(landed.min(16))?;
     (secs < WATCHDOG_STALL_SECS).then(|| std::time::Duration::from_secs(secs))
 }
+
+/// **The pre-dial stage's floor: a silence this long starts the hunt behind
+/// the socket** (LINK-Q4, D-337 (ii): "pre-dial a candidate behind the live
+/// socket on … about 2–3 s of silence, swap at 9 s"). A pre-dial is not a
+/// swap: the hunt probes and HOLDS its winner, the socket keeps its place,
+/// and the swap still waits for the deadline ([`SILENCE_DEADLINE`], budgeted).
+///
+/// Three seconds because a healthy socket never goes that quiet: LINK-Q2's
+/// clean window (`ivy`, 41,652 DAA ticks, `judge_e1_ivy_only.txt` §F) had its
+/// longest gap at 1.05 s and its p99 at 0.47 s. A silence past three times
+/// the longest healthy gap is already a stall, and
+/// starting the find here gives it six seconds before the swap is due — so
+/// the swap installs a winner already in hand rather than beginning a race
+/// (LINK-Q1 measured 1.2–1.3 s from the deadline to a winner).
+pub const PREDIAL_FLOOR: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// **How far ahead of the swap deadline the pre-dial starts** (LINK-Q4). A
+/// round's immediate lane answers in ~1.2 s, but a winner found through the
+/// resolver lane lands only after a walk ([`RESOLVER_FETCH_TIMEOUT`], 5 s) and
+/// a dial (~1 s): six seconds lets either be in hand when the swap falls.
+/// With the budget at 18 s the pre-dial moves to 12 s, never to 3 s — a probe
+/// held fifteen seconds is stale, and a bad patch should not pay a round of
+/// probes for every three-second stall.
+pub const PREDIAL_LEAD: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// When, into a silence, the pre-dial stage falls for a swap `deadline`:
+/// `deadline − PREDIAL_LEAD`, never earlier than [`PREDIAL_FLOOR`] — 3 s for
+/// the base nine, 12 s for eighteen.
+pub fn predial_after(deadline: std::time::Duration) -> std::time::Duration {
+    deadline.saturating_sub(PREDIAL_LEAD).max(PREDIAL_FLOOR)
+}
+
+// The pre-dial must come before the swap it prepares, at every budget.
+const _: () = assert!(
+    PREDIAL_FLOOR.as_secs() < SILENCE_DEADLINE.as_secs(),
+    "the pre-dial stage must fall before the swap deadline"
+);
 
 /// **How long a socket must stay up with no quiet spell of the base deadline
 /// for the link to count as having HELD** — which resets the silence deadline's
@@ -566,6 +667,131 @@ impl ProbeClock {
     }
 }
 
+/// **The window a node's round trip is judged over** (LINK-Q4, D-337 (vi)):
+/// thirty seconds, two of Starlink's fifteen-second reconfiguration cycles, so
+/// one boundary's stall is one sample among ~15 and never the median.
+pub const RTT_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How often the bound socket's round trip is read when nothing else reads it
+/// (LINK-Q4). The same cadence the Network screen's probe ran at when it was
+/// introduced (UX-R3), giving fifteen samples a window. One `get_server_info`
+/// each way, a few hundred bytes with its framing: under 1 MB an hour, against
+/// the 67 MB production reads (D-344).
+pub const RTT_PROBE_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// **How long the race waits, after its first healthy answer, for a
+/// better-ranked node still in flight** (LINK-Q4) — RFC 8305 §5's Connection
+/// Attempt Delay, "one recommended value … is 250 milliseconds". Happy Eyeballs
+/// staggers the preferred attempt ahead of the rest by this much; our immediate
+/// lane dials at once, so the same head start is given at the other end: the
+/// preferred answer is taken if it lands within it. Never waited for a node
+/// with a strike, never for one without a rank, never past the grace.
+pub const PREFER_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// A round trip at or past this is a spike (LINK-Q2's episode line, which the
+/// soak judge counts: "a probe over 1 s").
+pub const RTT_SPIKE_MS: u64 = 1_000;
+
+/// Starlink re-plans its links every fifteen seconds, at :12, :27, :42 and :57
+/// past the UTC minute (LINK-Q1's research; LINK-Q2 found its three spikes of
+/// the turbulent stretch starting 0.3–1.8 s before one).
+const STARLINK_SLOT_MS: u64 = 15_000;
+const STARLINK_FIRST_MS: u64 = 12_000;
+
+/// **Does a probe sent at `sent_unix_ms` and answered `rtt_ms` later straddle
+/// a Starlink reconfiguration boundary?** Returns the boundary's second past
+/// the minute (12, 27, 42 or 57). The soak judge's own rule (`ab_judge.py`
+/// §K: the interval contains an instant ≡ 12 s mod 15 s of unix time — unix
+/// time has no leap seconds), so an in-app tag and a judge's count agree. A
+/// tag, never a verdict: Wi-Fi's own stalls fall on these instants too, by
+/// chance, in proportion to their length.
+pub fn starlink_boundary_in(sent_unix_ms: u64, rtt_ms: u64) -> Option<u64> {
+    let phase = sent_unix_ms.checked_sub(STARLINK_FIRST_MS)? % STARLINK_SLOT_MS;
+    let straddles = phase == 0 || phase + rtt_ms >= STARLINK_SLOT_MS;
+    straddles.then(|| {
+        let boundary = if phase == 0 {
+            sent_unix_ms
+        } else {
+            sent_unix_ms + (STARLINK_SLOT_MS - phase)
+        };
+        (boundary / 1000) % 60
+    })
+}
+
+/// **Each node's round trip over its last full window** (LINK-Q4, D-337
+/// (vi)). Samples are the bound socket's probes (`get_server_info`, as the
+/// Network screen reads it); a timeout enters at its deadline, a lower bound
+/// that can only rank the node worse. A node RANKS once its samples span a
+/// whole [`RTT_WINDOW`]: a median of a few seconds, or of one race probe, is
+/// not "a 30 s median".
+///
+/// **Kept for one network only** (RFC 8305 §4: "This historical data MUST NOT
+/// be used across different network interfaces and SHOULD be flushed whenever
+/// a device changes the network to which it is attached"): in memory, and
+/// [`Self::flush`]ed when the phone's default network moves. Nothing of it is
+/// persisted — a median from another network would rank the wrong node — and
+/// only a kind crosses the FFI, so no network is named to key it by.
+#[derive(Debug, Default)]
+pub struct RttBook {
+    samples: HashMap<String, std::collections::VecDeque<(u64, u64)>>,
+}
+
+impl RttBook {
+    /// A round trip of `rtt_ms` to `url`, read at `at_ms` on a monotonic clock.
+    /// Samples older than a window before the newest are dropped.
+    pub fn record(&mut self, url: &str, at_ms: u64, rtt_ms: u64) {
+        let window = u64::try_from(RTT_WINDOW.as_millis()).unwrap_or(u64::MAX);
+        let samples = self.samples.entry(url.to_string()).or_default();
+        samples.push_back((at_ms, rtt_ms));
+        while samples
+            .front()
+            .is_some_and(|(at, _)| at_ms.saturating_sub(*at) > window)
+        {
+            samples.pop_front();
+        }
+    }
+
+    /// The node's median over its last window, once the window is full: its
+    /// oldest kept sample is a whole [`RTT_WINDOW`] before its newest, give or
+    /// take one probe's spacing (the fifteenth sample at 2 s lands 28 s after
+    /// the first).
+    pub fn median(&self, url: &str) -> Option<u64> {
+        let window = u64::try_from(RTT_WINDOW.as_millis()).unwrap_or(u64::MAX);
+        let spacing = u64::try_from(RTT_PROBE_EVERY.as_millis()).unwrap_or(0);
+        let samples = self.samples.get(url)?;
+        let (first, _) = samples.front()?;
+        let (last, _) = samples.back()?;
+        if last.saturating_sub(*first) < window.saturating_sub(spacing) {
+            return None;
+        }
+        let mut rtts: Vec<u64> = samples.iter().map(|(_, rtt)| *rtt).collect();
+        rtts.sort_unstable();
+        Some(rtts[rtts.len() / 2])
+    }
+
+    /// Every ranked node's median.
+    pub fn ranks(&self) -> HashMap<String, u64> {
+        self.samples
+            .keys()
+            .filter_map(|url| self.median(url).map(|median| (url.clone(), median)))
+            .collect()
+    }
+
+    /// The phone moved to another network: nothing here describes it.
+    pub fn flush(&mut self) {
+        self.samples.clear();
+    }
+
+    /// Tests: the round trips kept for `url`, oldest first.
+    #[cfg(test)]
+    pub(crate) fn samples_for_tests(&self, url: &str) -> Vec<u64> {
+        self.samples
+            .get(url)
+            .map(|samples| samples.iter().map(|(_, rtt)| *rtt).collect())
+            .unwrap_or_default()
+    }
+}
+
 /// What to do with a strike-worthy event (R2 D3). `Withhold` is not
 /// forgiveness — the event is still recorded against the endpoint via
 /// [`EndpointHealth::withhold`], it just does not count toward demotion.
@@ -616,15 +842,23 @@ pub fn judge_admissibility(
     {
         return Admissibility::Withhold(reason);
     }
-    // A pending drop/stall strike is judged in absentia: the socket died,
-    // and only the race that FOLLOWED can say whether the phone's network
-    // was alive at the time. A phone-fault round stamped at-or-after the
-    // death refutes it (R3 D-099: eva convicted at 00:59:51 while the
-    // interposed round failed every candidate with ENETUNREACH). Scoped to
-    // Drop/Stall only — race-loss strikes are judged WITH a live winner
-    // present, and that evidence stands on its own (`ivy`'s 500 bar).
-    if matches!(reason, StrikeReason::Drop | StrikeReason::Stall)
-        && phone_fault_round_at_unix != 0
+    // A pending drop/stall/bind-failed strike is judged in absentia: the
+    // socket died (or never came up), and only the race that FOLLOWED can say
+    // whether the phone's network was alive at the time. A phone-fault round
+    // stamped at-or-after the event refutes it (R3 D-099: eva convicted at
+    // 00:59:51 while the interposed round failed every candidate with
+    // ENETUNREACH). **`bind-failed` joined at LINK-Q4** (D-340 item 9): it
+    // used to be convicted at once on "the network is known alive: it just
+    // answered a probe", and at 10:59:43 (LINK-Q1) `ivy` was convicted three
+    // seconds after its probe answered, inside a band hop Android never
+    // reported. A probe proves the network as it was, not as it is three
+    // seconds later. Race-loss strikes stay outside: they are judged WITH a
+    // live winner present, and that evidence stands on its own (`ivy`'s 500
+    // bar — a bind refused with a 5xx is convicted at once, as http-5xx).
+    if matches!(
+        reason,
+        StrikeReason::Drop | StrikeReason::Stall | StrikeReason::BindFailed
+    ) && phone_fault_round_at_unix != 0
         && phone_fault_round_at_unix >= event_at_unix
     {
         return Admissibility::Withhold(StrikeReason::LinkBlackout);
@@ -882,12 +1116,22 @@ impl EndpointHealth {
     /// That put an untrusted accelerator on the critical path (INV-8 posture)
     /// at the worst possible moment. When connectivity beats hygiene it has to
     /// beat it here too.
+    ///
+    /// **Ranked by round trip first, since LINK-Q4** (D-337 (vi); RFC 8305 §4:
+    /// a stateful client "SHOULD add a Destination Address Selection rule …
+    /// that prefers addresses with lower RTTs", and then one that prefers
+    /// used addresses over unused). `ranks` is [`RttBook::ranks`] — medians
+    /// on THIS network only. A ranked node comes before an unranked one, the
+    /// lower median first; the unranked keep the old order, most recently
+    /// healthy first. The pantry used to be recency alone, which re-dialled
+    /// whichever nodes the app had last happened to bind, however slow.
     pub fn race_pantry(
         &self,
         cached: Option<&str>,
         now_unix: u64,
         k: usize,
         ignore_demotions: bool,
+        ranks: &HashMap<String, u64>,
     ) -> Vec<String> {
         let mut fresh: Vec<(&String, &HealthRecord)> = self
             .records
@@ -900,8 +1144,10 @@ impl EndpointHealth {
             })
             .collect();
         fresh.sort_by(|(a_url, a), (b_url, b)| {
-            b.last_healthy_unix
-                .cmp(&a.last_healthy_unix)
+            let rank = |url: &String| ranks.get(url).copied().unwrap_or(u64::MAX);
+            rank(a_url)
+                .cmp(&rank(b_url))
+                .then_with(|| b.last_healthy_unix.cmp(&a.last_healthy_unix))
                 .then_with(|| a_url.cmp(b_url))
         });
         fresh
@@ -918,6 +1164,15 @@ impl EndpointHealth {
         if let Some(r) = self.records.get_mut(url) {
             r.last_strike_unix = r.last_strike_unix.saturating_sub(secs);
         }
+    }
+
+    /// Has `url` a strike still counting toward demotion (inside
+    /// [`STRIKE_WINDOW_SECS`])? Such a node is never PREFERRED by round trip
+    /// (LINK-Q4: "never over a strike"), though it may still win the race.
+    pub fn has_live_strike(&self, url: &str, now_unix: u64) -> bool {
+        self.records.get(url).is_some_and(|r| {
+            r.strikes > 0 && now_unix.saturating_sub(r.last_strike_unix) <= STRIKE_WINDOW_SECS
+        })
     }
 
     pub fn is_demoted(&self, url: &str, now_unix: u64) -> bool {
@@ -949,10 +1204,15 @@ pub fn sanitize_node_text(text: &str) -> String {
 /// candidate, so a round summary that repeats them spends bytes saying
 /// nothing (and bytes are what evict the ring — L65).
 ///
-/// A resolver-supplied URL is **node-controlled text**, so every caller that
-/// puts this into the evidence lane wraps it in [`sanitize_node_text`]
-/// (consensus-auditor item 16 — the same rule the error strings already
-/// followed; the host was a new doorway for the same class).
+/// A resolver-supplied URL is **node-controlled text**. What keeps it from
+/// forging a log line is the intake, not the caller: a resolver candidate
+/// enters the race only if [`candidate_url_is_clean`] (no whitespace or
+/// control bytes), and a pin only through [`validate_node_url`], so a bound
+/// URL's host is logged raw by most callers. [`sanitize_node_text`] is applied
+/// where a host sits beside node-supplied error text (consensus-auditor item
+/// 16). The intake bounds characters, not length: only a pin is capped
+/// ([`MAX_NODE_URL_LEN`]); a resolver candidate's host is as long as the
+/// resolver made it (ffi-leak-auditor, LINK-Q4 round 4 note).
 pub fn endpoint_host(url: &str) -> &str {
     url.split("://")
         .nth(1)
@@ -1198,11 +1458,54 @@ pub async fn bounded_get_node(
         .await
         .map_err(|_| ChainError::Message(format!("resolver fetch: timeout after {timeout:?}")))?
         .map_err(|e| {
+            // Read BEFORE the sanitizer's 200-character cap, which can cut a
+            // walk's later seeders off (LINK-Q4): a beacon that answered with
+            // an HTTP status is the phone's network working, whatever it said.
+            let raw = e.to_string();
             ChainError::Message(format!(
-                "resolver fetch: {}",
-                sanitize_node_text(&e.to_string())
+                "{RESOLVER_FETCH}{}: {}",
+                if a_beacon_answered(&raw) {
+                    BEACON_ANSWERED
+                } else {
+                    ""
+                },
+                sanitize_node_text(&raw)
             ))
         })
+}
+
+/// Our own words, added to a resolver miss in which some beacon answered
+/// with an HTTP status ([`bounded_get_node`]); the race reads THIS, never the
+/// beacon's text (LINK-Q4, `consensus-auditor` round 1 note).
+const BEACON_ANSWERED: &str = " (a beacon answered)";
+
+/// How every [`bounded_get_node`] failure begins: our own words, so the race
+/// reads the marker right after them and never inside the beacon's text.
+const RESOLVER_FETCH: &str = "resolver fetch";
+
+/// Did a failed walk ([`bounded_get_node`]'s message) reach a beacon that
+/// answered? Our own marker, right after our own prefix — never a match inside
+/// the sanitized beacon text that follows (`ffi-leak-auditor`, round 2 note).
+fn a_walk_answered(text: &str) -> bool {
+    text.strip_prefix(RESOLVER_FETCH)
+        .is_some_and(|rest| rest.starts_with(BEACON_ANSWERED))
+}
+
+/// Did any beacon of a failed walk answer with an HTTP status? The pinned
+/// resolver reports each seeder as `Unable to connect to <url>: <error>`
+/// (`resolver.rs:150` @ `01b532e`), and workflow-http 0.18.0's `get_json`
+/// renders a non-success status as `"{status}: {body}"` (`native.rs:77`) — so a status
+/// is `: ` followed by three digits and a space. A connect failure, a DNS
+/// failure or our own timeout carries none.
+fn a_beacon_answered(text: &str) -> bool {
+    text.match_indices(": ").any(|(at, _)| {
+        let rest = &text.as_bytes()[at + 2..];
+        rest.len() >= 4
+            && (b'1'..=b'5').contains(&rest[0])
+            && rest[1].is_ascii_digit()
+            && rest[2].is_ascii_digit()
+            && rest[3] == b' '
+    })
 }
 
 /// Independent resolver walks, raced (LINK-P2). The connect race gets this
@@ -1377,7 +1680,26 @@ pub struct RaceOutcome {
     /// dropped: reasons are what convicted `ivy`'s real HTTP 500 and exonerated
     /// four weak-link timeouts in the 2026-07-30 capture (L65).
     pub notes: Vec<(String, String)>,
+    /// How many things in this round ANSWERED at all: a resolver walk that
+    /// returned a node, or a candidate whose failure came from past its dial
+    /// (it connected, then refused or timed out on `get_server_info`). Zero is
+    /// half of [`nothing_answered_in_round`]'s evidence. Complete only for a
+    /// round with no winner, which drains every task; a winning round stops
+    /// counting at its winner, and nothing reads it there.
+    pub answered: usize,
 }
+
+/// A race candidate's loss: (the URL to strike, if the NODE is what failed; a
+/// note for the round summary; whether anything ANSWERED on its way to
+/// failing — a resolver walk that returned a node, or a dial that completed).
+type RaceLoss = (
+    Option<(String, StrikeReason)>,
+    Option<(String, String)>,
+    bool,
+);
+
+/// What one race candidate's task ends in.
+type RaceTask = std::result::Result<ProbeOutcome, RaceLoss>;
 
 /// Race-to-connect (V3 deliverable 1, pantry since C6/D-089): the cached
 /// endpoint plus up to [`PANTRY_DIALS`] recent-healthy pantry candidates
@@ -1403,6 +1725,15 @@ pub struct RaceOutcome {
 /// - **The incumbent of a swap hunt** (P0b) — the node the user asked to
 ///   leave. That one is never degraded: "find me a different node" cannot be
 ///   satisfied by the node they are already on.
+///
+/// **It prefers the faster node** (LINK-Q4, D-337 (vi)): `prefer` maps the
+/// candidates that may be preferred — ranked on this network, no strike on
+/// them — to their 30 s medians. When the first healthy answer lands, any
+/// immediate candidate still in flight with a LOWER median gets
+/// [`PREFER_GRACE`] to answer too, and the lowest-ranked answer in that grace
+/// wins. Losses that land in the grace are left to the reaper as before: the
+/// grace changes which node is chosen, never who is struck.
+#[allow(clippy::too_many_arguments)]
 pub async fn race(
     resolver: &Resolver,
     network_id: NetworkId,
@@ -1411,12 +1742,47 @@ pub async fn race(
     excluded: &HashSet<String>,
     fetches: usize,
     probe_timeout: Duration,
+    prefer: &HashMap<String, u64>,
 ) -> RaceOutcome {
-    // A loss carries (the URL to strike, if the NODE is what failed; a note for
-    // the round summary). Losing tasks no longer log a line each — the caller
-    // prints one coalesced line per round (addendum #1).
-    type Loss = (Option<(String, StrikeReason)>, Option<(String, String)>);
-    let mut tasks: JoinSet<std::result::Result<ProbeOutcome, Loss>> = JoinSet::new();
+    race_with(
+        resolver,
+        network_id,
+        cached,
+        pantry,
+        excluded,
+        fetches,
+        probe_timeout,
+        prefer,
+        |url: String, network_id: NetworkId, timeout: Duration| async move {
+            probe_endpoint(&url, network_id, timeout).await
+        },
+    )
+    .await
+}
+
+/// [`race`] with its prober as a seam: production passes [`probe_endpoint`];
+/// a test passes scripted answers, so the whole round — both lanes, the
+/// counts, the preference grace — runs offline (LINK-Q4: the grace's one call
+/// was a line no test could reach).
+#[allow(clippy::too_many_arguments)]
+async fn race_with<P, F>(
+    resolver: &Resolver,
+    network_id: NetworkId,
+    cached: Option<String>,
+    pantry: Vec<String>,
+    excluded: &HashSet<String>,
+    fetches: usize,
+    probe_timeout: Duration,
+    prefer: &HashMap<String, u64>,
+    probe: P,
+) -> RaceOutcome
+where
+    P: Fn(String, NetworkId, Duration) -> F + Clone + Send + Sync + 'static,
+    F: std::future::Future<Output = Result<ProbeOutcome>> + Send + 'static,
+{
+    // Losing tasks no longer log a line each — the caller prints one coalesced
+    // line per round (addendum #1).
+    let mut tasks: JoinSet<RaceTask> = JoinSet::new();
     let mut entered: HashSet<String> = HashSet::new();
 
     // Cached first, then the pantry: identical immediate-dial treatment, and
@@ -1430,8 +1796,9 @@ pub async fn race(
         if !entered.insert(url.clone()) {
             continue;
         }
+        let probe = probe.clone();
         tasks.spawn(async move {
-            probe_endpoint(&url, network_id, probe_timeout)
+            probe(url.clone(), network_id, probe_timeout)
                 .await
                 .map_err(|e| {
                     // `[imm]` = the immediate lane (cached + pantry, zero HTTP
@@ -1443,14 +1810,19 @@ pub async fn race(
                         format!("{}[imm]", sanitize_node_text(endpoint_host(&url))),
                         compact_reason(&text),
                     );
+                    let answered = !failed_at_the_dial(&text);
                     (
                         Some((url, StrikeReason::classify_probe_failure(&text))),
                         Some(note),
+                        answered,
                     )
                 })
         });
     }
 
+    // The immediate lane, for the preference grace below: every one of them
+    // ends in a winner or a loss that names it.
+    let immediate: Vec<String> = entered.iter().cloned().collect();
     // Track URLs already dialing so duplicate resolver answers don't double-
     // dial. The resolver returns one node per fetch; fetches run in parallel.
     let seen = std::sync::Arc::new(Mutex::new(entered));
@@ -1458,17 +1830,23 @@ pub async fn race(
         let resolver = resolver.clone();
         let excluded = excluded.clone();
         let seen = seen.clone();
+        let probe = probe.clone();
         tasks.spawn(async move {
             // Bounded doorway (C1): the raw get_node has no deadline at any
             // layer and one blackholed fetch wedged the race loop forever.
             let node = bounded_get_node(&resolver, network_id, RESOLVER_FETCH_TIMEOUT)
                 .await
                 .map_err(|e| {
+                    let text = e.to_string();
+                    let answered = a_walk_answered(&text);
                     (
                         None,
-                        Some(("resolver".to_string(), compact_reason(&e.to_string()))),
+                        Some(("resolver".to_string(), compact_reason(&text))),
+                        answered,
                     )
                 })?;
+            // From here the walk ANSWERED — whatever becomes of the node it
+            // named, the phone reached a beacon (LINK-Q4).
             let url = node.url;
             if !candidate_url_is_clean(&url) {
                 // Undialable by construction; only useful to an attacker.
@@ -1478,6 +1856,7 @@ pub async fn race(
                         "resolver".to_string(),
                         "rejected: malformed url".to_string(),
                     )),
+                    true,
                 ));
             }
             if excluded.contains(&url) {
@@ -1487,6 +1866,7 @@ pub async fn race(
                         sanitize_node_text(endpoint_host(&url)),
                         "skipped: excluded".to_string(),
                     )),
+                    true,
                 ));
             }
             {
@@ -1496,10 +1876,10 @@ pub async fn race(
                 if !seen.insert(url.clone()) {
                     // Duplicate answer — someone's already dialing it. Not a
                     // loss worth a note: it says nothing about any node.
-                    return Err((None, None));
+                    return Err((None, None, true));
                 }
             }
-            probe_endpoint(&url, network_id, probe_timeout)
+            probe(url.clone(), network_id, probe_timeout)
                 .await
                 .map_err(|e| {
                     let text = e.to_string();
@@ -1510,19 +1890,27 @@ pub async fn race(
                     (
                         Some((url, StrikeReason::classify_probe_failure(&text))),
                         Some(note),
+                        true,
                     )
                 })
         });
     }
 
     let mut outcome = RaceOutcome::default();
+    let mut finished: HashSet<String> = HashSet::new();
     while let Some(joined) = tasks.join_next().await {
         match joined {
             Ok(Ok(winner)) => {
                 outcome.winner = Some(winner);
                 break;
             }
-            Ok(Err((failed_url, note))) => {
+            Ok(Err((failed_url, note, answered))) => {
+                if answered {
+                    outcome.answered += 1;
+                }
+                if let Some((url, _)) = &failed_url {
+                    finished.insert(url.clone());
+                }
                 // A URL means the NODE failed (it gets struck once the network
                 // proves alive); a note without a URL is a resolver miss, a
                 // demoted skip or a fetch timeout — evidence, but not evidence
@@ -1537,6 +1925,10 @@ pub async fn race(
             Err(_) => {} // panicked probe task — nothing to record
         }
     }
+    if let Some(first) = outcome.winner.take() {
+        outcome.winner =
+            Some(prefer_within_grace(first, &immediate, &finished, prefer, &mut tasks).await);
+    }
     // NEVER abort in-flight losers (consensus-audit finding): a probe aborted
     // between its connect() and disconnect() leaks a DETACHED ws loop that
     // loyal-redials its node forever (the pinned client's loop holds its own
@@ -1547,6 +1939,62 @@ pub async fn race(
         tokio::spawn(async move { while tasks.join_next().await.is_some() {} });
     }
     outcome
+}
+
+/// **The preference grace** (LINK-Q4): the first healthy answer stands unless
+/// an immediate candidate still in flight is ranked lower in `prefer` and
+/// answers within [`PREFER_GRACE`]; the lowest-ranked such answer wins. Losses
+/// in the grace are not collected — they finish in the reaper, exactly as
+/// they did before the grace existed, so no strike depends on it.
+async fn prefer_within_grace(
+    first: ProbeOutcome,
+    immediate: &[String],
+    finished: &HashSet<String>,
+    prefer: &HashMap<String, u64>,
+    tasks: &mut JoinSet<RaceTask>,
+) -> ProbeOutcome {
+    let rank_of = |url: &str| prefer.get(url).copied();
+    let mut best = first;
+    let mut best_rank = rank_of(&best.url);
+    let better = |rank: u64, best_rank: Option<u64>| best_rank.is_none_or(|best| rank < best);
+    let waiting: HashSet<&String> = immediate
+        .iter()
+        .filter(|url| **url != best.url && !finished.contains(*url))
+        .filter(|url| rank_of(url).is_some_and(|rank| better(rank, best_rank)))
+        .collect();
+    if waiting.is_empty() {
+        return best;
+    }
+    let first_host = sanitize_node_text(endpoint_host(&best.url));
+    let first_rank = best_rank;
+    let started = tokio::time::Instant::now();
+    let deadline = started + PREFER_GRACE;
+    while let Ok(Some(joined)) = tokio::time::timeout_at(deadline, tasks.join_next()).await {
+        let Ok(Ok(other)) = joined else {
+            continue;
+        };
+        if !waiting.contains(&other.url) {
+            continue;
+        }
+        let Some(rank) = rank_of(&other.url) else {
+            continue;
+        };
+        if better(rank, best_rank) {
+            best_rank = Some(rank);
+            best = other;
+        }
+    }
+    if best_rank != first_rank {
+        log::info!(
+            "link: preferred {} (30 s median {} ms) over the first answer {first_host} ({}), \
+             {} ms later",
+            sanitize_node_text(endpoint_host(&best.url)),
+            best_rank.unwrap_or_default(),
+            first_rank.map_or("unranked".to_string(), |rank| format!("{rank} ms")),
+            started.elapsed().as_millis()
+        );
+    }
+    best
 }
 
 /// How long an already-signed tx stays resubmittable after its submit.
@@ -1866,7 +2314,7 @@ mod tests {
         // Absent (and corrupt) 5th field = never-observed-healthy: nothing
         // qualifies for the pantry.
         assert!(loaded
-            .race_pantry(None, 6_000, PANTRY_DIALS, false)
+            .race_pantry(None, 6_000, PANTRY_DIALS, false, &Default::default())
             .is_empty());
         // And the migrated ledger round-trips in the NEW format.
         loaded.save(&path);
@@ -2254,14 +2702,14 @@ mod tests {
         // and it is why the advisory degradation has to exist.
         assert!(
             health
-                .race_pantry(None, now, PANTRY_DIALS, false)
+                .race_pantry(None, now, PANTRY_DIALS, false, &Default::default())
                 .is_empty(),
             "under normal hygiene a fully demoted pantry offers nothing"
         );
 
         // The floor: hygiene degrades to advisory and the fast path comes
         // back, still capped at PANTRY_DIALS and still most-recent-first.
-        let floor = health.race_pantry(None, now, PANTRY_DIALS, true);
+        let floor = health.race_pantry(None, now, PANTRY_DIALS, true, &Default::default());
         assert_eq!(
             floor.len(),
             PANTRY_DIALS,
@@ -2595,7 +3043,7 @@ mod tests {
         // legitimately back — the cooldown lapsing is the ledger healing,
         // not the loader forgetting.)
         assert_eq!(
-            loaded.race_pantry(None, 5_600, PANTRY_DIALS, false),
+            loaded.race_pantry(None, 5_600, PANTRY_DIALS, false, &Default::default()),
             vec!["wss://eva.kaspa.stream/kaspa/mainnet/wrpc/borsh".to_string()],
         );
         // And the new fields default HONESTLY: the record predates the reason
@@ -2690,8 +3138,13 @@ mod tests {
         assert!(health.is_demoted("wss://demoted.example/borsh", now));
 
         // The cached endpoint is deduped out even when it is the freshest.
-        let pantry =
-            health.race_pantry(Some("wss://recent.example/borsh"), now, PANTRY_DIALS, false);
+        let pantry = health.race_pantry(
+            Some("wss://recent.example/borsh"),
+            now,
+            PANTRY_DIALS,
+            false,
+            &Default::default(),
+        );
         assert_eq!(
             pantry,
             vec![
@@ -2702,7 +3155,7 @@ mod tests {
         );
 
         // Without the dedup, K caps the list and recency orders it.
-        let pantry = health.race_pantry(None, now, PANTRY_DIALS, false);
+        let pantry = health.race_pantry(None, now, PANTRY_DIALS, false, &Default::default());
         assert_eq!(
             pantry,
             vec![
@@ -2714,8 +3167,264 @@ mod tests {
 
         // A lapsed demotion cooldown restores pantry candidacy.
         let after_cooldown = now + DEMOTION_COOLDOWN_SECS;
-        let pantry = health.race_pantry(None, after_cooldown, 10, false);
+        let pantry = health.race_pantry(None, after_cooldown, 10, false, &Default::default());
         assert!(pantry.contains(&"wss://demoted.example/borsh".to_string()));
+    }
+
+    // ── LINK-Q4 · ranking by round trip ──────────────────────────────────────────
+
+    /// **The pantry takes the fastest known nodes first** (RFC 8305 §4): a
+    /// ranked node before an unranked one, the lower median first; the
+    /// unranked keep recency. The recency-only pantry kept re-dialling the
+    /// nodes the app had last happened to bind.
+    #[test]
+    fn the_pantry_ranks_by_round_trip_then_recency() {
+        let now = 1_000_000u64;
+        let mut health = EndpointHealth::default();
+        let url = |host: &str| format!("wss://{host}/kaspa/mainnet/wrpc/borsh");
+        health.mark_healthy(&url("eva.kaspa.green"), now - 10);
+        health.mark_healthy(&url("nina.kaspa.blue"), now - 20);
+        health.mark_healthy(&url("fresh.kaspa.red"), now - 5);
+        health.mark_healthy(&url("ivy.kaspa.green"), now - 3_000);
+        health.mark_healthy(&url("old.kaspa.red"), now - 4_000);
+        // LINK-Q2's medians on one air (D-340 item 5).
+        let ranks: HashMap<String, u64> = [
+            (url("ivy.kaspa.green"), 175),
+            (url("nina.kaspa.blue"), 275),
+            (url("eva.kaspa.green"), 315),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            health.race_pantry(None, now, 5, false, &ranks),
+            vec![
+                url("ivy.kaspa.green"),
+                url("nina.kaspa.blue"),
+                url("eva.kaspa.green"),
+                url("fresh.kaspa.red"),
+                url("old.kaspa.red"),
+            ]
+        );
+        assert_eq!(
+            health.race_pantry(None, now, PANTRY_DIALS, false, &ranks),
+            vec![
+                url("ivy.kaspa.green"),
+                url("nina.kaspa.blue"),
+                url("eva.kaspa.green")
+            ],
+            "the three fastest, though two of them were bound longest ago"
+        );
+        assert_eq!(
+            health.race_pantry(None, now, PANTRY_DIALS, false, &HashMap::new()),
+            vec![
+                url("fresh.kaspa.red"),
+                url("eva.kaspa.green"),
+                url("nina.kaspa.blue")
+            ],
+            "with nothing ranked, recency as before"
+        );
+    }
+
+    /// **A node ranks once it has a full window, and only on this network.**
+    /// Fewer seconds than a window, or one race probe, is not "a 30 s median";
+    /// samples older than a window before the newest fall out; a flush (the
+    /// network moved) forgets everything.
+    #[test]
+    fn a_node_ranks_on_a_full_window_and_a_flush_forgets() {
+        let mut book = RttBook::default();
+        let url = "wss://ivy.kaspa.green/kaspa/mainnet/wrpc/borsh";
+        for i in 0..14u64 {
+            book.record(url, i * 2_000, 170 + i);
+        }
+        assert_eq!(book.median(url), None, "26 s of samples: not yet a window");
+        book.record(url, 28_000, 900);
+        assert_eq!(
+            book.median(url),
+            Some(177),
+            "fifteen samples over 28 s: the median, the one 900 ms spike outvoted"
+        );
+        assert_eq!(book.ranks().get(url), Some(&177));
+
+        // A minute later only the last window counts: fifteen faster samples,
+        // which the old fifteen would outvote if they were still kept.
+        for i in 0..15u64 {
+            book.record(url, 60_000 + i * 2_000, 100);
+        }
+        assert_eq!(book.median(url), Some(100), "the old window fell out");
+        assert_eq!(book.samples_for_tests(url).len(), 15);
+
+        // A single probe of another node ranks nothing.
+        book.record(
+            "wss://eva.kaspa.green/kaspa/mainnet/wrpc/borsh",
+            90_000,
+            120,
+        );
+        assert_eq!(book.ranks().len(), 1);
+
+        book.flush();
+        assert!(
+            book.ranks().is_empty(),
+            "another network: nothing here describes it"
+        );
+        assert_eq!(book.median(url), None);
+    }
+
+    /// **The Starlink tag is the judge's own rule** (`ab_judge.py` §K): a
+    /// probe straddles a boundary when its interval contains an instant ≡ 12 s
+    /// mod 15 s of unix time, and the tag names that second past the minute.
+    #[test]
+    fn a_spike_is_tagged_by_starlinks_boundary_exactly_as_the_judge_counts_it() {
+        // LINK-Q2's 6.0 s spike began at 06:48:56 WAT (05:48:56 UTC) and
+        // straddled :57; the minute's boundary instants are :12 :27 :42 :57.
+        let minute = 1_790_574_480_000u64; // 2026-09-28 05:48:00.000 UTC
+        assert_eq!(minute % 60_000, 0);
+        assert_eq!(starlink_boundary_in(minute + 56_000, 6_000), Some(57));
+        assert_eq!(
+            starlink_boundary_in(minute + 56_000, 999),
+            None,
+            "ends before :57"
+        );
+        assert_eq!(
+            starlink_boundary_in(minute + 56_000, 1_000),
+            Some(57),
+            "reaches it exactly"
+        );
+        assert_eq!(
+            starlink_boundary_in(minute + 12_000, 0),
+            Some(12),
+            "sent on it"
+        );
+        assert_eq!(starlink_boundary_in(minute + 26_500, 600), Some(27));
+        assert_eq!(starlink_boundary_in(minute + 41_900, 150), Some(42));
+        assert_eq!(starlink_boundary_in(minute + 57_100, 14_000), None);
+        assert_eq!(
+            starlink_boundary_in(minute + 57_100, 14_900),
+            Some(12),
+            "into the next minute"
+        );
+        assert_eq!(
+            starlink_boundary_in(0, 5_000),
+            None,
+            "a pre-epoch clock tags nothing"
+        );
+    }
+
+    fn outcome(url: &str) -> ProbeOutcome {
+        ProbeOutcome {
+            url: url.to_string(),
+            server_version: String::new(),
+            virtual_daa_score: 0,
+            rpc_api_version: 1,
+            info_ms: 0,
+        }
+    }
+
+    type RaceTasks = JoinSet<RaceTask>;
+
+    /// **The preference grace** (RFC 8305 §5's 250 ms): the first answer
+    /// stands unless a lower-ranked immediate candidate still in flight answers
+    /// within the grace. Never waited for: an unranked one, a slower one, one
+    /// already finished, one that answers late. Driven on tokio's paused clock
+    /// with scripted answers, so the timing is exact.
+    #[tokio::test(start_paused = true)]
+    async fn the_race_prefers_a_faster_node_that_answers_within_the_grace() {
+        let url = |host: &str| format!("wss://{host}/kaspa/mainnet/wrpc/borsh");
+        let (eva, ivy, nina, new) = (url("eva"), url("ivy"), url("nina"), url("new"));
+        let ranks: HashMap<String, u64> =
+            [(eva.clone(), 315), (ivy.clone(), 175), (nina.clone(), 275)]
+                .into_iter()
+                .collect();
+        let immediate = vec![eva.clone(), ivy.clone(), nina.clone(), new.clone()];
+        let answers = |script: Vec<(String, u64)>| {
+            let mut tasks: RaceTasks = JoinSet::new();
+            for (who, after_ms) in script {
+                tasks.spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(after_ms)).await;
+                    Ok(outcome(&who))
+                });
+            }
+            tasks
+        };
+
+        // ivy (175) answers 200 ms after eva (315): preferred.
+        let mut tasks = answers(vec![(ivy.clone(), 200), (nina.clone(), 100)]);
+        let won = prefer_within_grace(
+            outcome(&eva),
+            &immediate,
+            &HashSet::new(),
+            &ranks,
+            &mut tasks,
+        )
+        .await;
+        assert_eq!(won.url, ivy, "the lowest median inside the grace");
+
+        // ivy answers 300 ms after: past the grace, eva stands.
+        let mut tasks = answers(vec![(ivy.clone(), 300)]);
+        let won = prefer_within_grace(
+            outcome(&eva),
+            &immediate,
+            &HashSet::new(),
+            &ranks,
+            &mut tasks,
+        )
+        .await;
+        assert_eq!(won.url, eva);
+
+        // A slower or unranked node is never waited for or taken.
+        let mut tasks = answers(vec![(eva.clone(), 10), (new.clone(), 10)]);
+        let started = tokio::time::Instant::now();
+        let won = prefer_within_grace(
+            outcome(&ivy),
+            &immediate,
+            &HashSet::new(),
+            &ranks,
+            &mut tasks,
+        )
+        .await;
+        assert_eq!(won.url, ivy);
+        assert_eq!(
+            started.elapsed(),
+            Duration::ZERO,
+            "nothing better in flight: no wait at all"
+        );
+
+        // A candidate that already finished (it failed) is not waited for.
+        let finished: HashSet<String> = [ivy.clone(), nina.clone()].into_iter().collect();
+        let mut tasks = answers(vec![]);
+        let started = tokio::time::Instant::now();
+        let won =
+            prefer_within_grace(outcome(&eva), &immediate, &finished, &ranks, &mut tasks).await;
+        assert_eq!(won.url, eva);
+        assert_eq!(started.elapsed(), Duration::ZERO);
+
+        // An unranked first answer yields to any ranked one in the grace.
+        let mut tasks = answers(vec![(nina.clone(), 50)]);
+        let won = prefer_within_grace(
+            outcome(&new),
+            &immediate,
+            &HashSet::new(),
+            &ranks,
+            &mut tasks,
+        )
+        .await;
+        assert_eq!(won.url, nina);
+
+        // A loss in the grace changes nothing and is left alone.
+        let mut tasks: RaceTasks = JoinSet::new();
+        let lost = ivy.clone();
+        tasks.spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            Err((Some((lost, StrikeReason::DialTimeout)), None, false))
+        });
+        let won = prefer_within_grace(
+            outcome(&eva),
+            &immediate,
+            &HashSet::new(),
+            &ranks,
+            &mut tasks,
+        )
+        .await;
+        assert_eq!(won.url, eva);
     }
 
     /// C1 (D-089): the wedge test. A seeder that ACCEPTS the TCP connection
@@ -2905,6 +3614,7 @@ mod tests {
             &Default::default(),
             0,
             Duration::from_millis(400),
+            &Default::default(),
         )
         .await;
 
@@ -2938,6 +3648,445 @@ mod tests {
             "the immediate lane must stay distinguishable (C6 forensics): {who}"
         );
         assert!(!why.is_empty(), "a loss with no reason is not evidence");
+    }
+
+    // ── LINK-Q4 · bind-failed in absentia, and a round in which nothing answered ──
+
+    /// **The rule's edges** (LINK-Q4, D-340 item 9): a round is the phone's
+    /// when nothing answered — no walk, no dial — across two distinct hosts,
+    /// and every node failure is one that brings no byte back.
+    #[test]
+    fn nothing_answered_needs_every_host_and_every_walk_silent() {
+        let f = |host: &str, reason| (format!("wss://{host}/kaspa/mainnet/wrpc/borsh"), reason);
+        let dark = [
+            f("ivy.kaspa.green", StrikeReason::DialTimeout),
+            f("sara.kaspa.red", StrikeReason::DialTimeout),
+        ];
+        assert!(nothing_answered_in_round(&dark, 0));
+        assert!(
+            !nothing_answered_in_round(&dark, 1),
+            "one resolver walk that returned a node, or one dial that completed, is the \
+             network answering"
+        );
+        assert!(
+            !nothing_answered_in_round(&dark[..1], 0),
+            "one host timing out is that host's business"
+        );
+        assert!(
+            !nothing_answered_in_round(
+                &[
+                    f("ivy.kaspa.green", StrikeReason::DialTimeout),
+                    f("ivy.kaspa.green", StrikeReason::DialTimeout),
+                ],
+                0
+            ),
+            "the same host twice is one witness"
+        );
+        assert!(
+            nothing_answered_in_round(
+                &[
+                    f("vivi.kaspa.blue", StrikeReason::Unreachable),
+                    f("kate.kaspa.red", StrikeReason::DialTimeout),
+                    f("eva.kaspa.green", StrikeReason::DnsFailure),
+                ],
+                0
+            ),
+            "timeouts, DNS and ENETUNREACH are all nothing coming back (CONN-F1's 12:27:20 \
+             round: one ENETUNREACH beside three timeouts)"
+        );
+        for answered in [
+            StrikeReason::ProbeFailed,
+            StrikeReason::HttpServerError,
+            StrikeReason::Drop,
+        ] {
+            assert!(
+                !nothing_answered_in_round(
+                    &[
+                        f("ivy.kaspa.green", StrikeReason::DialTimeout),
+                        f("sara.kaspa.red", answered),
+                    ],
+                    0
+                ),
+                "a {} is something coming back",
+                answered.as_token()
+            );
+        }
+        assert!(
+            !nothing_answered_in_round(&[], 0),
+            "an empty round proves nothing"
+        );
+    }
+
+    /// **A bind failure is judged by the rounds after it, like a drop.** A
+    /// phone-fault stamp at or after it withholds it; one before it, or none,
+    /// leaves it convicted — and a 5xx never reaches this arm (the monitor
+    /// convicts it at once, and the guard above would anyway).
+    #[test]
+    fn a_bind_failure_is_judged_in_absentia_like_a_drop() {
+        let at = 10_000;
+        for stamp in [at, at + 5] {
+            assert_eq!(
+                judge_admissibility(StrikeReason::BindFailed, at, 0, 0, false, stamp),
+                Admissibility::Withhold(StrikeReason::LinkBlackout),
+                "a dark round {}s after the bind failed",
+                stamp - at
+            );
+        }
+        for stamp in [0, at - 1] {
+            assert_eq!(
+                judge_admissibility(StrikeReason::BindFailed, at, 0, 0, false, stamp),
+                Admissibility::Convict(StrikeReason::BindFailed),
+                "no dark round since it (stamp {stamp}): the node's"
+            );
+        }
+        assert_eq!(
+            judge_admissibility(StrikeReason::DialTimeout, at, 0, 0, false, at),
+            Admissibility::Convict(StrikeReason::DialTimeout),
+            "a race loss is judged WITH its winner, never in absentia"
+        );
+    }
+
+    /// **The fixture: LINK-Q1's 10:59:43 band hop** (`~/device_captures/
+    /// linkq1_20260927_0237/soak_kv.log`, lines 2710–2732). `ivy` won a probe
+    /// at 10:59:40.6; its bind timed out at 10:59:43.6 (`wRPC -> WebSocket ->
+    /// Connection timeout`, verbatim) and was convicted on the spot; rounds 1
+    /// and 2 found four hosts on two domains and all five resolver walks
+    /// silent; `kate` won at 11:00:00.6. The probe text is the wrapper's own
+    /// shape around that line's transport words (the summary compacts the
+    /// URL). DNS-or-unreachable could not see this round — every failure is
+    /// a timeout — which is why the second rule exists.
+    #[test]
+    fn the_band_hops_round_answered_nothing_and_the_old_rule_could_not_see_it() {
+        let probe = |host: &str| {
+            format!("probe dial wss://{host}/kaspa/mainnet/wrpc/borsh: wRPC -> WebSocket -> Connection timeout")
+        };
+        let round: Vec<(String, StrikeReason)> = [
+            "ivy.kaspa.green",
+            "sara.kaspa.red",
+            "kate.kaspa.red",
+            "leah.kaspa.red",
+        ]
+        .into_iter()
+        .map(|host| {
+            let text = probe(host);
+            assert!(failed_at_the_dial(&text), "{host} failed at its dial");
+            (
+                format!("wss://{host}/kaspa/mainnet/wrpc/borsh"),
+                StrikeReason::classify_probe_failure(&text),
+            )
+        })
+        .collect();
+        assert!(round.iter().all(|(_, r)| *r == StrikeReason::DialTimeout));
+        assert!(
+            !phone_fault_in_round(&round),
+            "the DNS/unreachable rule alone never saw a band hop"
+        );
+        assert!(
+            nothing_answered_in_round(&round, 0),
+            "four hosts and five silent walks: the phone"
+        );
+        // Our own later stages are answers: the socket came up.
+        for reached in [
+            "probe info wss://ivy.kaspa.green/kaspa/mainnet/wrpc/borsh: timeout",
+            "probe wss://ivy.kaspa.green/kaspa/mainnet/wrpc/borsh: not synced",
+            "a client that could not be built",
+        ] {
+            assert!(!failed_at_the_dial(reached), "{reached}");
+        }
+        // And the bind itself, parked at 10:59:43 and settled at 11:00:02
+        // with the round-1 stamp (10:59:48) between them: withheld.
+        let bind_failed_at = 1_790_503_183;
+        let round_one_at = 1_790_503_188;
+        assert_eq!(
+            StrikeReason::classify_probe_failure("wRPC -> WebSocket -> Connection timeout"),
+            StrikeReason::DialTimeout,
+            "the bind's own words are a timeout, not an answer"
+        );
+        assert_eq!(
+            judge_admissibility(
+                StrikeReason::BindFailed,
+                bind_failed_at,
+                0,
+                0,
+                false,
+                round_one_at
+            ),
+            Admissibility::Withhold(StrikeReason::LinkBlackout)
+        );
+    }
+
+    /// A listener that accepts and holds every connection, never writing a
+    /// byte: a dial to it times out, the dark Wi-Fi's shape (no RST, nothing
+    /// back). Its address is its own host for [`endpoint_host`].
+    fn held_listener() -> std::net::SocketAddr {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                let Ok(s) = stream else { break };
+                held.push(s);
+            }
+        });
+        addr
+    }
+
+    /// **The race counts what answered, in both lanes** (LINK-Q4). Two
+    /// immediate candidates that swallow their dials and no walk: nothing
+    /// answered. The same two with a walk whose beacon returns a node: the
+    /// walk answered, whatever became of the node it named. Driven through
+    /// the real [`race`] on loopback, so deleting either count reds.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_race_counts_what_answered_in_both_lanes() {
+        let network_id = NetworkId::new(kaspa_wrpc_client::prelude::NetworkType::Mainnet);
+        let a = format!("ws://{}/borsh", held_listener());
+        let b = format!("ws://{}/borsh", held_listener());
+
+        let dark = tokio::time::timeout(
+            Duration::from_secs(10),
+            race(
+                &Resolver::default(),
+                network_id,
+                Some(a.clone()),
+                vec![b.clone()],
+                &Default::default(),
+                0,
+                Duration::from_millis(400),
+                &Default::default(),
+            ),
+        )
+        .await
+        .expect("a dark round ends within its probe bound");
+        assert!(dark.winner.is_none());
+        assert_eq!(dark.failed.len(), 2, "{:?}", dark.failed);
+        assert!(
+            dark.failed
+                .iter()
+                .all(|(_, reason)| *reason == StrikeReason::DialTimeout),
+            "a swallowed dial is a timeout: {:?}",
+            dark.failed
+        );
+        assert_eq!(dark.answered, 0, "nothing came back");
+        assert!(nothing_answered_in_round(&dark.failed, dark.answered));
+
+        let (beacon, hits) = yielding_beacon();
+        let lit = tokio::time::timeout(
+            Duration::from_secs(15),
+            race(
+                &Resolver::new(Some(vec![std::sync::Arc::new(beacon)]), false),
+                network_id,
+                Some(a),
+                vec![b],
+                &Default::default(),
+                1,
+                Duration::from_millis(400),
+                &Default::default(),
+            ),
+        )
+        .await
+        .expect("the round ends within its bounds");
+        assert!(
+            hits.load(std::sync::atomic::Ordering::SeqCst) > 0,
+            "the beacon served"
+        );
+        assert!(lit.winner.is_none(), "test.example is no node");
+        assert!(
+            lit.answered >= 1,
+            "the walk returned a node: the network answered ({lit:?})"
+        );
+        assert!(!nothing_answered_in_round(&lit.failed, lit.answered));
+
+        // The walk's other endings count too: a node already dialing (a
+        // duplicate answer) and a node the round excludes.
+        let (beacon, _) = yielding_beacon();
+        let resolver = Resolver::new(Some(vec![std::sync::Arc::new(beacon)]), false);
+        let twice = race(
+            &resolver,
+            network_id,
+            None,
+            Vec::new(),
+            &Default::default(),
+            2,
+            Duration::from_millis(400),
+            &Default::default(),
+        )
+        .await;
+        assert_eq!(
+            twice.answered, 2,
+            "one dialled, one a duplicate: both answered ({twice:?})"
+        );
+        let excluded: HashSet<String> = ["wss://test.example/kaspa/mainnet/wrpc/borsh".to_string()]
+            .into_iter()
+            .collect();
+        let skipped = race(
+            &resolver,
+            network_id,
+            None,
+            Vec::new(),
+            &excluded,
+            1,
+            Duration::from_millis(400),
+            &Default::default(),
+        )
+        .await;
+        assert_eq!(
+            skipped.answered, 1,
+            "an excluded answer is still an answer ({skipped:?})"
+        );
+    }
+
+    /// **A beacon that answered with an HTTP status is the network working**
+    /// (`consensus-auditor`, round 1 note): the pin's resolver renders it as
+    /// `Unable to connect to <url>: <status> …` (workflow-http 0.18.0
+    /// `native.rs:47`); a connect failure, DNS or our own timeout carries no
+    /// status. Classified before the sanitizer's cap, marked in our own words.
+    #[test]
+    fn a_beacons_http_status_is_an_answer_and_a_dead_walk_is_not() {
+        for answered in [
+            r#"Failed to connect: [Custom("Unable to connect to https://a.example/v2/kaspa/mainnet/any/wrpc/borsh: 522 <unknown status code>: error code: 522")]"#,
+            "Unable to connect to http://127.0.0.1:9/x: 500 Internal Server Error: boom",
+            "Unable to connect to http://h/: 404 Not Found: ",
+        ] {
+            assert!(a_beacon_answered(answered), "{answered}");
+        }
+        for silent in [
+            r#"Failed to connect: [Custom("Unable to connect to https://a.example/v2/x: Reqwest: error sending request for url (https://a.example/v2/x)")]"#,
+            "dns error: failed to lookup address information: No address associated with hostname",
+            "resolver fetch: timeout after 5s",
+            "https://host:443/path: 99 ",
+            ": 600 ",
+            ": 50",
+        ] {
+            assert!(!a_beacon_answered(silent), "{silent}");
+        }
+    }
+
+    /// The race reads our marker only where we put it: right after our own
+    /// prefix, never inside the beacon's words.
+    #[test]
+    fn the_answered_marker_is_read_only_where_we_put_it() {
+        assert!(a_walk_answered(
+            "resolver fetch (a beacon answered): Failed to connect: …"
+        ));
+        assert!(!a_walk_answered("resolver fetch: timeout after 5s"));
+        assert!(!a_walk_answered(
+            "resolver fetch: Failed to connect: [Custom(\"… (a beacon answered)\")]"
+        ));
+        assert!(!a_walk_answered(" (a beacon answered)"));
+    }
+
+    /// A beacon answering 500, through the real race's resolver lane: the
+    /// walk failed, and the round answered.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_walk_whose_beacon_answered_an_error_counts_as_an_answer() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                let mut buf = [0u8; 1024];
+                let _ = s.read(&mut buf);
+                let _ = s.write_all(
+                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 4\r\nConnection: close\r\n\r\nboom",
+                );
+            }
+        });
+        let resolver = Resolver::new(
+            Some(vec![std::sync::Arc::new(format!("http://{addr}"))]),
+            false,
+        );
+        let network_id = NetworkId::new(kaspa_wrpc_client::prelude::NetworkType::Mainnet);
+        let round = race(
+            &resolver,
+            network_id,
+            None,
+            Vec::new(),
+            &Default::default(),
+            1,
+            Duration::from_millis(400),
+            &Default::default(),
+        )
+        .await;
+        assert!(round.winner.is_none());
+        assert_eq!(round.answered, 1, "{round:?}");
+    }
+
+    /// "Never over a strike": a strike still inside its window takes a node
+    /// out of the round-trip preference; an older one, or none, does not.
+    #[test]
+    fn a_live_strike_is_one_still_inside_its_window() {
+        let mut health = EndpointHealth::default();
+        let url = "wss://ivy.kaspa.green/kaspa/mainnet/wrpc/borsh";
+        assert!(!health.has_live_strike(url, 10_000));
+        health.strike(url, 10_000, StrikeReason::Drop);
+        assert!(health.has_live_strike(url, 10_000));
+        assert!(health.has_live_strike(url, 10_000 + STRIKE_WINDOW_SECS));
+        assert!(!health.has_live_strike(url, 10_000 + STRIKE_WINDOW_SECS + 1));
+        health.clean_run(url);
+        assert!(
+            !health.has_live_strike(url, 10_000),
+            "a clean run clears it"
+        );
+    }
+
+    /// **The race itself applies the preference** (LINK-Q4), driven through
+    /// [`race_with`] with scripted answers on tokio's paused clock: `eva`
+    /// (cached, ranked 315) answers first and `ivy` (the pantry, ranked 175)
+    /// 100 ms later — `ivy` wins. With nothing ranked, the first answer does.
+    #[tokio::test(start_paused = true)]
+    async fn a_round_prefers_the_faster_node_through_the_real_race() {
+        let url = |host: &str| format!("wss://{host}/kaspa/mainnet/wrpc/borsh");
+        let (eva, ivy) = (url("eva"), url("ivy"));
+        let script = |eva: String, ivy: String| {
+            move |who: String, _: NetworkId, _: Duration| {
+                let after = if who == eva {
+                    50
+                } else if who == ivy {
+                    150
+                } else {
+                    1
+                };
+                async move {
+                    tokio::time::sleep(Duration::from_millis(after)).await;
+                    Ok(outcome(&who))
+                }
+            }
+        };
+        let network_id = NetworkId::new(kaspa_wrpc_client::prelude::NetworkType::Mainnet);
+        let ranks: HashMap<String, u64> = [(eva.clone(), 315), (ivy.clone(), 175)]
+            .into_iter()
+            .collect();
+        let won = race_with(
+            &Resolver::default(),
+            network_id,
+            Some(eva.clone()),
+            vec![ivy.clone()],
+            &Default::default(),
+            0,
+            Duration::from_millis(400),
+            &ranks,
+            script(eva.clone(), ivy.clone()),
+        )
+        .await;
+        assert_eq!(won.winner.map(|w| w.url), Some(ivy.clone()));
+        let won = race_with(
+            &Resolver::default(),
+            network_id,
+            Some(eva.clone()),
+            vec![ivy.clone()],
+            &Default::default(),
+            0,
+            Duration::from_millis(400),
+            &HashMap::new(),
+            script(eva.clone(), ivy.clone()),
+        )
+        .await;
+        assert_eq!(
+            won.winner.map(|w| w.url),
+            Some(eva),
+            "nothing ranked: the first answer"
+        );
     }
 
     /// The coalescing has ONE job: fewer BYTES in the ring, not just fewer

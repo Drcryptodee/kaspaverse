@@ -326,6 +326,16 @@ pub(crate) fn install() {
         // LINK-Q3's window token (L74): messages from accepted transactions,
         // no full-block stream, exist only from this build on.
         log::info!("log: messages from accepted transactions, no block stream (LINK-Q3)");
+        // LINK-Q4's window token (L74): the silence's pre-dial, the phone's
+        // network events, bind failures judged in absentia and the round-trip
+        // ranking exist only from this build on. The numbers are read from
+        // the constants, never restated.
+        log::info!(
+            "log: pre-dial at {}s, swap at {}s, network events, round-trip ranking (LINK-Q4)",
+            kaspaverse_chain::link::predial_after(kaspaverse_chain::link::SILENCE_DEADLINE)
+                .as_secs(),
+            kaspaverse_chain::link::SILENCE_DEADLINE.as_secs()
+        );
     }
     #[cfg(not(target_os = "android"))]
     {

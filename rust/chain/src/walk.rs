@@ -144,6 +144,18 @@ const WALK_PAGE_TIMEOUT: Duration = Duration::from_secs(60);
 /// dedupe by txid absorbs it. Catch-up pages, holds and re-seeds write at once.
 const CURSOR_MIN_WRITE_SECS: u64 = 3;
 
+/// How far behind the chain the committed cursor must be for its next page to
+/// count as a **catch-up page** (LINK-Q4): one the link's clocks may see
+/// holding the socket's heartbeat behind it. A tip page covers the second or
+/// so since the last one, a few kilobytes. At today's ~28 MB of accepted
+/// transactions per hour of chain at High verbosity (D-340, E2) a minute of
+/// chain is ~470 KB, which crosses the nine-second silence deadline only on a
+/// link slower than ~52 KB/s — the weak-air case the extension exists for,
+/// while every tip page stays well clear of it. A cursor whose time this
+/// session does not know (read from the file, or just landed) counts as
+/// behind: the arm's first page is the catch-up.
+const CATCH_UP_BEHIND_MS: u64 = 60_000;
+
 /// The pin's text for a start hash whose chain does not carry the retention
 /// root (`consensus/src/consensus/mod.rs:863` @ `01b532e`). A string literal
 /// the pin does not export, so it is quoted here and a test holds the quote.
@@ -264,12 +276,19 @@ pub(crate) enum PageError {
     /// No socket was bound when the call was made: still dialing, or paused.
     /// Retried inside the run and never counted — the next publish pokes.
     NoSocket,
-    /// The socket died or was replaced while the call was in flight. Counted
+    /// The socket died, or was retired for a cause that judged the link (the
+    /// silence swap, the watchdog), while the call was in flight. Counted
     /// like a timeout, and a new socket does not forgive it: a page too large
     /// for the link silences the socket's heartbeat, the silence deadline
     /// swaps the socket, and the page dies with it — on every socket, forever,
     /// if each publish restarted the count (`consensus-auditor`, LINK-Q3).
     SocketLost,
+    /// The socket was retired under the call by our own hand — a pause, a
+    /// repin, the user's swap or reconnect, a lane rebind (LINK-Q4). Says
+    /// nothing about whether the page can be carried, so it is never counted:
+    /// the run ends and the next publish pokes. In the field a tap's swap was
+    /// counted as the page's failure (2026-09-29 00:01:04, L249).
+    Displaced,
     /// The node did not answer inside [`WALK_PAGE_TIMEOUT`].
     TimedOut,
     /// The node answered with an error.
@@ -278,11 +297,22 @@ pub(crate) enum PageError {
 
 /// Classify a failed page call from the socket bound before and after it —
 /// an identity comparison, never error text (the dialer's and the pin's words
-/// for a dying socket are many and unpinned).
-fn page_error(before: Option<usize>, after: Option<usize>, error: String) -> PageError {
+/// for a dying socket are many and unpinned) — and, when the socket changed,
+/// from the cause the monitor recorded for the one the call went out on
+/// (`retired_judged`, LINK-Q4). An unknown cause counts, as before: the
+/// conservative direction for the bound (L249).
+fn page_error(
+    before: Option<usize>,
+    after: Option<usize>,
+    retired_judged: impl FnOnce(usize) -> Option<bool>,
+    error: String,
+) -> PageError {
     match before {
         None => PageError::NoSocket,
-        Some(_) if after != before => PageError::SocketLost,
+        Some(socket) if after != before => match retired_judged(socket) {
+            Some(false) => PageError::Displaced,
+            Some(true) | None => PageError::SocketLost,
+        },
         Some(_) => PageError::Refused(error),
     }
 }
@@ -295,6 +325,12 @@ pub(crate) struct LinkSource(pub(crate) Arc<crate::link_rpc::LinkRpc>);
 /// fold; the page is then replayed at the next arm.
 pub trait MessageSink: Send + Sync {
     fn fold(&self, matches: Vec<TransportEvent>) -> VerdictFuture<'_>;
+
+    /// **The walk skipped from `from` to `to`** (LINK-Q4): what was accepted
+    /// between them is not replayed from this node, so the user's gap notice
+    /// must speak for it ([`WalkMatcher::on_gap`], routed here by the transport
+    /// matcher). A default that does nothing, for a sink with no notice.
+    fn skipped(&self, _from: Hash, _to: Hash) {}
 }
 
 /// Where pages come from: the node through the link's stable handle in
@@ -311,6 +347,13 @@ pub(crate) trait ChainSource: Send + Sync {
     /// none (the default) leaves every re-seed at the sink of the moment.
     async fn mark(&self) -> std::result::Result<Hash, String> {
         Err("no mark".to_string())
+    }
+    /// The socket a page asked now would go out on, as an identity (LINK-Q4):
+    /// recorded with the page in flight, so the link's clocks can tell a page
+    /// on their own socket from one on a socket already gone. `None` for a
+    /// source with no sockets (the tests' scripted chain).
+    fn socket(&self) -> Option<usize> {
+        None
     }
 }
 
@@ -329,9 +372,18 @@ impl ChainSource for LinkSource {
         .await
         {
             Ok(Ok(response)) => Ok(response),
-            Ok(Err(e)) => Err(page_error(before, self.0.bound_identity(), e.to_string())),
+            Ok(Err(e)) => Err(page_error(
+                before,
+                self.0.bound_identity(),
+                |socket| self.0.retired_judged(socket),
+                e.to_string(),
+            )),
             Err(_) => Err(PageError::TimedOut),
         }
+    }
+
+    fn socket(&self) -> Option<usize> {
+        self.0.bound_identity()
     }
 
     /// Bounded at our boundary like a page (`consensus-auditor`,
@@ -392,6 +444,50 @@ fn now_unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// **A page call in flight** (LINK-Q4) — what the link's silence and watchdog
+/// clocks read so that our own load is never charged to a node's heartbeat
+/// (`consensus-auditor` item 18, L70): a catch-up page on a weak link holds
+/// every notification behind it on the one socket.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PageInFlight {
+    /// [`mono_ms`] when the call went out.
+    pub(crate) sent_mono_ms: u64,
+    /// The socket it went out on ([`ChainSource::socket`]).
+    pub(crate) socket: Option<usize>,
+    /// Asked [`CATCH_UP_BEHIND_MS`] or more behind the chain, or after a long
+    /// page: large enough to hold the heartbeat behind it.
+    pub(crate) catch_up: bool,
+}
+
+/// Records a page call for as long as it is in flight.
+struct InFlightGuard<'a> {
+    walk: &'a Walk,
+}
+
+impl<'a> InFlightGuard<'a> {
+    fn new(walk: &'a Walk, socket: Option<usize>, catch_up: bool) -> Self {
+        *walk
+            .in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(PageInFlight {
+            sent_mono_ms: mono_ms(),
+            socket,
+            catch_up,
+        });
+        Self { walk }
+    }
+}
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        *self
+            .walk
+            .in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
+    }
+}
+
 // ── The walk ─────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -438,6 +534,11 @@ struct State {
     /// was accepted while the app could receive, and a spent budget skips none
     /// of it.
     present: bool,
+    /// A page reached the tip since this arm or the last new socket (LINK-Q4):
+    /// the next page is a tip page, known without any clock. Cleared by an arm
+    /// and by every socket published (the absence behind a reconnect is
+    /// unknown); set by a commit at the tip and by a re-seed at the sink.
+    at_tip: bool,
 }
 
 /// Where a re-seed that skips went ([`Walk::landing`]).
@@ -489,6 +590,8 @@ enum Fetched {
     Unknown(String),
     TimedOut,
     SocketLost,
+    /// Our own hand retired the socket under the page: not counted.
+    Displaced,
     /// Every attempt found no socket bound: not a failure of the page.
     NoSocket,
     Unreachable,
@@ -514,6 +617,8 @@ pub(crate) struct Walk {
     /// fold is running and none can start (the hub's restart needs its store
     /// to have one writer).
     fold_gate: tokio::sync::Mutex<()>,
+    /// The page call in flight, if any ([`PageInFlight`], LINK-Q4).
+    in_flight: Mutex<Option<PageInFlight>>,
 }
 
 impl Walk {
@@ -533,6 +638,7 @@ impl Walk {
                 own: None,
                 mark_read: false,
                 present: false,
+                at_tip: false,
             }),
             poke: Notify::new(),
             settled,
@@ -541,6 +647,7 @@ impl Walk {
             running_since_mono_ms: AtomicU64::new(0),
             quiet_warned: AtomicBool::new(false),
             fold_gate: tokio::sync::Mutex::new(()),
+            in_flight: Mutex::new(None),
         })
     }
 
@@ -576,6 +683,7 @@ impl Walk {
             s.own = None;
             s.mark_read = false;
             s.present = false;
+            s.at_tip = false;
             (s.epoch, s.cursor)
         };
         self.running_since_mono_ms
@@ -625,6 +733,41 @@ impl Walk {
 
     pub(crate) fn is_running(&self) -> bool {
         self.state().mode == Mode::Running
+    }
+
+    /// The page call in flight, if any (LINK-Q4): read by the link's silence
+    /// and watchdog clocks.
+    pub(crate) fn page_in_flight(&self) -> Option<PageInFlight> {
+        *self
+            .in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Tests: stage a page in flight, as a fetch would.
+    #[cfg(test)]
+    pub(crate) fn set_in_flight(&self, page: Option<PageInFlight>) {
+        *self
+            .in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = page;
+    }
+
+    /// May the next page be a catch-up page? Not once a page reached the tip
+    /// under this arm and socket ([`State::at_tip`], no clock). Before that —
+    /// the first page after an arm or a new socket — the device clock against
+    /// the cursor block's own time decides: [`CATCH_UP_BEHIND_MS`] or more
+    /// behind, or a time this session does not know. That comparison decides
+    /// what the link's clocks forgive (one silence extension, a watchdog
+    /// strike withheld as our own load), never what is folded; a phone clock
+    /// far ahead can make that one first page read as a catch-up, which the
+    /// extension bounds (`wallet-security-auditor`, LINK-Q4 round 1 note).
+    fn behind(&self, epoch: u64) -> bool {
+        let s = self.state();
+        s.epoch == epoch
+            && !s.at_tip
+            && s.cursor_time_ms
+                .is_none_or(|t| now_unix_ms().saturating_sub(t) >= CATCH_UP_BEHIND_MS)
     }
 
     /// The committed cursor (tests).
@@ -693,7 +836,11 @@ impl Walk {
                 }
                 Step::From(from) => from,
             };
-            let response = match self.fetch(source, epoch, from).await {
+            // A page asked a minute or more behind the chain, or one after a
+            // long page, can be large enough to hold the socket's heartbeat
+            // behind it on a weak link; the link's clocks read this (LINK-Q4).
+            let catch_up = pages > 0 || self.behind(epoch);
+            let response = match self.fetch(source, epoch, from, catch_up).await {
                 Fetched::Page(response) => response,
                 Fetched::Unknown(error) => {
                     let why = format!(
@@ -713,6 +860,15 @@ impl Walk {
                         .await;
                     break;
                 }
+                // Our own hand (a pause, a repin, the user's swap): no pause,
+                // no count — the next publish pokes (LINK-Q4).
+                Fetched::Displaced => {
+                    log::info!(
+                        "walk: the page from {from} lost its socket to our own retirement (not \
+                         the link's) — not counted; the next socket asks again"
+                    );
+                    break;
+                }
                 Fetched::Unreachable => {
                     self.failed_run(source, epoch, from, "no page after every attempt")
                         .await;
@@ -726,7 +882,8 @@ impl Walk {
             // a page has proved the socket (`consensus-auditor`, round 6).
             self.mark_arm(source, epoch).await;
             let page = WalkPage::new(from, response);
-            let verdict = {
+            let long = page.added_len() >= WALK_TIP_PAGE_THRESHOLD;
+            {
                 let _fold = self.fold_gate.lock().await;
                 // The fetch took time: fold only if the walk still runs under
                 // this arm from the same committed cursor. Checked under the
@@ -735,15 +892,20 @@ impl Walk {
                     break;
                 }
                 self.note_progress(epoch, from);
-                self.fold(&page).await
-            };
-            if verdict == Verdict::Held {
-                self.hold_at(from);
-                break;
+                // The fold's bookkeeping — the hold or the commit — happens
+                // under the same gate, so `quiesce_intake` orders every write
+                // a fold makes before any arm can run (`wallet-security-
+                // auditor`, D-344 round 9). There is no await between the fold
+                // and these writes, so no test can land an arm in the gap it
+                // closes, and no mutant that reopens it can be seen red: the
+                // ordering is carried by this block's shape, not by a test.
+                if self.fold(&page).await == Verdict::Held {
+                    self.hold_at(from);
+                    break;
+                }
+                let at_tip = !long && page.aligned == page.added_len();
+                self.commit(epoch, &page, long || pages > 0, at_tip);
             }
-            let long = page.added_len() >= WALK_TIP_PAGE_THRESHOLD;
-            let at_tip = !long && page.aligned == page.added_len();
-            self.commit(epoch, &page, long || pages > 0, at_tip);
             if page.aligned < page.added_len() {
                 log::warn!(
                     "walk: the page from {from} lines up for {} of {} chain blocks — folded that far",
@@ -842,19 +1004,30 @@ impl Walk {
         matches!(self.step(epoch), Step::From(cursor) if cursor == from)
     }
 
-    async fn fetch(&self, source: &dyn ChainSource, epoch: u64, from: Hash) -> Fetched {
+    async fn fetch(
+        &self,
+        source: &dyn ChainSource,
+        epoch: u64,
+        from: Hash,
+        catch_up: bool,
+    ) -> Fetched {
         let mut last_error = String::new();
         let mut only_no_socket = true;
         for attempt in 0..WALK_PAGE_ATTEMPTS {
             if !self.still_at(epoch, from) {
                 return Fetched::Stopped;
             }
-            match source.page(from).await {
+            let asked = {
+                let _in_flight = InFlightGuard::new(self, source.socket(), catch_up);
+                source.page(from).await
+            };
+            match asked {
                 Ok(response) => return Fetched::Page(response),
                 // Never re-asked inside the run: the late reply may still be
                 // streaming on the one socket (`consensus-auditor`, LINK-Q3).
                 Err(PageError::TimedOut) => return Fetched::TimedOut,
                 Err(PageError::SocketLost) => return Fetched::SocketLost,
+                Err(PageError::Displaced) => return Fetched::Displaced,
                 Err(PageError::Refused(error)) if cursor_unknown(&error) => {
                     return Fetched::Unknown(error)
                 }
@@ -922,8 +1095,15 @@ impl Walk {
         } else {
             false
         };
+        // A mark AT the page's start is passed as well: the cursor stood on it,
+        // so it was reached (`consensus-auditor`, D-344 round 9 — a carried mark
+        // equal to the cursor survived the commit, fell behind it, and a spent
+        // budget an hour later landed on it: one re-walk. The reason the case
+        // was first declined covered only the arm's own mark.)
         let carries = |mark: Option<(Hash, u64)>| {
-            mark.is_some_and(|(mark, _)| page.blocks().any(|(block, _)| block == mark))
+            mark.is_some_and(|(mark, _)| {
+                mark == page.from || page.blocks().any(|(block, _)| block == mark)
+            })
         };
         // At the tip every mark is behind the cursor, one no page can carry
         // included (reorganised away, or read at the cursor): the same rule,
@@ -933,6 +1113,7 @@ impl Walk {
             s.carried = None;
             if s.epoch == epoch {
                 s.present = true;
+                s.at_tip |= at_tip;
             }
         } else if carries(s.carried) {
             s.carried = None;
@@ -1077,12 +1258,14 @@ impl Walk {
                     matcher.on_gap(was, mark);
                 }
                 // Wording only, never a decision: the device clock against a
-                // block's time (`consensus-auditor`, round 8).
+                // block's time (`consensus-auditor`, round 8), so the line
+                // prints both and says which clock each is (round 9).
                 match was_time {
                     Some(t) if t > at => log::warn!(
-                        "walk: re-walking from an arm's mark {mark} — {why}; the cursor {was} was \
-                         already past it (a mark the chain reorganised away, or a lagging node), \
-                         so this skips nothing"
+                        "walk: re-walking from an arm's mark {mark} — {why}; the cursor {was} looks \
+                         already past it (its block's time {t} against the mark read at {at}, unix \
+                         ms, the second by this device's clock: a mark the chain reorganised away, \
+                         or a lagging node), so by those clocks this skips nothing"
                     ),
                     _ => {
                         let span = match was_time {
@@ -1152,6 +1335,7 @@ impl Walk {
             s.own = None;
             s.mark_read = true;
             s.present = true;
+            s.at_tip = true;
             Self::flush(&mut s);
             was
         };
@@ -1207,6 +1391,9 @@ impl Walk {
     /// that found no socket at all was never counted.
     pub(crate) fn socket_published(&self) {
         self.quiet_warned.store(false, Ordering::Relaxed);
+        // What happened while no socket was up is unknown: the next page's
+        // size is the clock's to guess again (LINK-Q4).
+        self.state().at_tip = false;
     }
 
     /// Tests: was the walk poked (consuming the stored permit)?
@@ -1314,6 +1501,23 @@ impl TransportMatcher {
 }
 
 impl WalkMatcher for TransportMatcher {
+    /// **A skip reaches the user's gap notice** (LINK-Q4; IDEAS 2026-09-29):
+    /// it used to stop at the log, because the hub's notice was worked out once
+    /// per open from the cursor's age — so a skip inside the notice's window
+    /// (a page the node could not serve three times), or any skip after the
+    /// open, reached no one. The hub's sink hears it; with no sink armed there
+    /// is no notice to speak (a first seed never skips).
+    fn on_gap(&self, from: Hash, to: Hash) {
+        let sink = self
+            .sink
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(sink) = sink {
+            sink.skipped(from, to);
+        }
+    }
+
     fn fold_page<'a>(&'a self, page: &'a WalkPage) -> VerdictFuture<'a> {
         Box::pin(async move {
             let (matches, accepted) = scan_page(page, self.prefix);
@@ -1485,6 +1689,8 @@ pub(crate) mod tests {
     const NOSOCKET: &str = "NOSOCKET";
     /// Queued in place of a page: the socket died under the call.
     const LOST: &str = "LOST";
+    /// Queued in place of a page: our own hand retired the socket under it.
+    const DISPLACED: &str = "DISPLACED";
 
     /// A scripted node: answers each `from` with the pages queued for it, in
     /// order, else an empty page at the tip; knows a sink; records every call.
@@ -1540,6 +1746,7 @@ pub(crate) mod tests {
                 Some(Err(e)) if e == TIMEOUT => Err(PageError::TimedOut),
                 Some(Err(e)) if e == NOSOCKET => Err(PageError::NoSocket),
                 Some(Err(e)) if e == LOST => Err(PageError::SocketLost),
+                Some(Err(e)) if e == DISPLACED => Err(PageError::Displaced),
                 Some(Err(e)) => Err(PageError::Refused(e)),
                 Some(Ok(page)) => Ok(page),
                 None => Ok(response(Vec::new(), Vec::new())),
@@ -2959,16 +3166,59 @@ pub(crate) mod tests {
     }
 
     /// A failed call is classified by the socket bound before and after it,
-    /// never by its text.
+    /// never by its text — and, when the socket changed, by the cause the
+    /// monitor recorded for the one the call went out on (LINK-Q4): a cause
+    /// that judged the link counts, our own hand does not, an unknown one
+    /// counts (the conservative direction for the bound, L249).
     #[test]
     fn a_page_failure_is_classified_by_the_socket_not_the_text() {
         let text = || "anything at all".to_string();
-        assert_eq!(page_error(None, None, text()), PageError::NoSocket);
-        assert_eq!(page_error(None, Some(7), text()), PageError::NoSocket);
-        assert_eq!(page_error(Some(7), None, text()), PageError::SocketLost);
-        assert_eq!(page_error(Some(7), Some(8), text()), PageError::SocketLost);
+        let unknown = |_: usize| None;
+        let judged = |_: usize| Some(true);
+        let ours = |_: usize| Some(false);
+        assert_eq!(page_error(None, None, unknown, text()), PageError::NoSocket);
+        assert_eq!(page_error(None, Some(7), ours, text()), PageError::NoSocket);
         assert_eq!(
-            page_error(Some(7), Some(7), text()),
+            page_error(Some(7), None, unknown, text()),
+            PageError::SocketLost
+        );
+        assert_eq!(
+            page_error(Some(7), Some(8), unknown, text()),
+            PageError::SocketLost
+        );
+        assert_eq!(
+            page_error(Some(7), None, judged, text()),
+            PageError::SocketLost
+        );
+        assert_eq!(
+            page_error(Some(7), Some(8), judged, text()),
+            PageError::SocketLost
+        );
+        assert_eq!(
+            page_error(Some(7), None, ours, text()),
+            PageError::Displaced
+        );
+        assert_eq!(
+            page_error(Some(7), Some(8), ours, text()),
+            PageError::Displaced
+        );
+        let asked_about = std::cell::Cell::new(0);
+        let _ = page_error(
+            Some(7),
+            Some(8),
+            |socket| {
+                asked_about.set(socket);
+                Some(false)
+            },
+            text(),
+        );
+        assert_eq!(
+            asked_about.get(),
+            7,
+            "the cause asked is the socket the call went out on"
+        );
+        assert_eq!(
+            page_error(Some(7), Some(7), ours, text()),
             PageError::Refused(text())
         );
     }
@@ -3582,5 +3832,307 @@ pub(crate) mod tests {
             "the ACCEPTING block's own facts"
         );
         assert_eq!(accepted[1].accepting_block, h(4));
+    }
+
+    // ── LINK-Q4 ──────────────────────────────────────────────────────────────
+
+    /// **A page our own hand's retirement killed is never counted** (L249's
+    /// field line: a tap's `superseded` counted as the page's failure). More
+    /// displacements than the failure bound, and the walk neither pauses nor
+    /// skips; the next socket's page folds.
+    #[tokio::test]
+    async fn a_page_our_own_retirement_killed_is_never_counted() {
+        let dir = test_dir("displaced");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_cursor(&dir.join("scan.cursor"), &h(1));
+        let chain = FakeChain::default();
+        *chain.sink.lock().unwrap() = Some(h(99));
+        for _ in 0..=MAX_FAILED_RUNS {
+            chain.queue(h(1), Err(DISPLACED.to_string()));
+        }
+        chain.queue(h(1), Ok(response(Vec::new(), blocks(2, 2))));
+        let recorder = Arc::new(Recorder::default());
+        let walk = walk_with(&recorder);
+        walk.arm(dir.join("scan.cursor"));
+        for _ in 0..=MAX_FAILED_RUNS {
+            walk.run_to_tip(&chain).await;
+            let s = walk.state();
+            assert_eq!(s.failed_runs, 0, "not counted");
+            assert!(s.retry_after.is_none(), "and no pause");
+        }
+        assert!(recorder.gaps.lock().unwrap().is_empty(), "nothing skipped");
+        walk.run_to_tip(&chain).await;
+        assert_eq!(walk.cursor(), Some(h(3)), "the next socket's page folds");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A scripted chain that reads the walk's page-in-flight record from
+    /// inside each page call, as the link's clocks would.
+    struct Watching {
+        walk: Mutex<Option<Arc<Walk>>>,
+        chain: FakeChain,
+        seen: Mutex<Vec<Option<PageInFlight>>>,
+    }
+
+    #[async_trait]
+    impl ChainSource for Watching {
+        async fn page(
+            &self,
+            from: Hash,
+        ) -> std::result::Result<GetVirtualChainFromBlockV2Response, PageError> {
+            let during = self
+                .walk
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|walk| walk.page_in_flight());
+            self.seen.lock().unwrap().push(during);
+            self.chain.page(from).await
+        }
+        async fn sink(&self) -> std::result::Result<Hash, String> {
+            self.chain.sink().await
+        }
+        fn socket(&self) -> Option<usize> {
+            Some(42)
+        }
+    }
+
+    /// **The page in flight is recorded for the link's clocks, and only while
+    /// it flies** (LINK-Q4): on the source's socket; a catch-up page when the
+    /// cursor's time is unknown (read from the file) or a long page came before
+    /// it in the run; a tip page when the cursor is a block this session folded
+    /// seconds ago.
+    #[tokio::test]
+    async fn a_page_in_flight_is_recorded_with_whether_it_is_a_catch_up() {
+        let dir = test_dir("in-flight");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_cursor(&dir.join("scan.cursor"), &h(1));
+        let recorder = Arc::new(Recorder::default());
+        let walk = walk_with(&recorder);
+        let source = Watching {
+            walk: Mutex::new(Some(walk.clone())),
+            chain: FakeChain::default(),
+            seen: Mutex::new(Vec::new()),
+        };
+        let now = now_unix_ms();
+        // A long page whose last block is recent: past it the cursor is not
+        // behind, so only the long page before it makes the next a catch-up.
+        let mut long = long_page(2);
+        let mut entries = long.chain_block_accepted_transactions.as_ref().clone();
+        entries.last_mut().unwrap().chain_block_header.timestamp = Some(now);
+        long.chain_block_accepted_transactions = Arc::new(entries);
+        let after_long = *long.added_chain_block_hashes.last().unwrap();
+        source.chain.queue(h(1), Ok(long));
+        source.chain.queue(
+            after_long,
+            Ok(response(
+                Vec::new(),
+                vec![chain_entry(h(3), now, Vec::new())],
+            )),
+        );
+        source.chain.queue(
+            h(3),
+            Ok(response(
+                Vec::new(),
+                vec![chain_entry(h(4), now, Vec::new())],
+            )),
+        );
+        walk.arm(dir.join("scan.cursor"));
+        walk.run_to_tip(&source).await;
+        assert_eq!(walk.page_in_flight(), None, "cleared once the call returns");
+        walk.run_to_tip(&source).await;
+        let seen: Vec<(Option<usize>, bool)> = source
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|page| {
+                let page = page.expect("recorded during every call");
+                (page.socket, page.catch_up)
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                (Some(42), true),  // the arm's first page: the cursor's time unknown
+                (Some(42), true),  // after a long page in the same run
+                (Some(42), false), // a run from a block folded just now: the tip
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Once a page reached the tip, the next is a tip page without any
+    /// clock** (`wallet-security-auditor`, round 1 note): a cursor whose block
+    /// time reads an hour old (a phone clock far ahead) still asks a tip page
+    /// after a page at the tip; a new socket hands the question back to the
+    /// clock.
+    #[tokio::test]
+    async fn after_a_page_at_the_tip_the_next_is_a_tip_page_whatever_the_clock() {
+        let dir = test_dir("tip-no-clock");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_cursor(&dir.join("scan.cursor"), &h(1));
+        let recorder = Arc::new(Recorder::default());
+        let walk = walk_with(&recorder);
+        let source = Watching {
+            walk: Mutex::new(Some(walk.clone())),
+            chain: FakeChain::default(),
+            seen: Mutex::new(Vec::new()),
+        };
+        let an_hour_ago = now_unix_ms() - 3_600_000;
+        source.chain.queue(
+            h(1),
+            Ok(response(
+                Vec::new(),
+                vec![chain_entry(h(2), an_hour_ago, Vec::new())],
+            )),
+        );
+        source.chain.queue(
+            h(2),
+            Ok(response(
+                Vec::new(),
+                vec![chain_entry(h(3), an_hour_ago, Vec::new())],
+            )),
+        );
+        walk.arm(dir.join("scan.cursor"));
+        walk.run_to_tip(&source).await; // the arm's first page: reached the tip
+        walk.run_to_tip(&source).await; // an old-looking cursor, but at the tip
+        walk.socket_published();
+        walk.run_to_tip(&source).await; // a new socket: the clock decides again
+        let catch_up: Vec<bool> = source
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|page| page.expect("recorded").catch_up)
+            .collect();
+        assert_eq!(catch_up, vec![true, false, true]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Stage this arm's marks directly: `own` and `carried` as given, the
+    /// mark's read window closed so the run reads none.
+    fn stage_marks(walk: &Walk, own: Option<Hash>, carried: Option<Hash>) {
+        let mut s = walk.state();
+        s.own = own.map(|mark| (mark, 1));
+        s.carried = carried.map(|mark| (mark, 1));
+        s.mark_read = true;
+    }
+
+    /// **`at_tip`'s two halves** (`consensus-auditor`, D-344 round 9). An
+    /// EMPTY page is the tip: every mark is behind the cursor, both dropped,
+    /// the rest present. A SHORT page that does not line up is not: it is
+    /// folded as far as it lines up, and the marks stand.
+    #[tokio::test]
+    async fn an_empty_page_is_the_tip_and_a_misaligned_short_page_is_not() {
+        let dir = test_dir("at-tip");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("scan.cursor");
+
+        write_cursor(&path, &h(1));
+        let chain = FakeChain::default(); // answers an empty page
+        let walk = walk_with(&Arc::new(Recorder::default()));
+        walk.arm(path.clone());
+        stage_marks(&walk, Some(h(50)), Some(h(40)));
+        walk.run_to_tip(&chain).await;
+        {
+            let s = walk.state();
+            assert_eq!((s.own, s.carried), (None, None), "the tip drops every mark");
+            assert!(s.present);
+        }
+
+        write_cursor(&path, &h(1));
+        let chain = FakeChain::default();
+        chain.queue(
+            h(1),
+            Ok(GetVirtualChainFromBlockV2Response {
+                removed_chain_block_hashes: Arc::new(Vec::new()),
+                added_chain_block_hashes: Arc::new(vec![h(2), h(3)]),
+                chain_block_accepted_transactions: Arc::new(vec![
+                    chain_entry(h(2), 200, Vec::new()),
+                    chain_entry(h(9), 300, Vec::new()), // does not name h(3)
+                ]),
+            }),
+        );
+        let walk = walk_with(&Arc::new(Recorder::default()));
+        walk.arm(path.clone());
+        stage_marks(&walk, Some(h(50)), Some(h(40)));
+        walk.run_to_tip(&chain).await;
+        assert_eq!(walk.cursor(), Some(h(2)), "folded as far as it lines up");
+        {
+            let s = walk.state();
+            assert_eq!(
+                (s.own.map(|m| m.0), s.carried.map(|m| m.0)),
+                (Some(h(50)), Some(h(40))),
+                "not the tip: the marks stand"
+            );
+            assert!(!s.present);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A mark AT the page's start is passed by it** (`consensus-auditor`,
+    /// round 9): a carried mark equal to the cursor used to survive a long
+    /// page's commit and fall behind the cursor, where a spent budget later
+    /// landed on it (one re-walk). The same for this arm's own mark.
+    #[tokio::test]
+    async fn a_mark_at_the_pages_start_is_passed_by_it() {
+        let dir = test_dir("mark-at-from");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("scan.cursor");
+        for (own, carried) in [(None, Some(h(1))), (Some(h(1)), None)] {
+            write_cursor(&path, &h(1));
+            let chain = FakeChain::default();
+            let long = long_page(2);
+            let after = *long.added_chain_block_hashes.last().unwrap();
+            chain.queue(h(1), Ok(long));
+            chain.queue(after, Err(TIMEOUT.to_string())); // the run stops here
+            let walk = walk_with(&Arc::new(Recorder::default()));
+            walk.arm(path.clone());
+            stage_marks(&walk, own, carried);
+            walk.run_to_tip(&chain).await;
+            assert_eq!(walk.cursor(), Some(after));
+            let s = walk.state();
+            assert_eq!(
+                (s.own, s.carried),
+                (None, None),
+                "a mark at the cursor the page left is passed ({own:?}, {carried:?})"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A sink that records the skips it hears.
+    #[derive(Default)]
+    struct SkipSink {
+        skipped: Mutex<Vec<(Hash, Hash)>>,
+    }
+
+    impl MessageSink for SkipSink {
+        fn fold(&self, _matches: Vec<TransportEvent>) -> VerdictFuture<'_> {
+            Box::pin(async { Verdict::Folded })
+        }
+        fn skipped(&self, from: Hash, to: Hash) {
+            self.skipped.lock().unwrap().push((from, to));
+        }
+    }
+
+    /// **A skip reaches the user's gap notice** (LINK-Q4): the transport
+    /// matcher hands the walk's `on_gap` to the hub's sink; with no sink armed
+    /// there is no notice to speak and nothing is lost by saying nothing.
+    #[test]
+    fn a_skip_reaches_the_hubs_sink() {
+        let (events, _) = broadcast::channel(4);
+        let matcher = TransportMatcher::new(
+            Prefix::Mainnet,
+            events,
+            Arc::new(Mutex::new(None)),
+            Arc::new(DevAb::default()),
+        );
+        matcher.on_gap(h(1), h(2)); // no sink: a no-op
+        let sink = Arc::new(SkipSink::default());
+        matcher.set_sink(sink.clone());
+        matcher.on_gap(h(3), h(4));
+        assert_eq!(sink.skipped.lock().unwrap().clone(), vec![(h(3), h(4))]);
     }
 }

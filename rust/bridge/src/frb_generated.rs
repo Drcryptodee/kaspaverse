@@ -38,7 +38,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.12.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -202234851;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1842560574;
 
 // Section: executor
 
@@ -214,7 +214,7 @@ fn wire__crate__api__send__consolidate_prepare_impl(
         },
     )
 }
-fn wire__crate__api__dag__dag_network_changed_impl(
+fn wire__crate__api__dag__dag_network_event_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -222,7 +222,7 @@ fn wire__crate__api__dag__dag_network_changed_impl(
 ) {
     FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
-            debug_name: "dag_network_changed",
+            debug_name: "dag_network_event",
             port: Some(port_),
             mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
         },
@@ -236,12 +236,12 @@ fn wire__crate__api__dag__dag_network_changed_impl(
             };
             let mut deserializer =
                 flutter_rust_bridge::for_generated::SseDeserializer::new(message);
-            let api_available = <bool>::sse_decode(&mut deserializer);
+            let api_kind = <crate::api::dag::NetworkEventKind>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| async move {
                 transform_result_sse::<_, crate::api::error::AppError>(
                     (move || async move {
-                        let output_ok = crate::api::dag::dag_network_changed(api_available).await?;
+                        let output_ok = crate::api::dag::dag_network_event(api_kind).await?;
                         Ok(output_ok)
                     })()
                     .await,
@@ -3992,9 +3992,11 @@ impl SseDecode for crate::api::transport::GapAgeDto {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         let mut var_gapMinutes = <Option<u64>>::sse_decode(deserializer);
         let mut var_beyondHorizon = <bool>::sse_decode(deserializer);
+        let mut var_skipped = <bool>::sse_decode(deserializer);
         return crate::api::transport::GapAgeDto {
             gap_minutes: var_gapMinutes,
             beyond_horizon: var_beyondHorizon,
+            skipped: var_skipped,
         };
     }
 }
@@ -4207,6 +4209,20 @@ impl SseDecode for crate::api::transport::MessageStatusDto {
             txid: var_txid,
             tombstoned: var_tombstoned,
             acceptance: var_acceptance,
+        };
+    }
+}
+
+impl SseDecode for crate::api::dag::NetworkEventKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::dag::NetworkEventKind::Available,
+            1 => crate::api::dag::NetworkEventKind::Lost,
+            2 => crate::api::dag::NetworkEventKind::Moved,
+            3 => crate::api::dag::NetworkEventKind::Changed,
+            _ => unreachable!("Invalid variant for NetworkEventKind: {}", inner),
         };
     }
 }
@@ -4755,7 +4771,7 @@ fn pde_ffi_dispatcher_primary_impl(
         3 => wire__crate__api__vault__ceremony_word_count_impl(port, ptr, rust_vec_len, data_len),
         4 => wire__crate__api__send__consolidate_estimate_impl(port, ptr, rust_vec_len, data_len),
         5 => wire__crate__api__send__consolidate_prepare_impl(port, ptr, rust_vec_len, data_len),
-        6 => wire__crate__api__dag__dag_network_changed_impl(port, ptr, rust_vec_len, data_len),
+        6 => wire__crate__api__dag__dag_network_event_impl(port, ptr, rust_vec_len, data_len),
         7 => wire__crate__api__dag__dag_node_config_impl(port, ptr, rust_vec_len, data_len),
         8 => wire__crate__api__dag__dag_pause_impl(port, ptr, rust_vec_len, data_len),
         9 => wire__crate__api__dag__dag_probe_link_impl(port, ptr, rust_vec_len, data_len),
@@ -5531,6 +5547,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::transport::GapAgeDto {
         [
             self.gap_minutes.into_into_dart().into_dart(),
             self.beyond_horizon.into_into_dart().into_dart(),
+            self.skipped.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -5629,6 +5646,29 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::transport::MessageStatusDto>
     for crate::api::transport::MessageStatusDto
 {
     fn into_into_dart(self) -> crate::api::transport::MessageStatusDto {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::dag::NetworkEventKind {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Available => 0.into_dart(),
+            Self::Lost => 1.into_dart(),
+            Self::Moved => 2.into_dart(),
+            Self::Changed => 3.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::dag::NetworkEventKind
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::dag::NetworkEventKind>
+    for crate::api::dag::NetworkEventKind
+{
+    fn into_into_dart(self) -> crate::api::dag::NetworkEventKind {
         self
     }
 }
@@ -6411,6 +6451,7 @@ impl SseEncode for crate::api::transport::GapAgeDto {
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <Option<u64>>::sse_encode(self.gap_minutes, serializer);
         <bool>::sse_encode(self.beyond_horizon, serializer);
+        <bool>::sse_encode(self.skipped, serializer);
     }
 }
 
@@ -6573,6 +6614,24 @@ impl SseEncode for crate::api::transport::MessageStatusDto {
         <String>::sse_encode(self.txid, serializer);
         <bool>::sse_encode(self.tombstoned, serializer);
         <Option<crate::api::transport::TxStatusDto>>::sse_encode(self.acceptance, serializer);
+    }
+}
+
+impl SseEncode for crate::api::dag::NetworkEventKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::dag::NetworkEventKind::Available => 0,
+                crate::api::dag::NetworkEventKind::Lost => 1,
+                crate::api::dag::NetworkEventKind::Moved => 2,
+                crate::api::dag::NetworkEventKind::Changed => 3,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
     }
 }
 

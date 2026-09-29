@@ -348,9 +348,14 @@ void main() {
     });
 
     test('historyNotice: every gap × fill-posture cell is honest', () {
-      GapAgeDto gap(int? minutes, {bool horizon = false}) => GapAgeDto(
+      GapAgeDto gap(
+        int? minutes, {
+        bool horizon = false,
+        bool skipped = false,
+      }) => GapAgeDto(
         gapMinutes: minutes == null ? null : BigInt.from(minutes),
         beyondHorizon: horizon,
+        skipped: skipped,
       );
       const off = FillConfigDto(
         enabled: false,
@@ -362,15 +367,18 @@ void main() {
         endpoint: 'e',
         defaultEndpoint: 'e',
       );
-      FillReportDto report({bool complete = true, String? error}) =>
-          FillReportDto(
-            ran: true,
-            complete: complete,
-            pages: 1,
-            newRows: 0,
-            error: error,
-            atUnixMs: BigInt.one,
-          );
+      FillReportDto report({
+        bool complete = true,
+        bool ran = true,
+        String? error,
+      }) => FillReportDto(
+        ran: ran,
+        complete: complete,
+        pages: 1,
+        newRows: 0,
+        error: error,
+        atUnixMs: BigInt.one,
+      );
 
       // No gap signal / gap the node rewind already covers → quiet.
       expect(historyNotice(gap: null, config: off, report: null), isNull);
@@ -388,6 +396,64 @@ void main() {
         contains('may be missing'),
       );
 
+      // **A gap the walk SKIPPED has its own line** (LINK-Q4, `ux-auditor`):
+      // whatever its length, never "Away", never a fabricated "0 s".
+      for (final skipped in [
+        gap(0, skipped: true),
+        gap(12, skipped: true),
+        gap(null, skipped: true),
+      ]) {
+        final line = historyNotice(gap: skipped, config: off, report: null);
+        expect(line, skippedHistoryNotice);
+        expect(line, isNot(contains('Away')));
+        expect(line, isNot(contains('0\u00A0s')));
+        expect(line, isNot(contains('0 s')));
+      }
+      // With the fill on: a report a skip invalidated keeps the skip line; one
+      // that completed after the skip heals it.
+      expect(
+        historyNotice(
+          gap: gap(12, skipped: true),
+          config: on,
+          report: report(complete: false),
+        ),
+        skippedHistoryNotice,
+      );
+      expect(
+        historyNotice(gap: gap(5, skipped: true), config: on, report: report()),
+        isNull,
+      );
+      // Healing needs all three: the fill on, a run, and that run complete.
+      expect(
+        historyNotice(
+          gap: gap(5, skipped: true),
+          config: off,
+          report: report(),
+        ),
+        skippedHistoryNotice,
+      );
+      expect(
+        historyNotice(
+          gap: gap(5, skipped: true),
+          config: on,
+          report: report(ran: false),
+        ),
+        skippedHistoryNotice,
+      );
+      // A skip that started past the pruning horizon is a long absence.
+      expect(
+        historyNotice(
+          gap: gap(null, horizon: true, skipped: true),
+          config: off,
+          report: null,
+        ),
+        contains('Away a long time'),
+      );
+      expect(
+        historyNotice(gap: gap(null), config: off, report: null),
+        isNull,
+        reason: 'no skip and no length: nothing measured, nothing said',
+      );
       // Fill ON: complete run heals; a failed or absent run never silences.
       expect(
         historyNotice(gap: gap(235), config: on, report: report()),
@@ -456,7 +522,11 @@ void main() {
       // Both have something to say; the banner shows the gap, because messages
       // already missing beat messages that might be lost later.
       final gapText = historyNotice(
-        gap: GapAgeDto(gapMinutes: BigInt.from(235), beyondHorizon: false),
+        gap: GapAgeDto(
+          gapMinutes: BigInt.from(235),
+          beyondHorizon: false,
+          skipped: false,
+        ),
         config: const FillConfigDto(
           enabled: false,
           endpoint: 'e',
@@ -748,8 +818,11 @@ void main() {
     ) async {
       // Stub the SOURCES (the screen re-pulls on entry — the never-dark law),
       // then let the screen's own initState pull them.
-      MessagingService.gapAgeFn = () async =>
-          GapAgeDto(gapMinutes: BigInt.from(235), beyondHorizon: false);
+      MessagingService.gapAgeFn = () async => GapAgeDto(
+        gapMinutes: BigInt.from(235),
+        beyondHorizon: false,
+        skipped: false,
+      );
       await tester.pumpWidget(
         MaterialApp(builder: _kvWindow, home: ContactsScreen()),
       );

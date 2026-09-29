@@ -72,7 +72,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.12.0';
 
   @override
-  int get rustContentHash => -202234851;
+  int get rustContentHash => 1842560574;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -94,7 +94,7 @@ abstract class RustLibApi extends BaseApi {
 
   Future<SignableSummaryDto> crateApiSendConsolidatePrepare();
 
-  Future<void> crateApiDagDagNetworkChanged({required bool available});
+  Future<void> crateApiDagDagNetworkEvent({required NetworkEventKind kind});
 
   Future<NodeConfigDto> crateApiDagDagNodeConfig();
 
@@ -527,12 +527,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "consolidate_prepare", argNames: []);
 
   @override
-  Future<void> crateApiDagDagNetworkChanged({required bool available}) {
+  Future<void> crateApiDagDagNetworkEvent({required NetworkEventKind kind}) {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          sse_encode_bool(available, serializer);
+          sse_encode_network_event_kind(kind, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -544,18 +544,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           decodeSuccessData: sse_decode_unit,
           decodeErrorData: sse_decode_app_error,
         ),
-        constMeta: kCrateApiDagDagNetworkChangedConstMeta,
-        argValues: [available],
+        constMeta: kCrateApiDagDagNetworkEventConstMeta,
+        argValues: [kind],
         apiImpl: this,
       ),
     );
   }
 
-  TaskConstMeta get kCrateApiDagDagNetworkChangedConstMeta =>
-      const TaskConstMeta(
-        debugName: "dag_network_changed",
-        argNames: ["available"],
-      );
+  TaskConstMeta get kCrateApiDagDagNetworkEventConstMeta =>
+      const TaskConstMeta(debugName: "dag_network_event", argNames: ["kind"]);
 
   @override
   Future<NodeConfigDto> crateApiDagDagNodeConfig() {
@@ -3833,11 +3830,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   GapAgeDto dco_decode_gap_age_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 2)
-      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
     return GapAgeDto(
       gapMinutes: dco_decode_opt_box_autoadd_u_64(arr[0]),
       beyondHorizon: dco_decode_bool(arr[1]),
+      skipped: dco_decode_bool(arr[2]),
     );
   }
 
@@ -3962,6 +3960,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       tombstoned: dco_decode_bool(arr[1]),
       acceptance: dco_decode_opt_box_autoadd_tx_status_dto(arr[2]),
     );
+  }
+
+  @protected
+  NetworkEventKind dco_decode_network_event_kind(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return NetworkEventKind.values[raw as int];
   }
 
   @protected
@@ -4798,9 +4802,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_gapMinutes = sse_decode_opt_box_autoadd_u_64(deserializer);
     var var_beyondHorizon = sse_decode_bool(deserializer);
+    var var_skipped = sse_decode_bool(deserializer);
     return GapAgeDto(
       gapMinutes: var_gapMinutes,
       beyondHorizon: var_beyondHorizon,
+      skipped: var_skipped,
     );
   }
 
@@ -5006,6 +5012,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       tombstoned: var_tombstoned,
       acceptance: var_acceptance,
     );
+  }
+
+  @protected
+  NetworkEventKind sse_decode_network_event_kind(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return NetworkEventKind.values[inner];
   }
 
   @protected
@@ -5936,6 +5949,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_opt_box_autoadd_u_64(self.gapMinutes, serializer);
     sse_encode_bool(self.beyondHorizon, serializer);
+    sse_encode_bool(self.skipped, serializer);
   }
 
   @protected
@@ -6117,6 +6131,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.txid, serializer);
     sse_encode_bool(self.tombstoned, serializer);
     sse_encode_opt_box_autoadd_tx_status_dto(self.acceptance, serializer);
+  }
+
+  @protected
+  void sse_encode_network_event_kind(
+    NetworkEventKind self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
   }
 
   @protected

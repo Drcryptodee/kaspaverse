@@ -622,6 +622,15 @@ struct HubSink {
 }
 
 impl kaspaverse_chain::MessageSink for HubSink {
+    fn skipped(&self, from: kaspaverse_chain::Hash, to: kaspaverse_chain::Hash) {
+        let Some(monitor) = crate::api::dag::monitor() else {
+            return;
+        };
+        tokio::spawn(async move {
+            resolve_skipped_gap(&monitor, from, to).await;
+        });
+    }
+
     fn fold(&self, matches: Vec<TransportEvent>) -> kaspaverse_chain::VerdictFuture<'_> {
         Box::pin(async move {
             for event in matches {
@@ -654,6 +663,13 @@ pub struct GapAgeDto {
     /// `kaspaverse_chain::pruning_horizon_ms`), and history before it is
     /// unrecoverable from any normal node.
     pub beyond_horizon: bool,
+    /// True when the message walk SKIPPED part of the history this session
+    /// (LINK-Q4): a spent catch-up budget, a cursor the node did not know, or
+    /// a page it could not serve three times. The node will not replay what
+    /// was skipped, so the notice speaks whatever the gap's length, on a line
+    /// of its own. `gap_minutes` is then the longer of the open's gap and any
+    /// skip's span, which the skip line does not print.
+    pub skipped: bool,
 }
 
 /// The gap-age computed at this open (`None` until resolved / first run).
@@ -828,6 +844,11 @@ fn seal_erasure(mutate: impl FnOnce(&mut kaspaverse_chain::history_fill::FillCur
 
 /// Last run's report (per process; the notice re-derives on each open).
 static LAST_FILL: Mutex<Option<FillReportDto>> = Mutex::new(None);
+
+/// Skips the walk has reported this process (LINK-Q4): a fill run reads it
+/// before and after its walk, and a skip in between keeps it from reading
+/// complete.
+static WALK_SKIPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// One fill at a time — an open-time auto-run and a settings-sheet "check
 /// now" must not double-walk (txid dedup would make it correct; the guard
 /// makes it cheap).
@@ -924,9 +945,8 @@ async fn run_fill(hub: &Arc<TransportHub>) -> FillReportDto {
         return idle;
     }
     // Everything below must release the guard — one exit point at the end.
-    let report = fill_walks(hub, &dir, &config).await;
+    let report = counted_fill(fill_walks(hub, &dir, &config)).await;
     FILL_RUNNING.store(false, Ordering::SeqCst);
-    *LAST_FILL.lock().unwrap_or_else(PoisonError::into_inner) = Some(report.clone());
     log::info!(
         "history-fill: run finished (complete={}, pages={}, new_rows={}, error={})",
         report.complete,
@@ -2021,7 +2041,8 @@ pub async fn transport_start() -> Result<(), AppError> {
             .await
         {
             log::info!(
-                "transport-hub: the walk's first run has not settled in {} s — the fill runs anyway",
+                "transport-hub: the walk under this unlock has not settled in {} s (its runs \
+                 had not reached the tip) — the fill runs anyway",
                 kaspaverse_chain::INTAKE_SETTLE_WAIT.as_secs()
             );
         }
@@ -2184,54 +2205,213 @@ pub async fn transport_start() -> Result<(), AppError> {
     Ok(())
 }
 
-/// Resolve the gap-age (cursor block time vs now) with a connect-tolerant
-/// retry budget, then store + log + span-mark it. A node that is CONNECTED
-/// yet repeatedly cannot answer for the cursor block has pruned it — the gap
-/// is at least the pin-read pruning horizon (an honest "≥", never a guess).
-async fn resolve_gap_age(monitor: &kaspaverse_chain::DagMonitor, cursor: kaspaverse_chain::Hash) {
+/// A block as the node reports it — its own time and DAA score — or that the
+/// node no longer has it (pruned), or that no answer came.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BlockTime {
+    /// (timestamp in unix ms, DAA score).
+    Known(u64, u64),
+    Pruned,
+    Unknown,
+}
+
+/// Read a block's own time with a connect-tolerant retry budget: a socket
+/// still dialing is waited for; a node that is CONNECTED yet three times
+/// cannot answer for the block has pruned it (an honest "≥ the horizon",
+/// never a guess). Each call is bounded at our boundary (LINK-Q4: the open's
+/// reader had no deadline of its own). Shared by the open's gap and the
+/// walk's skips, so both judge a block the same way (`consensus-auditor`,
+/// LINK-Q4 round 1: the skip's reader used to call ONE error "pruned").
+async fn block_time(
+    monitor: &kaspaverse_chain::DagMonitor,
+    hash: kaspaverse_chain::Hash,
+) -> BlockTime {
     const ATTEMPTS: u32 = 15;
+    const CALL: std::time::Duration = std::time::Duration::from_secs(10);
+    let rpc = monitor.rpc().rpc_api().clone();
     let mut connected_failures = 0u32;
     for _attempt in 0..ATTEMPTS {
-        match monitor.rpc().rpc_api().get_block(cursor, false).await {
-            Ok(block) => {
-                let now = now_unix_ms();
-                let minutes = now.saturating_sub(block.header.timestamp) / 60_000;
-                *GAP_AGE.lock().unwrap_or_else(PoisonError::into_inner) = Some(GapAgeDto {
-                    gap_minutes: Some(minutes),
-                    beyond_horizon: false,
-                });
-                kaspaverse_chain::spans::mark_with("open_gap_min", &minutes.to_string());
-                log::info!("transport-hub: history gap ≈ {minutes} min at open");
-                ping_notice_inputs();
-                return;
+        match tokio::time::timeout(CALL, rpc.get_block(hash, false)).await {
+            Ok(Ok(block)) => {
+                return BlockTime::Known(block.header.timestamp, block.header.daa_score)
             }
-            Err(_) if monitor.is_connected() => {
+            Ok(Err(_)) if monitor.is_connected() => {
                 // Connected but unanswered — tolerate transient node errors
                 // before concluding the block is pruned.
                 connected_failures += 1;
                 if connected_failures >= 3 {
-                    let horizon_min = kaspaverse_chain::pruning_horizon_ms() / 60_000;
-                    *GAP_AGE.lock().unwrap_or_else(PoisonError::into_inner) = Some(GapAgeDto {
-                        gap_minutes: None,
-                        beyond_horizon: true,
-                    });
-                    kaspaverse_chain::spans::mark_with("open_gap_min", "beyond_horizon");
-                    log::info!(
-                        "transport-hub: cursor block pruned — history gap ≥ {horizon_min} min \
-                         (pruning horizon)"
-                    );
-                    ping_notice_inputs();
-                    return;
+                    return BlockTime::Pruned;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
             }
-            Err(_) => {
-                // Still dialing — wait for the socket.
-                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-            }
+            // Still dialing, or no answer in time: wait for the socket.
+            _ => {}
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    }
+    BlockTime::Unknown
+}
+
+/// Resolve the gap-age (cursor block time vs now), then store + log +
+/// span-mark it.
+async fn resolve_gap_age(monitor: &kaspaverse_chain::DagMonitor, cursor: kaspaverse_chain::Hash) {
+    match block_time(monitor, cursor).await {
+        BlockTime::Known(timestamp, _) => {
+            let minutes = now_unix_ms().saturating_sub(timestamp) / 60_000;
+            merge_gap_age(GapAgeDto {
+                gap_minutes: Some(minutes),
+                beyond_horizon: false,
+                skipped: false,
+            });
+            kaspaverse_chain::spans::mark_with("open_gap_min", &minutes.to_string());
+            log::info!("transport-hub: history gap ≈ {minutes} min at open");
+            ping_notice_inputs();
+        }
+        BlockTime::Pruned => {
+            let horizon_min = kaspaverse_chain::pruning_horizon_ms() / 60_000;
+            merge_gap_age(GapAgeDto {
+                gap_minutes: None,
+                beyond_horizon: true,
+                skipped: false,
+            });
+            kaspaverse_chain::spans::mark_with("open_gap_min", "beyond_horizon");
+            log::info!(
+                "transport-hub: cursor block pruned — history gap ≥ {horizon_min} min \
+                 (pruning horizon)"
+            );
+            ping_notice_inputs();
+        }
+        BlockTime::Unknown => {
+            log::info!("transport-hub: gap-age unresolved this open (node unreachable)");
         }
     }
-    log::info!("transport-hub: gap-age unresolved this open (node unreachable)");
+}
+
+/// Fold a gap reading into this open's (LINK-Q4): the open's own age and any
+/// skip the walk reports later all speak through one notice, so a later
+/// reading widens it and never narrows it — the longer span, a pruned cursor
+/// anywhere, a skip anywhere.
+fn merge_gap_age(reading: GapAgeDto) {
+    let mut gap = GAP_AGE.lock().unwrap_or_else(PoisonError::into_inner);
+    *gap = Some(merged_gap(gap.take(), reading));
+}
+
+/// [`merge_gap_age`]'s rule, pure.
+fn merged_gap(held: Option<GapAgeDto>, reading: GapAgeDto) -> GapAgeDto {
+    match held {
+        None => reading,
+        Some(held) => GapAgeDto {
+            gap_minutes: match (held.gap_minutes, reading.gap_minutes) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (a, b) => a.or(b),
+            },
+            beyond_horizon: held.beyond_horizon || reading.beyond_horizon,
+            skipped: held.skipped || reading.skipped,
+        },
+    }
+}
+
+/// **What a skip from block `from` to block `to` puts on the notice**
+/// (LINK-Q4): the span between the two blocks' own times, a pruned start as
+/// "beyond the horizon", an unknown length as unknown — and NOTHING when the
+/// landing is not ahead of the cursor (a re-walk from a mark behind it, a
+/// lagging node): that skip skipped nothing (`consensus-auditor`, round 1 —
+/// the walk calls `on_gap` for it all the same, because a matcher's state must
+/// hear every move). A mark the chain reorganised away can read either way;
+/// reading it as a skip is the safe error (round 3). "Ahead" is read by DAA
+/// SCORE, never by time: at the pin a
+/// block may be stamped up to 132 s in the future
+/// (`TIMESTAMP_DEVIATION_TOLERANCE`, `pre_ghostdag_validation.rs:40`) and a
+/// later block need only beat the past median time
+/// (`post_pow_validation.rs:23`), so a short real skip can land on an EARLIER
+/// timestamp (`consensus-auditor`, round 2). The minutes are the times'
+/// difference, saturating. The device clock never decides.
+fn skip_reading(from: BlockTime, to: BlockTime) -> Option<GapAgeDto> {
+    let (minutes, beyond_horizon) = match (from, to) {
+        (BlockTime::Known(_, from_daa), BlockTime::Known(_, to_daa)) if to_daa <= from_daa => {
+            return None
+        }
+        (BlockTime::Known(from, _), BlockTime::Known(to, _)) => {
+            (Some(to.saturating_sub(from) / 60_000), false)
+        }
+        (BlockTime::Pruned, _) => (None, true),
+        _ => (None, false),
+    };
+    Some(GapAgeDto {
+        gap_minutes: minutes,
+        beyond_horizon,
+        skipped: true,
+    })
+}
+
+/// **The walk skipped** (LINK-Q4, [`kaspaverse_chain::MessageSink::skipped`]):
+/// read the two blocks' own times and fold the span into the notice as a
+/// skip. A history fill that completed before this skip did not cover it, so
+/// its report stops reading complete: the notice says the check is incomplete
+/// rather than calling a skipped span healed (`wallet-security-auditor`,
+/// round 1 note). The fill itself is not re-run here — the next unlock runs it
+/// after the walk settles, keeping D-074's node-first order.
+async fn resolve_skipped_gap(
+    monitor: &kaspaverse_chain::DagMonitor,
+    from: kaspaverse_chain::Hash,
+    to: kaspaverse_chain::Hash,
+) {
+    let (from_time, to_time) = tokio::join!(block_time(monitor, from), block_time(monitor, to));
+    let Some(reading) = skip_reading(from_time, to_time) else {
+        log::info!(
+            "transport-hub: the walk re-walked from a mark behind its cursor — nothing skipped"
+        );
+        return;
+    };
+    log::info!(
+        "transport-hub: the walk skipped {} — the history notice speaks for it",
+        match reading.gap_minutes {
+            Some(minutes) => format!("≈ {minutes} min"),
+            None if reading.beyond_horizon => "past the pruning horizon".to_string(),
+            None => "a span of unknown length".to_string(),
+        }
+    );
+    fold_skip(reading);
+    ping_notice_inputs();
+}
+
+/// Has the walk reported a skip since the count read `before`?
+fn walk_skipped_since(before: u64) -> bool {
+    WALK_SKIPS.load(std::sync::atomic::Ordering::SeqCst) != before
+}
+
+/// **A fill run's walk, counted** (LINK-Q4, `wallet-security-auditor` rounds
+/// 2–3): the skip count is read before the walk is first polled and checked
+/// when it has finished, so a skip that lands while the run walks — which the
+/// run does not cover — keeps its report from reading complete.
+async fn counted_fill(walk: impl std::future::Future<Output = FillReportDto>) -> FillReportDto {
+    let skips_before = WALK_SKIPS.load(std::sync::atomic::Ordering::SeqCst);
+    store_fill_report(walk.await, skips_before)
+}
+
+/// **A finished run's report, stored** (LINK-Q4): a skip that landed after the
+/// run read the count at `skips_before` is not covered by it, so the report
+/// stops reading complete. The check and the store share `LAST_FILL`'s lock,
+/// and [`fold_skip`] counts under it too — a skip lands wholly before this or
+/// wholly after it, never between the check and the store
+/// (`wallet-security-auditor`, round 3).
+fn store_fill_report(mut report: FillReportDto, skips_before: u64) -> FillReportDto {
+    let mut last = LAST_FILL.lock().unwrap_or_else(PoisonError::into_inner);
+    if walk_skipped_since(skips_before) {
+        report.complete = false;
+    }
+    *last = Some(report.clone());
+    report
+}
+
+/// A skip's reading into the notice's inputs: the gap widens, and a fill that
+/// had completed no longer covers everything (see [`resolve_skipped_gap`]).
+fn fold_skip(reading: GapAgeDto) {
+    merge_gap_age(reading);
+    let mut last = LAST_FILL.lock().unwrap_or_else(PoisonError::into_inner);
+    WALK_SKIPS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if let Some(report) = last.as_mut() {
+        report.complete = false;
+    }
 }
 
 /// A store fold must never be silently lossy (consensus-audit in-run finding
@@ -8279,6 +8459,150 @@ fn to_dto(event: TransportEvent) -> TransportEventDto {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A skip's reading is the node's own clock** (LINK-Q4, `consensus-
+    /// auditor` round 1): the span between the two blocks' times; nothing when
+    /// the landing is not ahead of the cursor; a pruned start is beyond the
+    /// horizon; an unanswered read is an unknown length — never "pruned".
+    #[test]
+    fn a_skip_is_read_by_the_nodes_own_block_times() {
+        use BlockTime::*;
+        let reading =
+            skip_reading(Known(1_000, 10), Known(1_000 + 69 * 60_000, 41_410)).expect("a skip");
+        assert_eq!(
+            (reading.gap_minutes, reading.beyond_horizon, reading.skipped),
+            (Some(69), false, true)
+        );
+        assert!(
+            skip_reading(Known(5_000, 50), Known(5_000, 50)).is_none(),
+            "landed where it was"
+        );
+        assert!(
+            skip_reading(Known(5_000, 50), Known(9_000, 40)).is_none(),
+            "behind the cursor"
+        );
+        // A real skip onto a block stamped EARLIER (a cursor block from the
+        // future, inside the pin's 132 s tolerance): DAA says ahead.
+        let early = skip_reading(Known(90_000, 50), Known(30_000, 700)).expect("a skip");
+        assert_eq!((early.gap_minutes, early.skipped), (Some(0), true));
+        let pruned = skip_reading(Pruned, Known(9, 9)).expect("a skip");
+        assert!(pruned.beyond_horizon && pruned.gap_minutes.is_none());
+        for (from, to) in [
+            (Unknown, Known(9, 9)),
+            (Known(9, 9), Unknown),
+            (Unknown, Unknown),
+            (Known(9, 9), Pruned),
+        ] {
+            let unknown = skip_reading(from, to).expect("a skip");
+            assert!(
+                !unknown.beyond_horizon && unknown.gap_minutes.is_none() && unknown.skipped,
+                "{from:?} → {to:?}: unknown, never pruned"
+            );
+        }
+    }
+
+    /// **A skip after a completed fill un-heals the notice** (`wallet-security-
+    /// auditor`, round 1 note): the fill covered what was missing at the
+    /// open, not a span the walk skipped later. The only test that touches
+    /// these two globals.
+    #[test]
+    fn a_skip_after_a_completed_fill_reads_incomplete() {
+        *LAST_FILL.lock().unwrap_or_else(PoisonError::into_inner) = Some(FillReportDto {
+            ran: true,
+            complete: true,
+            pages: 3,
+            new_rows: 1,
+            error: None,
+            at_unix_ms: 1,
+        });
+        *GAP_AGE.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        let before = WALK_SKIPS.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(!walk_skipped_since(before));
+        fold_skip(GapAgeDto {
+            gap_minutes: Some(7),
+            beyond_horizon: false,
+            skipped: true,
+        });
+        let report = LAST_FILL
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .unwrap();
+        assert!(!report.complete, "no longer reads healed");
+        assert!(walk_skipped_since(before));
+        let run = |complete| FillReportDto {
+            ran: true,
+            complete,
+            pages: 5,
+            new_rows: 2,
+            error: None,
+            at_unix_ms: 2,
+        };
+        assert!(
+            !store_fill_report(run(true), before).complete,
+            "a fill that read the count before the skip does not read complete"
+        );
+        assert!(
+            !LAST_FILL
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+                .unwrap()
+                .complete
+        );
+        let now = WALK_SKIPS.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(
+            store_fill_report(run(true), now).complete,
+            "one that began after it is whole"
+        );
+        // Through the run's own seam: a skip while the walk runs.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let skipped_mid_walk = runtime.block_on(counted_fill(async {
+            fold_skip(GapAgeDto {
+                gap_minutes: Some(2),
+                beyond_horizon: false,
+                skipped: true,
+            });
+            run(true)
+        }));
+        assert!(!skipped_mid_walk.complete, "a skip mid-walk: incomplete");
+        assert!(runtime.block_on(counted_fill(async { run(true) })).complete);
+        assert_eq!((report.pages, report.new_rows), (3, 1), "its record kept");
+        let gap = transport_gap_age().expect("a gap");
+        assert_eq!((gap.gap_minutes, gap.skipped), (Some(7), true));
+    }
+
+    /// **The notice widens and never narrows** (LINK-Q4): the open's own
+    /// reading and every later skip fold into one — the longer span, a pruned
+    /// cursor anywhere, a skip anywhere; an unknown length never erases a
+    /// known one.
+    #[test]
+    fn a_gap_reading_widens_the_notice_and_never_narrows_it() {
+        let gap = |minutes: Option<u64>, beyond_horizon: bool, skipped: bool| GapAgeDto {
+            gap_minutes: minutes,
+            beyond_horizon,
+            skipped,
+        };
+        let open = gap(Some(136), false, false);
+        let skip = gap(Some(69), false, true);
+        let merged = merged_gap(Some(open), skip);
+        assert_eq!(merged.gap_minutes, Some(136), "the longer span");
+        assert!(merged.skipped, "a skip anywhere");
+        assert!(!merged.beyond_horizon);
+        let merged = merged_gap(Some(merged), gap(None, true, true));
+        assert_eq!(
+            merged.gap_minutes,
+            Some(136),
+            "an unknown length erases nothing"
+        );
+        assert!(merged.beyond_horizon, "a pruned cursor anywhere");
+        let first = merged_gap(None, gap(Some(5), false, true));
+        assert_eq!((first.gap_minutes, first.skipped), (Some(5), true));
+        let quiet = merged_gap(Some(gap(Some(5), false, true)), gap(Some(3), false, false));
+        assert!(quiet.skipped, "a later reading never clears a skip");
+    }
 
     /// The row's second line is shaped for a list, not for a thread: one
     /// line, bounded, and never blank where a message exists.

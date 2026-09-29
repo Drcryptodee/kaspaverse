@@ -38,7 +38,7 @@ pub use acceptance::{
 pub use block_list::{BlockList, BlockedContact};
 pub use contact_names::{sanitize_name, ContactNames, MAX_CONTACT_NAME};
 pub use dag_monitor::{
-    DagEvent, DagMonitor, LaneRecovery, LinkProbe, INTAKE_SETTLE_WAIT, PROBE_TIMEOUT,
+    DagEvent, DagMonitor, LaneRecovery, LinkProbe, NetworkEvent, INTAKE_SETTLE_WAIT, PROBE_TIMEOUT,
 };
 pub use error::{ChainError, Result};
 pub use link::{sanitize_node_text, validate_node_url, EscalationOutcome, SignedTxRetention};

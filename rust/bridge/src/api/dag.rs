@@ -232,6 +232,12 @@ fn stored_pin() -> (Option<String>, bool) {
 /// DAA and the wallet's maturity DAA can never come from different nodes.
 static MONITOR: tokio::sync::OnceCell<DagMonitor> = tokio::sync::OnceCell::const_new();
 
+/// The shared monitor if it exists — never starts one (LINK-Q4: the hub's
+/// skip notice reads the node through it, and has nothing to say before it).
+pub(crate) fn monitor() -> Option<DagMonitor> {
+    MONITOR.get().cloned()
+}
+
 /// Get the shared, started monitor (initialising it on the first call).
 pub(crate) async fn shared_monitor() -> Result<DagMonitor, AppError> {
     MONITOR
@@ -577,7 +583,9 @@ pub struct LinkProbeDto {
     pub latency_ms: Option<u64>,
     /// **The deadline, in ms, that the round trip outlasted** (D-333). Not an
     /// absence: the link is live and the answer is AT LEAST this slow, which
-    /// the surface draws as `> N s` on one bar instead of blanking the seat.
+    /// the surface draws as its wait in milliseconds (no `>`, the founder's
+    /// ruling at LINK-Q4; heard as "at least"), its bars the cadence while the
+    /// wait is in flight, instead of blanking the seat.
     /// The deadline is the bound socket's own RFC 6298 clock, 1–5 s. Both this
     /// and `latency_ms` `None` is an error (no socket, a refused call) — the
     /// one outcome the surface counts toward going dark.
@@ -754,18 +762,43 @@ pub async fn dag_reconnect(stalled: bool) -> Result<(), AppError> {
     Ok(())
 }
 
-/// OS default-network transition (C5/D-089): Android's `ConnectivityManager`
-/// default-network callback, relayed by the host activity over the platform
-/// channel and forwarded here by Dart. One `bool` in, unit out — no secret
-/// material can touch this surface structurally (INV-1 untouched; the
-/// ffi-leak auditor samples this fn). Rust decides what the signal means
-/// (ruling 4): available with a dead link → redial NOW; available while
-/// connected → log only (the watchdog owns staleness); lost → log + span
-/// only. A no-op before the monitor exists (nothing to redial yet — the
-/// first connect races on its own).
-pub async fn dag_network_changed(available: bool) -> Result<(), AppError> {
+/// What the phone's own network did, as the host activity saw it on
+/// Android's default-network callback (C5/D-089; four kinds since LINK-Q4,
+/// D-337 (ii)). A kind and nothing else: no network handle, address, SSID or
+/// BSSID crosses (INV-3; `ffi-leak-auditor` samples this surface).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetworkEventKind {
+    /// A default network is up after none was.
+    Available,
+    /// The default network is gone and nothing replaced it.
+    Lost,
+    /// A different network became the default while the old one was still up
+    /// (Android sends no `onLost` for the old default then; the activity sees
+    /// the network change under `onAvailable`).
+    Moved,
+    /// The default network's link changed in place: its addresses, or its
+    /// Wi-Fi band. A hint.
+    Changed,
+}
+
+/// The phone's own network changed (C5/D-089; acted on since LINK-Q4): the
+/// host activity relays the default-network callback over the platform
+/// channel, Dart forwards the kind here, and Rust decides what it means —
+/// `DagMonitor::network_event` (a dark link redials now; a live socket whose
+/// network the phone has left is swapped behind; a loss is recorded and
+/// passive; an in-place change is a hint). One field-less kind in, unit out —
+/// no secret material can touch this surface structurally (INV-1 untouched).
+/// A no-op before the monitor exists (the first connect races on its own).
+pub async fn dag_network_event(kind: NetworkEventKind) -> Result<(), AppError> {
     if let Some(monitor) = MONITOR.get() {
-        monitor.network_changed(available).await;
+        monitor
+            .network_event(match kind {
+                NetworkEventKind::Available => kaspaverse_chain::NetworkEvent::Available,
+                NetworkEventKind::Lost => kaspaverse_chain::NetworkEvent::Lost,
+                NetworkEventKind::Moved => kaspaverse_chain::NetworkEvent::Moved,
+                NetworkEventKind::Changed => kaspaverse_chain::NetworkEvent::Changed,
+            })
+            .await;
     }
     Ok(())
 }

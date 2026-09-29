@@ -7,9 +7,9 @@ import '../frb_generated.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `current_endpoint_url`, `deadline`, `escalation_task`, `fold`, `hold_intake`, `new`, `new`, `observe`, `offer`, `reset`, `retention`, `shared_monitor`, `shared_tracker`, `snapshots`, `stored_pin`, `structural`, `tracker_handle`
+// These functions are ignored because they are not marked as `pub`: `current_endpoint_url`, `deadline`, `escalation_task`, `fold`, `hold_intake`, `monitor`, `new`, `new`, `observe`, `offer`, `reset`, `retention`, `shared_monitor`, `shared_tracker`, `snapshots`, `stored_pin`, `structural`, `tracker_handle`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Coalescer`, `ScoreClock`, `ScoreNote`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// The session's recorded span markers, oldest first. Pull surface — the
 /// harness and the debug screen poll it; nothing streams.
@@ -91,17 +91,16 @@ Future<void> dagSetNodeConfig({String? url}) =>
 Future<void> dagReconnect({required bool stalled}) =>
     RustLib.instance.api.crateApiDagDagReconnect(stalled: stalled);
 
-/// OS default-network transition (C5/D-089): Android's `ConnectivityManager`
-/// default-network callback, relayed by the host activity over the platform
-/// channel and forwarded here by Dart. One `bool` in, unit out — no secret
-/// material can touch this surface structurally (INV-1 untouched; the
-/// ffi-leak auditor samples this fn). Rust decides what the signal means
-/// (ruling 4): available with a dead link → redial NOW; available while
-/// connected → log only (the watchdog owns staleness); lost → log + span
-/// only. A no-op before the monitor exists (nothing to redial yet — the
-/// first connect races on its own).
-Future<void> dagNetworkChanged({required bool available}) =>
-    RustLib.instance.api.crateApiDagDagNetworkChanged(available: available);
+/// The phone's own network changed (C5/D-089; acted on since LINK-Q4): the
+/// host activity relays the default-network callback over the platform
+/// channel, Dart forwards the kind here, and Rust decides what it means —
+/// `DagMonitor::network_event` (a dark link redials now; a live socket whose
+/// network the phone has left is swapped behind; a loss is recorded and
+/// passive; an in-place change is a hint). One field-less kind in, unit out —
+/// no secret material can touch this surface structurally (INV-1 untouched).
+/// A no-op before the monitor exists (the first connect races on its own).
+Future<void> dagNetworkEvent({required NetworkEventKind kind}) =>
+    RustLib.instance.api.crateApiDagDagNetworkEvent(kind: kind);
 
 /// The pull heal asks the NODE — soft-first since V6 (amends the V3 register
 /// item 12 design, whose unconditional hard reconnect predates the D-083 root
@@ -292,7 +291,9 @@ class LinkProbeDto {
 
   /// **The deadline, in ms, that the round trip outlasted** (D-333). Not an
   /// absence: the link is live and the answer is AT LEAST this slow, which
-  /// the surface draws as `> N s` on one bar instead of blanking the seat.
+  /// the surface draws as its wait in milliseconds (no `>`, the founder's
+  /// ruling at LINK-Q4; heard as "at least"), its bars the cadence while the
+  /// wait is in flight, instead of blanking the seat.
   /// The deadline is the bound socket's own RFC 6298 clock, 1–5 s. Both this
   /// and `latency_ms` `None` is an error (no socket, a refused call) — the
   /// one outcome the surface counts toward going dark.
@@ -336,6 +337,27 @@ class LinkProbeDto {
           timedOutMs == other.timedOutMs &&
           synced == other.synced &&
           peers == other.peers;
+}
+
+/// What the phone's own network did, as the host activity saw it on
+/// Android's default-network callback (C5/D-089; four kinds since LINK-Q4,
+/// D-337 (ii)). A kind and nothing else: no network handle, address, SSID or
+/// BSSID crosses (INV-3; `ffi-leak-auditor` samples this surface).
+enum NetworkEventKind {
+  /// A default network is up after none was.
+  available,
+
+  /// The default network is gone and nothing replaced it.
+  lost,
+
+  /// A different network became the default while the old one was still up
+  /// (Android sends no `onLost` for the old default then; the activity sees
+  /// the network change under `onAvailable`).
+  moved,
+
+  /// The default network's link changed in place: its addresses, or its
+  /// Wi-Fi band. A hint.
+  changed,
 }
 
 /// The user's node choice (D-187) — the INV-8 escape hatch made reachable.
