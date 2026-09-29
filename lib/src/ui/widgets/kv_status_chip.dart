@@ -138,7 +138,7 @@ class KvStatusChip extends StatelessWidget {
   /// Plain English. Never a code, never a hue's name.
   final String words;
 
-  /// Sits at the end of the row — a [KvCadence] on a trust line, an amount on
+  /// Sits at the end of the row — a [KvLoader] on a trust line, an amount on
   /// an in-flight line.
   final Widget? trailing;
 

@@ -18,7 +18,7 @@ import '../widgets/kv_burial_mark.dart';
 import '../widgets/kv_fact_line.dart';
 import '../widgets/kv_contact.dart';
 import '../widgets/kv_fiat.dart';
-import '../widgets/kv_cadence.dart';
+import '../widgets/kv_loader.dart';
 import '../widgets/kv_chrome.dart';
 import '../widgets/kv_explorer_exit.dart';
 import '../widgets/kv_glyph.dart';
@@ -1472,7 +1472,7 @@ class _StagedWait extends StatelessWidget {
                   ),
                   if (i == stage) ...[
                     const SizedBox(width: KvSpace.s),
-                    const KvCadence(running: true),
+                    const KvLoader.inline(label: null),
                   ],
                 ],
               ),

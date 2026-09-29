@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
-import 'package:kaspaverse/src/ui/widgets/kv_cadence.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_loader.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_empty_state.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
@@ -24,92 +24,180 @@ Widget _host(Widget child, {bool reducedMotion = false, double width = 360}) {
   );
 }
 
-List<double> _barAlphas(WidgetTester tester) => tester
-    .widgetList<ColoredBox>(
-      find.descendant(
-        of: find.byType(KvCadence),
-        matching: find.byType(ColoredBox),
-      ),
-    )
-    .map((b) => b.color.a)
-    .toList();
+KvLoaderShape _shape(WidgetTester tester) =>
+    tester
+            .widget<CustomPaint>(
+              find.descendant(
+                of: find.byType(KvLoader),
+                matching: find.byType(CustomPaint),
+              ),
+            )
+            .painter!
+        as KvLoaderShape;
 
 void main() {
-  group('KvCadence — the ONE loading indicator (§4, BG-8, D-192)', () {
-    test('its extent is derived from the bars, never asserted (L121)', () {
-      expect(KvCadence.height, 14);
-      expect(
-        KvCadence.width,
-        KvCadence.barHeights.length * KvCadence.barWidth +
-            (KvCadence.barHeights.length - 1) * KvCadence.barGap,
-      );
-      expect(KvCadence.barHeights, const [6, 10, 14, 10, 6]);
+  group('KvLoader — the ONE loader (LINK-Q4: Material 3 Expressive, the '
+      'founder\'s choice; §4, BG-8, D-192)', () {
+    test('its numbers are AOSP\'s LoadingIndicator, not a guess', () {
+      expect(KvLoader.morphMs, 650);
+      expect(KvLoader.turnMs, 4666);
+      expect(KvLoader.springDamping, 0.6);
+      expect(KvLoader.springStiffness, 200);
+      expect(KvLoader.activeRatio, closeTo(38 / 48, 1e-9));
+      expect(KvLoader.shapes, hasLength(7));
     });
 
-    testWidgets('running: the bars travel', (tester) async {
-      await tester.pumpWidget(_host(const KvCadence(running: true)));
-      final first = _barAlphas(tester);
-      expect(first, hasLength(5));
-      await tester.pump(KvMotion.cadence * 0.3);
-      expect(_barAlphas(tester), isNot(equals(first)));
+    test('the morph is a spring: it overshoots about 9 % and settles inside '
+        'one morph', () {
+      expect(KvLoader.spring(0), 0);
+      var peak = 0.0;
+      for (var t = 0.0; t <= KvLoader.morphMs / 1000; t += 0.001) {
+        peak = peak > KvLoader.spring(t) ? peak : KvLoader.spring(t);
+      }
+      expect(peak, closeTo(1.095, 0.01), reason: 'underdamped, ζ = 0.6');
+      expect(KvLoader.spring(KvLoader.morphMs / 1000), closeTo(1, 0.01));
+    });
+
+    test('seven distinct outlines, each reaching the edge exactly once', () {
+      for (final s in KvLoader.shapes) {
+        expect(s, hasLength(KvLoader.samples));
+        expect(s.reduce((a, b) => a > b ? a : b), closeTo(1, 1e-9));
+        expect(s.reduce((a, b) => a < b ? a : b), greaterThan(0.5));
+      }
+      for (var i = 0; i < KvLoader.shapes.length; i++) {
+        for (var k = i + 1; k < KvLoader.shapes.length; k++) {
+          expect(KvLoader.shapes[i], isNot(equals(KvLoader.shapes[k])));
+        }
+      }
+    });
+
+    testWidgets('running: it turns and morphs', (tester) async {
+      await tester.pumpWidget(_host(const KvLoader()));
+      await tester.pump(const Duration(milliseconds: 16));
+      final first = _shape(tester);
+      await tester.pump(const Duration(milliseconds: 300));
+      final later = _shape(tester);
+      expect(later.turn, isNot(first.turn));
+      expect(later.progress, isNot(first.progress));
+      expect(later.color.a, closeTo(1, 0.001));
+      expect(tester.hasRunningAnimations, isTrue);
       await tester.pumpWidget(const SizedBox());
     });
 
     testWidgets('the link dies and it FREEZES, dimmed', (tester) async {
-      await tester.pumpWidget(_host(const KvCadence(running: false)));
-      expect(
-        _barAlphas(tester),
-        everyElement(closeTo(KvFreshness.opacityStale, 0.001)),
-      );
-      // Nothing is ticking: a settled screen is a still screen (D-192), so a
-      // settle must return rather than time out.
+      await tester.pumpWidget(_host(const KvLoader(running: false)));
+      expect(_shape(tester).color.a, closeTo(KvFreshness.opacityStale, 0.001));
+      // Nothing is ticking: a settled screen is a still screen (D-192).
       await tester.pumpAndSettle();
-      expect(
-        _barAlphas(tester),
-        everyElement(closeTo(KvFreshness.opacityStale, 0.001)),
-      );
+      expect(_shape(tester).color.a, closeTo(KvFreshness.opacityStale, 0.001));
     });
 
     testWidgets(
       'reduced motion keeps running and frozen TELLABLE APART (BG-9)',
       (tester) async {
-        // Stopping the controller under reduced motion would render a running
-        // cadence identically to a dead one — the precise lie BG-8 forbids.
-        // The movement goes; the distinction does not.
-        await tester.pumpWidget(
-          _host(const KvCadence(running: true), reducedMotion: true),
-        );
-        final running = _barAlphas(tester);
-        expect(running, everyElement(closeTo(1.0, 0.001)));
+        await tester.pumpWidget(_host(const KvLoader(), reducedMotion: true));
+        final running = _shape(tester);
+        expect(running.color.a, closeTo(1, 0.001));
         await tester.pumpAndSettle(); // proves nothing is animating
-        expect(_barAlphas(tester), running);
-
+        expect(_shape(tester).turn, running.turn);
         await tester.pumpWidget(
-          _host(const KvCadence(running: false), reducedMotion: true),
+          _host(const KvLoader(running: false), reducedMotion: true),
         );
-        final frozen = _barAlphas(tester);
-        expect(frozen, everyElement(closeTo(KvFreshness.opacityStale, 0.001)));
-        expect(frozen, isNot(equals(running)));
+        expect(
+          _shape(tester).color.a,
+          closeTo(KvFreshness.opacityStale, 0.001),
+        );
       },
     );
 
     testWidgets('it stops the instant running goes false', (tester) async {
-      await tester.pumpWidget(_host(const KvCadence(running: true)));
-      await tester.pump(KvMotion.cadence * 0.4);
-      await tester.pumpWidget(_host(const KvCadence(running: false)));
+      await tester.pumpWidget(_host(const KvLoader()));
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.pumpWidget(_host(const KvLoader(running: false)));
       await tester.pumpAndSettle();
-      expect(
-        _barAlphas(tester),
-        everyElement(closeTo(KvFreshness.opacityStale, 0.001)),
-      );
+      expect(_shape(tester).color.a, closeTo(KvFreshness.opacityStale, 0.001));
     });
 
-    testWidgets('it is one emission, and it is silent to a screen reader', (
+    testWidgets('three looks, one meaning each — working teal, waiting grey '
+        'and moving, stopped grey and dim; never a lamp\'s hue (LINK-Q4)', (
       tester,
     ) async {
+      // Working: teal, full, moving.
+      await tester.pumpWidget(_host(const KvLoader(label: null)));
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(_shape(tester).color.withValues(alpha: 1), KvLoader.colour);
+      expect(_shape(tester).color.a, closeTo(1, 0.001));
+      expect(tester.hasRunningAnimations, isTrue);
+      // Waiting: grey, full, still moving (a new loader — its colour is
+      // chosen when it appears).
+      await tester.pumpWidget(const SizedBox());
+      await tester.pumpWidget(
+        _host(const KvLoader(waiting: true, label: null)),
+      );
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(_shape(tester).color.withValues(alpha: 1), KvLoader.waitingColour);
+      expect(_shape(tester).color.a, closeTo(1, 0.001));
+      expect(tester.hasRunningAnimations, isTrue, reason: 'it listens');
+      // Stopped: grey, dimmed, still.
+      await tester.pumpWidget(const SizedBox());
+      await tester.pumpWidget(
+        _host(const KvLoader(running: false, label: null)),
+      );
+      await tester.pumpAndSettle();
+      expect(_shape(tester).color.withValues(alpha: 1), KvLoader.waitingColour);
+      expect(_shape(tester).color.a, closeTo(KvFreshness.opacityStale, 0.001));
+      // The two colours are the house's, and neither is a status hue.
+      expect(KvLoader.colour, KvColor.primaryMuted);
+      expect(KvLoader.waitingColour, KvColor.inkMeta);
+      for (final status in [KvColor.ok, KvColor.warn, KvColor.risk]) {
+        expect(KvLoader.colour, isNot(status));
+        expect(KvLoader.waitingColour, isNot(status));
+      }
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('it keeps the colour it appeared in until it leaves — a state '
+        'change moves or dims it, never re-colours it (the founder, LINK-Q4)', (
+      tester,
+    ) async {
+      Future<Color> hue(KvLoader loader) async {
+        await tester.pumpWidget(_host(loader));
+        await tester.pump(const Duration(milliseconds: 16));
+        return _shape(tester).color.withValues(alpha: 1);
+      }
+
+      // Appears working: teal. Then the phone drops: still teal.
+      expect(await hue(const KvLoader(label: null)), KvLoader.colour);
+      expect(
+        await hue(const KvLoader(waiting: true, label: null)),
+        KvLoader.colour,
+      );
+      // Gone, then a new one appears waiting: grey. Work starts: still grey.
+      await tester.pumpWidget(const SizedBox());
+      expect(
+        await hue(const KvLoader(waiting: true, label: null)),
+        KvLoader.waitingColour,
+      );
+      expect(await hue(const KvLoader(label: null)), KvLoader.waitingColour);
+      expect(tester.hasRunningAnimations, isTrue, reason: 'it still moves');
+      // Stopping dims it; the colour it appeared in stays.
+      await tester.pumpWidget(
+        _host(const KvLoader(running: false, label: null)),
+      );
+      await tester.pumpAndSettle();
+      expect(_shape(tester).color.withValues(alpha: 1), KvLoader.waitingColour);
+      expect(_shape(tester).color.a, closeTo(KvFreshness.opacityStale, 0.001));
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('it speaks only when it stands alone', (tester) async {
       final handle = tester.ensureSemantics();
-      await tester.pumpWidget(_host(const KvCadence(running: false)));
-      expect(find.byType(ExcludeSemantics), findsOneWidget);
+      await tester.pumpWidget(
+        _host(const KvLoader(running: false, label: null)),
+      );
+      expect(find.bySemanticsLabel('loading'), findsNothing);
+      await tester.pumpWidget(_host(const KvLoader(running: false)));
+      expect(find.bySemanticsLabel('loading'), findsOneWidget);
       handle.dispose();
     });
   });

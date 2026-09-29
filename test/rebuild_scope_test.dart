@@ -141,7 +141,7 @@ void main() {
         'KvRollingText',
         '_NodeDisc',
         '_SwitchNode',
-        'KvCadence',
+        'KvLoader',
         '_Reading',
         'KvToggle',
         'TextField',
@@ -175,7 +175,7 @@ void main() {
         '_Action',
         '_NodeDisc',
         '_SwitchNode',
-        'KvCadence',
+        'KvLoader',
         '_Reading',
       ]) {
         expect(probe[still] ?? 0, 0, reason: '$still rebuilt on a probe');

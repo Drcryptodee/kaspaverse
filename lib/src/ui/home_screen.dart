@@ -17,7 +17,7 @@ import 'widgets/kv_amount.dart';
 import 'widgets/kv_live_dot.dart';
 import 'widgets/kv_burial_mark.dart';
 import 'widgets/kv_derived.dart';
-import 'widgets/kv_cadence.dart';
+import 'widgets/kv_loader.dart';
 import 'widgets/kv_chrome.dart';
 import 'widgets/kv_coming_soon.dart';
 import 'widgets/kv_drawer.dart';
@@ -306,7 +306,12 @@ typedef _LinkView = ({
 
 /// The trust line, as one value: `words == null` is **silence**, which is what
 /// a healthy screen looks like (D-192).
-typedef _TrustView = ({String? words, bool running, KvLampTone tone});
+typedef _TrustView = ({
+  String? words,
+  bool running,
+  bool waiting,
+  KvLampTone tone,
+});
 
 /// What the balance region renders. The ledger's depth counters are scoped
 /// separately — a DAA tick must not rebuild the money number.
@@ -579,7 +584,7 @@ class _HomeScreenState extends State<HomeScreen> {
       // be nameable on the money surface, in the node surface's vocabulary.
       //
       // It BRINGS the meter rather than explaining one: the trust chip is this
-      // plate's only `KvCadence` call site, so the state silence used to
+      // plate's only `KvLoader` call site, so the state silence used to
       // suppress rendered nothing at all — no motion was going unexplained.
       //
       // **Gated on the raw socket bit, not on `state`.** `evaluateBeacon`
@@ -673,7 +678,14 @@ class _HomeScreenState extends State<HomeScreen> {
       // **Motion means something is happening.** A hunt and a first scan are
       // both happening; a dead or stale link is not, and the meter freezing is
       // exactly what makes "live" a felt thing rather than a claimed one.
-      running: link.hunting || link.state == BeaconState.connecting || syncing,
+      running:
+          link.hunting ||
+          link.state == BeaconState.connecting ||
+          link.state == BeaconState.offline ||
+          syncing,
+      // **The phone offline is a wait, not work** (LINK-Q4, the founder): the
+      // loader turns grey and keeps moving, listening for the network.
+      waiting: link.state == BeaconState.offline,
       tone: linkOnly ? KvLampTone.ok : KvLampTone.warn,
     );
   }
@@ -2163,13 +2175,13 @@ class _StatusStrip extends StatelessWidget {
               _StatusRow(
                 tone: t.tone,
                 sentence: words,
-                // The meter shares the lamp's hue (§4): one indicator, one
-                // colour, and no teal object on this screen that BG-2's list
-                // does not name.
-                trailing: KvCadence(
+                // The loader's one colour, never the lamp's hue (LINK-Q4):
+                // the lamp and the sentence carry the state; the loader only
+                // says something is in flight.
+                trailing: KvLoader.inline(
                   running: t.running,
-                  scale: 0.85,
-                  tone: t.tone.color,
+                  waiting: t.waiting,
+                  label: null,
                 ),
               ),
           ];

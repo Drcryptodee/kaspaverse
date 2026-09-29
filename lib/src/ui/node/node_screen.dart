@@ -10,7 +10,7 @@ import '../format.dart';
 import '../theme/tokens.dart';
 import '../widgets/haptics.dart';
 import '../widgets/kv_live_dot.dart';
-import '../widgets/kv_cadence.dart';
+import '../widgets/kv_loader.dart';
 import '../theme/kv_window.dart';
 import '../widgets/kv_fact_line.dart';
 import '../widgets/kv_glyph.dart';
@@ -417,7 +417,7 @@ class _NodeScreenState extends State<NodeScreen> {
   final ValueNotifier<bool> _dark = ValueNotifier(false);
 
   /// When the probe now in flight was sent, on [NodeScreen.clock] — the live
-  /// count's origin (LINK-UX1: `> 1.8 s` counts up while the probe is out,
+  /// count's origin (LINK-UX1: `1800 ms` counts up while the probe is out,
   /// because the elapsed time is itself a measurement). Null with none out.
   final ValueNotifier<DateTime?> _probeOutSince = ValueNotifier(null);
 
@@ -664,7 +664,7 @@ class _NodeScreenState extends State<NodeScreen> {
   ///
   /// * **An answer** is a sample.
   /// * **A timeout** is a sample too — a *lower bound*: the round trip took at
-  ///   least the socket's own adaptive deadline. The seat shows `> N s` on one
+  ///   least the socket's own adaptive deadline. The seat shows the wait in ms on one
   ///   bar. The old seat blanked here, and on the founder's Starlink hop a
   ///   slow, live link blinked dark and relit five times while he wrote one
   ///   message.
@@ -934,13 +934,14 @@ class _NodeScreenState extends State<NodeScreen> {
                     _Explainer(
                       open: _replyInfo,
                       figures: true,
+                      // The founder's own words, LINK-Q4 on glass
+                      // (2026-09-29): "the (i) thing is already too long".
                       text:
-                          'Node reply is how long this node takes to answer, '
-                          'smoothed. Path, its best answer in the last 10 s, '
-                          'is mostly distance. The gap between '
-                          'them is queueing. Bars grade the last 10 s. The '
-                          'chart shows the last minute. In it, red marks a '
-                          'wait with no answer.',
+                          'Node reply is how long this node takes to answer '
+                          '(smoothed). Path is its best answer in the last '
+                          '10s. Bars grade the last 10s, the chart shows the '
+                          'last minute. Red marks in the chart is a wait with '
+                          'no answer.',
                     ),
                     // **`NODE`, with its circled-i** (founder on glass,
                     // 2026-09-05): the caps label sits at the card's upper
@@ -1149,7 +1150,10 @@ class _NodeScreenState extends State<NodeScreen> {
                   children: [
                     _NodeRow(
                       tone: tone,
-                      busy: hunting || (!connected && !offline),
+                      // Offline is a wait: the loader turns grey and moves
+                      // (LINK-Q4, the founder), where it was the still glyph.
+                      busy: hunting || !connected,
+                      waiting: offline,
                       title: title,
                       // **In full** — `wss://host:port`, wrapping to a second
                       // line rather than cut to a host (founder on glass,
@@ -2679,17 +2683,18 @@ class _PathReading extends StatelessWidget {
         textBaseline: TextBaseline.alphabetic,
         children: [
           const KvRuledLabel('Path', tight: true),
-          const SizedBox(width: KvSpace.s),
-          // Already on its grid ([KvLatencyReading.printedPath]). **From a
-          // second up it is printed in seconds**, floored to a tenth: `1480`
-          // and its `ms` pushed the caption past the 320 dp / 1.3× floor and
-          // onto a second line (`ux-auditor`, measured 252.3 against 248).
+          // `xs`, the `BPS` caption's own anatomy on this card (v4.48).
+          const SizedBox(width: KvSpace.xs),
+          // Already on its grid ([KvLatencyReading.printedPath]), in
+          // milliseconds whatever its size (the founder's ruling, LINK-Q4:
+          // "lets just maintain the ms"). It was printed in seconds from a
+          // second up because `1480 ms` pushed the caption past the 320 dp /
+          // 1.3× floor (`ux-auditor`, 252.3 against 248); the caption's fit
+          // at the floor is held by the two `xs` gaps (the label's here and
+          // the caption `Wrap`'s): one line at 320 dp / 1.3×, measured and
+          // guarded (`a four-digit path is whole in milliseconds…`).
           Text(
-            ms == null
-                ? '—'
-                : ms >= 1000
-                ? KvLatency.seconds(ms)
-                : '$ms',
+            ms == null ? '—' : '$ms',
             style: const TextStyle(
               fontFamily: KvFont.mono,
               fontSize: 13,
@@ -2701,7 +2706,7 @@ class _PathReading extends StatelessWidget {
           if (ms != null) ...[
             const SizedBox(width: KvSpace.xs),
             Text(
-              ms >= 1000 ? 's' : 'ms',
+              'ms',
               style: TextStyle(
                 fontFamily: KvFont.ui,
                 fontSize: 12,
@@ -2762,12 +2767,16 @@ class _ReplyHeadState extends State<_ReplyHead> {
         Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // A `Wrap`, not a `Row` (L160): at 320 dp / 1.3× the path drops
-            // to its own run rather than squeezing the caps label mid-word.
+            // A `Wrap`, not a `Row` (L160): past the floor the path drops to
+            // its own run rather than squeezing the caps label mid-word. Its
+            // minimum gap is `xs` (LINK-Q4): with the path in milliseconds
+            // (the founder's ruling) a four-digit path at 320 dp / 1.3× holds
+            // the caption's one line with it, and `spaceBetween` spreads the
+            // gap wherever there is room, so only the floor feels it.
             Wrap(
               alignment: WrapAlignment.spaceBetween,
               crossAxisAlignment: WrapCrossAlignment.center,
-              spacing: KvSpace.s,
+              spacing: KvSpace.xs,
               runSpacing: KvSpace.xs,
               children: [
                 // The press tints the words and their mark, and nothing
@@ -3240,6 +3249,7 @@ class _Fault extends StatelessWidget {
 /// and decides; this only draws.
 class _NodeRow extends StatelessWidget {
   const _NodeRow({
+    this.waiting = false,
     required this.tone,
     required this.busy,
     required this.title,
@@ -3249,6 +3259,9 @@ class _NodeRow extends StatelessWidget {
 
   final KvLampTone tone;
   final bool busy;
+
+  /// The phone has no network: the loader waits in grey.
+  final bool waiting;
   final String title;
   final String? endpoint;
   final Widget? trailing;
@@ -3271,7 +3284,7 @@ class _NodeRow extends StatelessWidget {
       // word is read. While the link is being hunted the disc holds the
       // cadence instead: the app's one loading indicator, in the row's own
       // status seat (D-192 — motion means something is happening).
-      _NodeDisc(tone: tone, busy: busy),
+      _NodeDisc(tone: tone, busy: busy, waiting: waiting),
       const SizedBox(width: KvSpace.sm),
       Expanded(
         child: Column(
@@ -3327,21 +3340,34 @@ class _EndpointText extends StatelessWidget {
 /// its place. One seat, two faces: a mark when there is a node, the app's one
 /// loading indicator while there is not yet one (BG-20, D-192).
 class _NodeDisc extends StatelessWidget {
-  const _NodeDisc({required this.tone, required this.busy});
+  const _NodeDisc({
+    required this.tone,
+    required this.busy,
+    this.waiting = false,
+  });
 
   final KvLampTone tone;
 
   /// Something is genuinely in flight — a hunt, or a dark link still trying.
   final bool busy;
 
+  /// In flight but blocked outside the app (the phone offline): grey.
+  final bool waiting;
+
+  /// While it holds the loader the disc goes neutral (`chip`), so the loader's
+  /// one colour is the disc's only colour (the founder at LINK-Q4: an amber
+  /// ring around the loader was "two colors"); the words beside it say why.
   @override
   Widget build(BuildContext context) => Container(
     width: KvSpace.rowDisc,
     height: KvSpace.rowDisc,
-    decoration: BoxDecoration(color: tone.ring, shape: BoxShape.circle),
+    decoration: BoxDecoration(
+      color: busy ? KvColor.chip : tone.ring,
+      shape: BoxShape.circle,
+    ),
     child: Center(
       child: busy
-          ? KvCadence(running: true, tone: tone.color)
+          ? KvLoader(size: 22, waiting: waiting, label: null)
           : KvGlyphIcon(KvGlyph.network, tone: tone.color, size: 18),
     ),
   );

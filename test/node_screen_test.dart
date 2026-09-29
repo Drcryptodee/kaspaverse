@@ -12,7 +12,7 @@ import 'package:kaspaverse/src/ui/node/node_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
-import 'package:kaspaverse/src/ui/widgets/kv_cadence.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_loader.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_check.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_chrome.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_fact_line.dart';
@@ -493,7 +493,8 @@ void pollLifecycleTests() {
     );
 
     testWidgets(
-      'while hunting, the disc holds the cadence and the pill says so',
+      'while hunting, the disc holds the loader on a neutral ground and the '
+      'pill says so (LINK-Q4: one colour in the disc)',
       (tester) async {
         final seam = _FakeSeam(connected: false);
         seam.searching.value = true;
@@ -501,10 +502,21 @@ void pollLifecycleTests() {
         expect(find.text('Searching…'), findsOneWidget);
         expect(_cadenceRunning(tester), isTrue);
         expect(
-          find.byType(KvCadence).evaluate().length,
+          find.byType(KvLoader).evaluate().length,
           1,
           reason: 'one loading indicator, in the row\'s own status seat',
         );
+        // The disc around the loader is `chip`, never the lamp's ring: an
+        // amber ring round a teal loader was the founder's "two colors".
+        final disc = tester.widget<Container>(
+          find
+              .ancestor(
+                of: find.byType(KvLoader),
+                matching: find.byType(Container),
+              )
+              .first,
+        );
+        expect((disc.decoration! as BoxDecoration).color, KvColor.chip);
         await tester.pumpWidget(const SizedBox());
       },
     );
@@ -612,7 +624,7 @@ Finder _inSheet(Finder f) =>
     find.descendant(of: find.byType(KvSheet), matching: f);
 
 bool _cadenceRunning(WidgetTester tester) =>
-    tester.widgetList<KvCadence>(find.byType(KvCadence)).any((c) => c.running);
+    tester.widgetList<KvLoader>(find.byType(KvLoader)).any((c) => c.running);
 
 Future<void> loadBundledFonts() async {
   for (final font in const {
@@ -706,8 +718,12 @@ void main() {
             await tester.pump(NodeScreen.pollEvery);
             await tester.pump();
           }
-          expect(find.text('> 1.8'), findsOneWidget);
-          expect(find.text('s'), findsOneWidget);
+          expect(find.text('1800'), findsOneWidget);
+          expect(
+            find.text('s'),
+            findsNothing,
+            reason: 'milliseconds only (LINK-Q4)',
+          );
           expect(_seat('—'), findsNothing, reason: 'never drawn dark');
           await tester.pumpWidget(const SizedBox());
         },
@@ -882,7 +898,7 @@ void main() {
           final carried = '${memory.milliseconds}';
           for (final (latencyMs, timedOutMs, shows) in const [
             (300, null, '300'),
-            (null, 1800, '> 1.8'),
+            (null, 1800, '1800'),
           ]) {
             final seam = _FakeSeam()..probeThrows = true;
             NodeScreen.carryLatency(
@@ -1194,8 +1210,12 @@ void main() {
         find.text('Nothing can be reached until it is back.'),
         findsOneWidget,
       );
-      // Not hunting: a cadence over a dead radio claims work nobody is doing.
-      expect(_cadenceRunning(tester), isFalse);
+      // **Offline is a wait, not work** (LINK-Q4, the founder: "it should grey
+      // and load"): the loader moves in GREY in the neutral disc — never teal,
+      // which would claim work — and the words say why.
+      final loader = tester.widget<KvLoader>(find.byType(KvLoader));
+      expect(loader.running, isTrue);
+      expect(loader.waiting, isTrue);
     });
 
     testWidgets('a DISCONNECTED reading is dimmed and wears its age (BG-8)', (
@@ -1634,7 +1654,7 @@ void main() {
       expect(find.text('Searching…'), findsOneWidget);
       expect(find.text('Switch node'), findsNothing);
       expect(
-        tester.widgetList<KvCadence>(find.byType(KvCadence)).length,
+        tester.widgetList<KvLoader>(find.byType(KvLoader)).length,
         lessThanOrEqualTo(1),
         reason: 'the serving plate owns the only meter on this screen',
       );
@@ -1700,7 +1720,7 @@ void main() {
       // five, because `_Reconnect` had grown a meter of its own beside the
       // serving plate's.
       int emissions(WidgetTester t) =>
-          find.byType(KvCadence).evaluate().length +
+          find.byType(KvLoader).evaluate().length +
           find.byType(KvLamp).evaluate().length +
           find.byType(KvLiveDot).evaluate().length;
 
@@ -1812,7 +1832,7 @@ void main() {
       // element, so `initState` does not re-run and `_wantPin` carries over
       // from the case before it.
       int emissions(WidgetTester t) =>
-          find.byType(KvCadence).evaluate().length +
+          find.byType(KvLoader).evaluate().length +
           find.byType(KvLamp).evaluate().length +
           find.byType(KvLiveDot).evaluate().length;
 
@@ -1884,6 +1904,65 @@ void main() {
           reason: 'every line it needs is laid out at $width dp',
         );
         painter.dispose();
+        await tester.pumpWidget(const SizedBox());
+      }
+    });
+
+    testWidgets('a four-digit path is whole in milliseconds, on one caption '
+        'line at every setting (LINK-Q4: milliseconds only, his ruling)', (
+      tester,
+    ) async {
+      // `1480 ms` once pushed the caption past the 320 dp / 1.3× floor, and
+      // the path was printed in seconds from a second up to hold one line.
+      // The founder ruled milliseconds only (2026-09-29); the caption's two
+      // gaps went from `s` to `xs` and a four-digit path holds one line at
+      // every setting, the floor included (`ux-auditor`: a run of its own
+      // would jump the card 20 dp at 999↔1000 and lose the right seat).
+      for (final (width, scale) in const [
+        (360.0, 0.9),
+        (393.0, 1.0),
+        (320.0, 1.3),
+      ]) {
+        final seam = _FakeSeam()..latencyMs = 1480;
+        await _pumpScreen(
+          tester,
+          seam,
+          withProbe: true,
+          width: width,
+          height: 1400,
+          textScale: scale,
+          settle: false,
+        );
+        for (var i = 0; i < 4; i++) {
+          await tester.pump(NodeScreen.pollEvery);
+          await tester.pump();
+        }
+        final path = find.byWidgetPredicate(
+          (w) => w is Text && w.data == '1480' && w.style?.fontSize == 13,
+        );
+        expect(path, findsOneWidget, reason: 'the path, in ms, at $width');
+        expect(find.textContaining(RegExp(r'^1\.\d$')), findsNothing);
+        // One caption line, at every setting (LINK-Q4, `ux-auditor`): the
+        // path sits on the info mark's line, right of it, and inside the
+        // caption's own width — never pushed to a run of its own.
+        final mark = tester.getRect(find.byType(KvInfoMark).first);
+        final at = tester.getRect(path);
+        final row = tester.getRect(
+          find.ancestor(of: path, matching: find.byType(Wrap)).first,
+        );
+        debugPrint(
+          'path at $width / $scale: ${at.left.toStringAsFixed(1)}–'
+          '${at.right.toStringAsFixed(1)} in ${row.left.toStringAsFixed(1)}–'
+          '${row.right.toStringAsFixed(1)}',
+        );
+        expect(
+          (at.center.dy - mark.center.dy).abs(),
+          lessThan(KvSpace.s),
+          reason: 'one caption line at $width / $scale',
+        );
+        expect(at.left, greaterThan(mark.right), reason: 'right of the mark');
+        expect(at.right, lessThanOrEqualTo(row.right + 0.5));
+        expect(tester.takeException(), isNull);
         await tester.pumpWidget(const SizedBox());
       }
     });
@@ -2497,6 +2576,53 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
+    testWidgets('the widest wait, `9900`, leaves the minute its room at the '
+        '320 dp / 1.3× floor — its red marks are what say "no answer" on '
+        'the glass (LINK-Q4, `ux-auditor`)', (tester) async {
+      // With the `>` gone (the founder's ruling), the wait's figure looks like
+      // a reading; the minute's unanswered marks (`risk`, along its top edge)
+      // are the one thing drawn that says the node did not reply. So the
+      // minute must still draw beside the widest wait at the floor.
+      final seam = _FakeSeam()
+        ..latencyMs = null
+        ..timedOutMs = 1800;
+      await _pumpScreen(
+        tester,
+        seam,
+        withProbe: true,
+        width: 320,
+        height: 1400,
+        textScale: 1.3,
+        settle: false,
+        clock: () => tester.binding.clock.now(),
+      );
+      await tester.pump();
+      for (var i = 0; i < 2; i++) {
+        await tester.pump(NodeScreen.pollEvery);
+        await tester.pump();
+      }
+      seam.gate = Completer<void>();
+      await tester.pump(NodeScreen.pollEvery);
+      for (var i = 0; i < 110; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      await tester.pump(KvMotion.calm);
+      final figure = tester
+          .widgetList<Text>(find.byType(Text))
+          .firstWhere((t) => t.style?.fontSize == 40);
+      expect(figure.data, '9900', reason: 'capped, the widest wait');
+      final minute = tester.getSize(find.byType(KvLatencyHistory)).width;
+      debugPrint('the minute beside 9900 at 320 / 1.3: $minute dp');
+      expect(
+        minute,
+        greaterThanOrEqualTo(KvLatencyHistory.minWidth),
+        reason: 'the minute draws beside the widest wait',
+      );
+      expect(tester.takeException(), isNull);
+      seam.gate!.complete();
+      await tester.pumpWidget(const SizedBox());
+    });
+
     testWidgets('a probe still out past the bound counts up on the figure — '
         'the screen hands its own clock and the probe\'s start to the seat', (
       tester,
@@ -2516,20 +2642,22 @@ void main() {
         await tester.pump(NodeScreen.pollEvery);
         await tester.pump();
       }
-      expect(find.text('> 1.8'), findsOneWidget);
+      expect(find.text('1800'), findsOneWidget);
       // The next probe does not come back.
       seam.gate = Completer<void>();
       await tester.pump(NodeScreen.pollEvery);
       for (var i = 0; i < 25; i++) {
         await tester.pump(const Duration(milliseconds: 100));
       }
+      // The figure is the seat's 40-point text; the wait is in milliseconds
+      // with no `>` (LINK-Q4, the founder's ruling).
       final shown = tester
           .widgetList<Text>(find.byType(Text))
-          .map((t) => t.data ?? '')
-          .firstWhere((d) => d.startsWith('> '));
+          .firstWhere((t) => t.style?.fontSize == 40)
+          .data!;
       expect(
-        double.parse(shown.substring(2)),
-        greaterThan(1.8),
+        int.parse(shown),
+        greaterThan(1800),
         reason: 'the elapsed wait is a measurement, and it is growing',
       );
       seam.gate!.complete();
@@ -2544,7 +2672,7 @@ void main() {
       await _pumpScreen(tester, seam, withProbe: true, settle: false);
       await tester.pump();
       await tester.pump();
-      const explained = 'The gap between them is queueing';
+      const explained = 'Red marks in the chart is a wait with no answer';
       expect(find.textContaining(explained), findsNothing);
       final handle = tester.ensureSemantics();
       await tester.tap(find.bySemanticsLabel('About node reply'));
@@ -2619,13 +2747,12 @@ void main() {
             ),
           );
       final text = said.textSpan!.toPlainText();
+      // The founder's own words (LINK-Q4 on glass, 2026-09-29).
       for (final claim in [
-        'Path, its best answer in the last 10 s',
-        'mostly distance',
-        'queueing',
-        'Bars grade the last 10 s',
-        'The chart shows the last minute',
-        'In it, red marks a wait with no answer',
+        'Node reply is how long this node takes to answer (smoothed).',
+        'Path is its best answer in the last 10s.',
+        'Bars grade the last 10s, the chart shows the last minute.',
+        'Red marks in the chart is a wait with no answer.',
       ]) {
         expect(text, contains(claim));
       }

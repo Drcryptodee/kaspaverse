@@ -9,7 +9,7 @@ import 'package:kaspaverse/src/ui/node/node_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_amount.dart';
-import 'package:kaspaverse/src/ui/widgets/kv_cadence.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_loader.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_fact_line.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_live_dot.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_status_chip.dart';
@@ -161,6 +161,11 @@ void main() {
       osOffline.value = true;
       await tester.pump();
       expect(find.textContaining('phone offline — no network'), findsOneWidget);
+      // **Offline is a wait** (LINK-Q4, the founder): the loader turns grey and
+      // keeps moving; teal is for the app's own work.
+      final loader = tester.widget<KvLoader>(find.byType(KvLoader));
+      expect(loader.running, isTrue);
+      expect(loader.waiting, isTrue);
       // No two states share a label — colour is never the only signal, and
       // here the words alone carry the whole truth.
       expect(find.textContaining('finding a node…'), findsNothing);
@@ -180,7 +185,7 @@ void main() {
       // **P0b legalised connected-AND-searching.** A swap the user asked for
       // should be nameable on the money surface, in the node surface's own
       // vocabulary — and the sentence BRINGS the meter with it, since the
-      // trust chip is this plate's only `KvCadence` call site (silence had
+      // trust chip is this plate's only `KvLoader` call site (silence had
       // suppressed both, so no motion was going unexplained).
       final now = DateTime(2026, 7, 30, 0, 53);
       final connected = ValueNotifier<bool>(true);
@@ -290,7 +295,7 @@ void main() {
       expect(said, contains('last update 20\u00A0s ago'));
       // Motion means something is happening, and a hunt IS something
       // happening — the meter is the tell that separates searching from dead.
-      expect(tester.widget<KvCadence>(find.byType(KvCadence)).running, isTrue);
+      expect(tester.widget<KvLoader>(find.byType(KvLoader)).running, isTrue);
 
       await tester.pumpWidget(const SizedBox());
     });
@@ -387,7 +392,7 @@ void main() {
 
       expect(find.text('as of 21\u00A0s ago'), findsOneWidget);
       expect(
-        tester.widget<KvCadence>(find.byType(KvCadence)).running,
+        tester.widget<KvLoader>(find.byType(KvLoader)).running,
         isFalse,
         reason: 'nothing is happening, so nothing may look like it is',
       );

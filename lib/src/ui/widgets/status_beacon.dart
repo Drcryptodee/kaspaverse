@@ -111,7 +111,7 @@ String formatAge(Duration age) {
 // narrowed away from: green is money **arriving**, things **confirmed**, and
 // a control the **user switched on** — never "healthy", because a link
 // changes without the user. Its replacements are shipped and composed on the
-// money plate: `KvStatusChip` carries the words and the lamp, and `KvCadence`
+// money plate: `KvStatusChip` carries the words and the lamp, and `KvLoader`
 // carries liveness. **The network chip carries no lamp at all** — green is
 // forbidden here by the same law, and an amber one would duplicate the trust
 // line directly beneath it, so health is carried by the trust line staying

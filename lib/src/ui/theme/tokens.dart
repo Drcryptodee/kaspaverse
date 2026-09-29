@@ -383,16 +383,9 @@ abstract final class KvMotion {
   /// and its 2 s `replayCap`.
   static const double glide = 20;
 
-  /// One breath of the loading cadence — `KvCadence`'s five bars rise and fall
-  /// once in this time (§4 *Cadence*; the app's one loading indicator). Not
-  /// [breathe], which is the orb's halo at 3200: two loops, two names, one
-  /// letter apart was the trap the `breath` alias set, and this is its
-  /// replacement (UX-R8).
-  static const Duration cadence = Duration(milliseconds: 1100);
-
-  /// The phase offset between neighbouring cadence bars, so the hill rolls
-  /// rather than pumps.
-  static const Duration cadenceStagger = Duration(milliseconds: 120);
+  // The loader's own timing lives on `KvLoader` (the Material 3 Expressive
+  // numbers: a 650 ms morph on a spring, a turn every 4666 ms). The cadence's
+  // 1100 ms breath and its stagger retired with it (LINK-Q4, the founder).
 }
 
 /// §1.8 — Atmosphere constants. **Glass floats, it never sits** (BG-31): a

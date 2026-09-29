@@ -710,23 +710,24 @@ class KvLatencyReading {
 /// ## Its faces
 ///
 /// * **a reading**: `150 ms`, three lit amber bars;
-/// * **at least** (D-333): `> 1.8 s`, one lit bar in the poorest hue — and
+/// * **at least** (D-333): `1800 ms`, one lit bar in the poorest hue (milliseconds only, no `>`, the founder's ruling at LINK-Q4; the spoken sentence keeps "at least") — and
 ///   **it counts up live** while the next probe is still out, because the
-///   elapsed time is itself a measurement (floored to a tenth, never above
+///   elapsed time is itself a measurement (floored to a hundred ms, never above
 ///   what has elapsed);
 /// * **measuring…**: the socket is up and nothing has answered yet on this
-///   screen — past [liveFrom] with no answer it becomes the counting `> N s`;
+///   screen — past [liveFrom] with no answer it becomes the counting wait (`1200 ms`, up in 100 ms steps);
 /// * **stale** (D-333): the last reading from before the screen opened,
 ///   dimmed to [KvFreshness.opacityStaleRegion] until the first fresh answer;
 /// * **no reading** (BG-8): `—`, every bar unlit, `inkMeta` — the one face
 ///   that carries no hue, so it reads without colour.
 ///
-/// ## Why this is not `KvCadence` (BG-21)
+/// ## Why the bars are not the loader (BG-21)
 ///
-/// [KvCadence] is a **hill that breathes**, animating only while something is
-/// genuinely in flight; this is a **rising staircase that does not move**. It
-/// reports a measurement, and a staircase that animated would be claiming
-/// movement it did not observe (BG-18).
+/// [KvLoader] turns and morphs, running only while something is genuinely in
+/// flight; this is a **rising staircase that does not move**. It reports a
+/// measurement, and a staircase that animated would be claiming movement it
+/// did not observe (BG-18). A wait stands on one bar in the poorest hue; the
+/// loader was tried in its place at LINK-Q4 and ruled out on glass.
 class KvLatency extends StatefulWidget {
   const KvLatency({
     super.key,
@@ -745,7 +746,8 @@ class KvLatency extends StatefulWidget {
   /// there is no reading. With [atLeast] it is the deadline the probe outlasted.
   final int? milliseconds;
 
-  /// The figure is a lower bound (the probe timed out): drawn `> N s`.
+  /// The figure is a lower bound (the probe timed out): drawn in milliseconds,
+  /// without a `>` (the founder's ruling, LINK-Q4); heard as "at least".
   final bool atLeast;
 
   /// The tier to draw. A seat holding a [KvLatencyReading] passes its
@@ -794,8 +796,8 @@ class KvLatency extends StatefulWidget {
   static const Duration liveFrom = Duration(seconds: 1);
 
   /// The largest live wait the figure prints. A lower bound may be stated
-  /// low, never high, so a longer wait still reads `> 9.9 s` — and the
-  /// figure keeps its five characters at the 320 dp / 1.3× floor.
+  /// low, never high, so a longer wait still reads `9900 ms` — and the
+  /// figure keeps its four digits at the 320 dp / 1.3× floor.
   static const Duration liveCap = Duration(milliseconds: 9900);
 
   /// `T5`, measured: five bars, each **6 dp** wide with a **4 dp** gap.
@@ -850,14 +852,12 @@ class KvLatency extends StatefulWidget {
     return ms < boundary * (1 - KvLatencyTier.hysteresis) ? raw : held;
   }
 
-  /// A deadline in seconds, **floored** to a tenth and always printed with it:
-  /// `> N s` is a lower bound, and rounding it up would claim a wait the probe
-  /// never measured; the tenth always shows, so a counting figure keeps its
-  /// width (`> 2.0`, not `> 2`).
-  static String seconds(int ms) {
-    final tenths = ms ~/ 100;
-    return '${tenths ~/ 10}.${tenths % 10}';
-  }
+  /// A live wait, in milliseconds **floored** to a hundred: it is a lower
+  /// bound, and rounding it up would claim a wait the probe never measured.
+  /// A hundred, not the figure's ten: a counter stepping every 10 ms would
+  /// flicker, and the last two digits of a wait are never information
+  /// (LINK-Q4, the founder's ruling: milliseconds only, no `>`).
+  static int waitFloor(int ms) => ms ~/ 100 * 100;
 
   /// **One step of the glide** — the exact solution of a critically damped
   /// spring from position [p] and speed [v] toward [target] over [dt] seconds,
@@ -884,16 +884,12 @@ class KvLatency extends StatefulWidget {
     bool measuring = false,
     int? path,
   }) {
-    final floor = path == null
-        ? ''
-        : path >= 1000
-        ? ' Path ${seconds(path)} seconds.'
-        : ' Path $path milliseconds.';
+    final floor = path == null ? '' : ' Path $path milliseconds.';
     if (ms == null) {
       return measuring ? 'Node reply: measuring.' : 'Node reply: no reading.';
     }
     if (atLeast) {
-      return 'Node reply: at least ${seconds(ms)} seconds. '
+      return 'Node reply: at least ${waitFloor(ms)} milliseconds. '
           '${KvLatencyTier.poor.word}.$floor';
     }
     return 'Node reply $ms milliseconds. '
@@ -969,7 +965,9 @@ class _KvLatencyState extends State<KvLatency>
   Widget build(BuildContext context) {
     final w = widget;
     final elapsed = _counting ? _elapsed : null;
-    // The live wait as a bound: floored to a tenth, capped (see [liveCap]).
+    // The live wait as a bound: floored to a hundred, capped (see [liveCap]).
+    // It counts in 100 ms steps; [KvLatency.waitFloor] floors it again where
+    // it is printed, so the two can never disagree.
     int? live;
     if (elapsed != null) {
       final ms = math.min(
@@ -1026,8 +1024,13 @@ class _KvLatencyState extends State<KvLatency>
         ),
       ),
       (null, _, _) => Text('—', style: figureStyle),
+      // **Milliseconds only, and no `>`** (the founder's ruling, LINK-Q4,
+      // 2026-09-29: "lets just maintain the ms"): the live wait counts up in
+      // the figure's own unit, in 100 ms steps. That it is a floor, not a
+      // measurement, is still said where a floor is heard: the spoken
+      // sentence reads "at least" ([spoken]).
       (final int bound, true, _) => Text(
-        '> ${KvLatency.seconds(bound)}',
+        '${KvLatency.waitFloor(bound)}',
         style: figureStyle,
       ),
       (final int value, false, _) => _GlidingFigure(
@@ -1075,7 +1078,7 @@ class _KvLatencyState extends State<KvLatency>
             // **Jakarta, because a unit is a word beside a figure and
             // not a figure** (BG-30 / §2). Body size, so it never dims
             // (BG-8).
-            Text(atLeast ? 's' : 'ms', style: unitStyle),
+            Text('ms', style: unitStyle),
           ],
         ],
       ),
@@ -1098,11 +1101,12 @@ class _KvLatencyState extends State<KvLatency>
         textBaseline: TextBaseline.alphabetic,
         children: [
           // The figure takes its own width, always: it is the reading. The
-          // widest face is `> 9.9 s`, five mono characters, which clears the
-          // 320 dp / 1.3× floor beside the staircase (see [liveCap]).
+          // widest face is `9900 ms`, four mono digits, which clears the
+          // 320 dp / 1.3× floor beside the staircase (see [liveCap]; the
+          // old `> 9.9 s` was five).
           //
           // **A change of face is eased, never cut** (BG-24, `ux-auditor`):
-          // *measuring…* giving way to the first figure, a figure to `> N s`,
+          // *measuring…* giving way to the first figure, a figure to a wait,
           // either to `—` — the figure and its unit cross-fade as one over the
           // house's `calm` step. Within a face nothing is switched: a value
           // glides (its spring keeps its state under one key) and a bound
@@ -1126,7 +1130,11 @@ class _KvLatencyState extends State<KvLatency>
           // **The history takes what the figure leaves, up to its own width,
           // and sits against the staircase** — one instrument cluster on the
           // right, the reading on the left. Its gaps are inside it, so where
-          // the figure leaves nothing it takes nothing (the floor, `> 5.0 s`).
+          // the figure leaves nothing it takes nothing. At the 320 dp / 1.3×
+          // floor it still draws beside the widest wait, `9900 ms` (45.6 dp
+          // against its 28, guarded in `node_screen_test`): with no `>` on the
+          // wait (the founder's ruling, LINK-Q4) its unanswered marks are the
+          // one drawn sign that the node did not reply.
           Flexible(
             child: Align(
               alignment: Alignment.bottomRight,
@@ -1161,6 +1169,10 @@ class _KvLatencyState extends State<KvLatency>
                     )
                   else
                     const SizedBox(width: KvSpace.s),
+                  // **A wait stands on the staircase** (LINK-Q4): the loader was
+                  // tried here and the founder ruled it out on glass; the
+                  // figure counts the wait and the minute's red marks say "no
+                  // answer" (his explainer's words).
                   _BottomBaseline(
                     child: dimmed(_staircase(tier.bars, tier.hue)),
                   ),

@@ -11,7 +11,7 @@ import 'package:kaspaverse/src/ui/home_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
-import 'package:kaspaverse/src/ui/widgets/kv_cadence.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_loader.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_money_plate.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_tabs.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_live_dot.dart';
@@ -308,7 +308,7 @@ void main() {
       // **Silence is the healthy state** (D-192). A standing "Node responding"
       // beside a permanently animating meter reports that nothing changed,
       // twice, and becomes wallpaper.
-      expect(find.byType(KvCadence), findsNothing);
+      expect(find.byType(KvLoader), findsNothing);
       expect(find.textContaining('as of'), findsNothing);
       expect(find.text('syncing…'), findsNothing);
       // The chip's lamp is the screen's standing link indicator (founder call,
@@ -506,7 +506,7 @@ void main() {
       await pump(tester, money(mature: BigInt.zero, syncing: true));
       expect(find.text('syncing…'), findsOneWidget);
       expect(
-        tester.widget<KvCadence>(find.byType(KvCadence)).running,
+        tester.widget<KvLoader>(find.byType(KvLoader)).running,
         isTrue,
         reason: 'a first scan IS something happening',
       );
@@ -645,7 +645,7 @@ void main() {
       // BG-8's whole demand: dimmed cached truth WITH a visible age.
       expect(find.text('as of 3\u00A0m ago'), findsOneWidget);
       expect(
-        tester.widget<KvCadence>(find.byType(KvCadence)).running,
+        tester.widget<KvLoader>(find.byType(KvLoader)).running,
         isFalse,
         reason: 'nothing is happening, so nothing may look like it is',
       );
@@ -973,7 +973,7 @@ void main() {
     /// `TxStatusChip`'s dots are outside both: §1.5 defines a lamp as a 6dp dot
     /// **under an 8dp blur**, and that dot has no `boxShadow`.
     int tealEmissions(WidgetTester tester) {
-      var n = find.byType(KvCadence).evaluate().length;
+      var n = find.byType(KvLoader).evaluate().length;
       for (final c in tester.widgetList<Container>(find.byType(Container))) {
         final d = c.decoration;
         if (d is BoxDecoration && d.color == KvColor.primary) n++;

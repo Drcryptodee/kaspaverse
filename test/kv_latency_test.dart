@@ -3,14 +3,14 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
-import 'package:kaspaverse/src/ui/widgets/kv_cadence.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_loader.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_latency.dart';
 
 import 'support/preview_harness.dart';
 
 /// **The latency reading** (`T5`, §4's latency re-spec, re-ruled for glass at
 /// D-332, D-333 and D-337) — a measurement, not a loader, and the distinction
-/// is the reason this is not [KvCadence].
+/// is the reason the staircase is not [KvLoader].
 void main() {
   setUpAll(loadBundledFonts);
 
@@ -153,7 +153,8 @@ void main() {
         KvLatency(milliseconds: null, measuring: true),
       ]) {
         await tester.pumpWidget(_host(seat, textScale: 1.3));
-        await tester.pumpAndSettle();
+        await tester.pump();
+        await tester.pump(KvMotion.calm);
         for (final t in tester.widgetList<Text>(find.byType(Text))) {
           expect(
             t.style?.fontSize ?? 11,
@@ -167,36 +168,45 @@ void main() {
   });
 
   group('D-333 · a timeout is "at least", never "nothing"', () {
-    test('a path of a second or more is spoken in seconds', () {
+    test('a path of a second or more is spoken in milliseconds (LINK-Q4: '
+        'milliseconds only, the founder\'s ruling)', () {
       expect(
         KvLatency.spoken(1480, atLeast: false, path: 1200),
-        'Node reply 1480 milliseconds. Poor. Path 1.2 seconds.',
+        'Node reply 1480 milliseconds. Poor. Path 1200 milliseconds.',
       );
     });
 
-    test('the deadline prints in seconds, floored — and always with its '
-        'tenth, so a counting figure keeps its width', () {
-      expect(KvLatency.seconds(1800), '1.8');
-      expect(KvLatency.seconds(1899), '1.8', reason: 'floored, not rounded');
-      expect(KvLatency.seconds(5000), '5.0');
-      expect(KvLatency.seconds(1000), '1.0');
-      expect(KvLatency.seconds(1234), '1.2');
+    test('the wait prints in milliseconds, floored to a hundred — a lower '
+        'bound is never rounded up', () {
+      expect(KvLatency.waitFloor(1800), 1800);
+      expect(KvLatency.waitFloor(1899), 1800, reason: 'floored, not rounded');
+      expect(KvLatency.waitFloor(5000), 5000);
+      expect(KvLatency.waitFloor(1000), 1000);
+      expect(KvLatency.waitFloor(1234), 1200);
     });
 
-    testWidgets('`> 1.8 s` on one bar, in the poorest hue', (tester) async {
-      await tester.pumpWidget(
-        _host(const KvLatency(milliseconds: 1800, atLeast: true)),
-      );
-      await tester.pump();
-      expect(find.text('> 1.8'), findsOneWidget);
-      expect(find.text('s'), findsOneWidget);
-      expect(_litBars(tester), 1);
+    testWidgets('`1800 ms` on one bar, in the poorest hue — no `>`, heard as '
+        '"at least", and never the loader (LINK-Q4, ruled on glass)', (
+      tester,
+    ) async {
+      for (final stale in [true, false]) {
+        await tester.pumpWidget(
+          _host(KvLatency(milliseconds: 1800, atLeast: true, stale: stale)),
+        );
+        await tester.pump();
+        expect(find.byType(KvLoader), findsNothing, reason: 'stale: $stale');
+        expect(_litBars(tester), 1, reason: 'one bar, stale: $stale');
+      }
+      expect(find.text('1800'), findsOneWidget);
+      expect(find.text('ms'), findsOneWidget);
+      expect(find.textContaining('>'), findsNothing);
+      expect(find.text('s'), findsNothing);
       for (final t in tester.widgetList<Text>(find.byType(Text))) {
         expect(t.style?.color, KvColor.risk, reason: '"${t.data}"');
       }
       final handle = tester.ensureSemantics();
       expect(
-        find.bySemanticsLabel('Node reply: at least 1.8 seconds. Poor.'),
+        find.bySemanticsLabel('Node reply: at least 1800 milliseconds. Poor.'),
         findsOneWidget,
       );
       handle.dispose();
@@ -219,17 +229,18 @@ void main() {
       await tester.pumpWidget(seat());
       await tester.pump();
       expect(
-        find.text('> 1.8'),
+        find.text('1800'),
         findsOneWidget,
         reason: 'half a second out is not yet more than the bound',
       );
       now = since.add(const Duration(milliseconds: 2390));
       await tester.pump(const Duration(milliseconds: 16));
-      expect(find.text('> 2.3'), findsOneWidget, reason: 'floored, live');
+      expect(find.text('2300'), findsOneWidget, reason: 'floored, live');
       now = since.add(const Duration(milliseconds: 4050));
       await tester.pump(const Duration(milliseconds: 16));
-      expect(find.text('> 4.0'), findsOneWidget);
+      expect(find.text('4000'), findsOneWidget);
       expect(_litBars(tester), 1);
+      expect(find.byType(KvLoader), findsNothing);
     });
 
     testWidgets('*measuring…* until the wait passes a second, then it counts', (
@@ -254,7 +265,7 @@ void main() {
       handle.dispose();
       now = since.add(const Duration(milliseconds: 1260));
       await tester.pump(const Duration(milliseconds: 16));
-      expect(find.text('> 1.2'), findsOneWidget);
+      expect(find.text('1200'), findsOneWidget);
       // The fade's first tick is the frame after the flip; then its step.
       await tester.pump(const Duration(milliseconds: 16));
       await tester.pump(KvMotion.calm);
@@ -262,7 +273,7 @@ void main() {
       expect(_litBars(tester), 1, reason: 'a second unanswered is poor');
     });
 
-    testWidgets('the live count caps at 9.9 s — a bound stated low, never '
+    testWidgets('the live count caps at 9900 ms — a bound stated low, never '
         'high, and never wider than the floor allows', (tester) async {
       final since = DateTime(2026, 9, 28, 12);
       await tester.pumpWidget(
@@ -276,7 +287,7 @@ void main() {
         ),
       );
       await tester.pump(const Duration(milliseconds: 16));
-      expect(find.text('> 9.9'), findsOneWidget);
+      expect(find.text('9900'), findsOneWidget);
     });
 
     testWidgets('the measuring word keeps the figure\'s line box, so the card '
@@ -528,7 +539,7 @@ void main() {
         _host(const KvLatency(milliseconds: 1800, atLeast: true)),
       );
       await tester.pump(const Duration(milliseconds: 16));
-      expect(find.text('> 1.8'), findsOneWidget);
+      expect(find.text('1800'), findsOneWidget);
     });
   });
 
@@ -633,14 +644,9 @@ void main() {
 
   test('it is a different instrument from the loading meter (BG-21)', () {
     // One name for two meanings is what BG-21 forbids, and these two genuinely
-    // are two objects: a hill that breathes while something is in flight, and
-    // a staircase that stands still and reports a measurement.
-    expect(
-      KvLatency.barHeights,
-      isNot(KvCadence.barHeights),
-      reason: 'if the geometry were the same, this would be a second copy',
-    );
-    expect(KvCadence.barHeights, [6, 10, 14, 10, 6], reason: 'a hill');
+    // are two objects: a shape that turns and morphs while something is in
+    // flight (the loader, LINK-Q4), and a staircase that stands still and
+    // reports a measurement.
     expect(
       KvLatency.barHeights,
       orderedEquals(<double>[...KvLatency.barHeights]..sort()),
