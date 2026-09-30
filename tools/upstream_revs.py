@@ -33,8 +33,13 @@ SOURCES = [
     ("kccs", "kaspanet/kccs", "main", dict(tree=True)),
 ]
 COMPARED = ("head.sha", "head.tree", "top_tag.name", "top_tag.sha", "top_release.tag",
-            "top_release.prerelease", "manifest.rusty_kaspa", "manifest.silverscript")
+            "top_release.prerelease", "manifest.rusty_kaspa", "manifest.silverscript",
+            "manifest.rusty_kaspa_registry")
 REV_RE = re.compile(r'github\.com/kaspanet/(rusty-kaspa|silverscript)(?:\.git)?"\s*,\s*rev\s*=\s*"([0-9a-f]{7,40})"')
+# A rusty-kaspa crate taken from crates.io: `kaspa-x = "2.1.0"` or `kaspa-x = { version = "2.1.0", … }`
+# with no `git`/`path` key (D-348: the day upstream moves there, our pin follows).
+KASPA_DEP_RE = re.compile(r'^\s*(kaspa-[A-Za-z0-9_-]+)\s*=\s*(?:"([^"]+)"|\{([^}\n]*)\})', re.M)
+VERSION_RE = re.compile(r'\bversion\s*=\s*"([^"]+)"')
 TAG_RE = re.compile(r"^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-(.+))?$")
 
 
@@ -90,6 +95,16 @@ def manifest_revs(text):
             found[key] = next(iter(seen[repo]))
         elif len(seen[repo]) > 1:
             found[key] = "MIXED(" + ",".join(sorted(short(x) for x in seen[repo])) + ")"
+    reg = set()
+    for _crate, bare, table in KASPA_DEP_RE.findall(text or ""):
+        if bare:
+            reg.add(bare)
+        elif not re.search(r'\b(git|path)\s*=', table):
+            v = VERSION_RE.search(table)
+            if v:
+                reg.add(v.group(1))
+    if reg:
+        found["rusty_kaspa_registry"] = next(iter(reg)) if len(reg) == 1 else "MIXED(" + ",".join(sorted(reg)) + ")"
     return found
 
 
@@ -255,7 +270,7 @@ def compare(record, obs):
 
 
 def triggers(obs, record):
-    """D-183 T-A / T-D, evaluated mechanically. Returns [(name, fired, line)]."""
+    """D-183 T-A / T-D and D-348 T-C, evaluated mechanically. Returns [(name, fired, line)]."""
     out = []
     # T-A (D-183): a TAGGED STABLE release we are not on — pre-releases (rusty-kaspa publishes rcs
     # as GitHub releases) never fire it; an unresolvable release tag is said, not skipped.
@@ -290,6 +305,22 @@ def triggers(obs, record):
                 out.append(("T-D", fired, cond,
                             f"silverscript {tag['name']} (stable) pins rusty-kaspa {short(man['rusty_kaspa'])} ≠ pin {short(OUR_PIN)} — D-183 T-D packet; the bump is the founder's"
                             if fired else f"silverscript {tag['name']} ({'stable' if tag.get('stable') else 'pre-release'}) pins rusty-kaspa {short(man['rusty_kaspa'])}"))
+    # T-C (D-348): the toolchain takes rusty-kaspa from crates.io. The founder ruled that our pin
+    # follows it there; until then T-D reads nothing (a registry dependency has no rev) and would go
+    # quiet exactly when the move happens, so this trigger says it instead.
+    hits = []
+    for name in ("silverscript", "argent"):
+        src = obs.get(name) or {}
+        for where, man in (("master", src.get("manifest")), ("tag " + str((src.get("top_tag") or {}).get("name")), (src.get("top_tag") or {}).get("manifest"))):
+            if (man or {}).get("rusty_kaspa_registry"):
+                hits.append(f"{name} {where} {man['rusty_kaspa_registry']}")
+    hits = sorted(set(hits))
+    if hits:
+        out.append(("T-C", True, ";".join(hits),
+                    f"rusty-kaspa from crates.io in {', '.join(hits)} — D-348: our pin moves to crates.io (the founder's ruling); "
+                    f"a dependency-steward packet + pin-bump-ritual, then P3.0a is re-cut (D-346)"))
+    elif any("manifest" in (obs.get(n) or {}) for n in ("silverscript", "argent")):
+        out.append(("T-C", False, "git", "silverscript and argent take rusty-kaspa from git — D-348 waits"))
     ack = ((record or {}).get("triggers") or {})
     lines = []
     for name, fired, cond, text in out:

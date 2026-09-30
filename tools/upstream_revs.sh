@@ -184,6 +184,17 @@ p = os.path.join(fx, f"watch.{repo.replace('/', '__')}.{num}.json")
 r = json.load(open(p)); r["comments"] = 2; json.dump(r, open(p, "w"))
 PY
   run "a new comment on a watched thread is a WATCH"  'UPSTREAM WATCH  [a-z-]+/[a-z-]+#[0-9]+ [a-z]+, comments 1→2' 1 "$work/rc.json" "$work/fx-cm"
+  # T-C (D-348): the toolchain moving rusty-kaspa to crates.io fires; git keeps it quiet
+  run "T-C not fired while the toolchain takes git"   'T-C not fired: silverscript and argent take rusty-kaspa from git' 0 "$R" "$work/fx" --sweep-table
+  cp -R "$work/fx" "$work/fx-cr"
+  sed -i -E 's#^(kaspa-[a-z-]+) = \{ git = "https://github.com/kaspanet/rusty-kaspa(\.git)?", rev = "[0-9a-f]+"(, )?#\1 = { version = "2.1.0"\3#' "$work/fx-cr/silverscript.manifest.toml"
+  run "T-C fires on a crates.io table dependency"     'UPSTREAM T-C FIRED: rusty-kaspa from crates.io in silverscript master 2\.1\.0' 1 "$R" "$work/fx-cr"
+  cp -R "$work/fx" "$work/fx-cs"
+  sed -i -E 's#^(kaspa-[a-z-]+) = \{ git = "https://github.com/kaspanet/rusty-kaspa(\.git)?", rev = "[0-9a-f]+" \}#\1 = "2.1.0"#' "$work/fx-cs/argent.manifest.toml"
+  run "T-C fires on a bare-version dependency"        'UPSTREAM T-C FIRED: rusty-kaspa from crates.io in argent master 2\.1\.0' 1 "$R" "$work/fx-cs"
+  cp -R "$work/fx" "$work/fx-cg"
+  sed -i -E 's#^(kaspa-[a-z-]+) = \{ git = #\1 = { version = "2.1.0", git = #' "$work/fx-cg/silverscript.manifest.toml"
+  run "a git dependency that names a version stays git" 'T-C not fired: silverscript and argent take rusty-kaspa from git' 0 "$R" "$work/fx-cg" --sweep-table
   # an ack names its threads: an unnamed state move stays loud, a named one is recorded
   wt=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(next(f"{r}#{n}" for r,i in sorted(d["watch"].items()) for n in sorted(i)))' "$work/rw.json")
   cp "$work/rw.json" "$work/ra.json"
