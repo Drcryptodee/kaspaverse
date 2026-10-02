@@ -570,6 +570,41 @@ Widget _homeStatus() => HomeScreen(
   fiat: _fiat(),
 );
 
+/// **The wallet lane, down behind a live link** (PRE3-LANE, KM4): the link
+/// ticks (fresh to the second), and the wallet's processor is being rebuilt
+/// ([WalletLaneState.recovering]) or held dark ([WalletLaneState.dark]). The
+/// balance dims, the trust lamp turns amber, and the plate says which, with
+/// the age of the wallet's last live balance — the frame run 4's F1 never had.
+/// The lane a frame flips after it mounts — see `home__lane_recovering_then_dark`.
+final _laneFlip = ValueNotifier(WalletLaneState.recovering);
+
+Widget _homeLane(
+  WalletLaneState lane, {
+  ValueNotifier<WalletLaneState>? flip,
+}) => HomeScreen(
+  chain: ChainScope(
+    connected: ValueNotifier(true),
+    virtualDaaScore: ValueNotifier<BigInt?>(BigInt.from(526633447)),
+    error: ValueNotifier<String?>(null),
+    lastUpdate: ValueNotifier<DateTime?>(DateTime(2026, 8, 30, 11, 16, 29)),
+  ),
+  wallet: WalletScope(
+    maturity: kTestMaturity,
+    mature: ValueNotifier<BigInt?>(BigInt.from(2597792200)),
+    pending: ValueNotifier<BigInt?>(BigInt.zero),
+    activity: ValueNotifier(_activity()),
+    syncing: ValueNotifier(false),
+    utxoIndexMissing: ValueNotifier(false),
+    lane: flip ?? ValueNotifier(lane),
+    lastUpdate: ValueNotifier<DateTime?>(DateTime(2026, 8, 30, 11, 14, 12)),
+  ),
+  clock: () => DateTime(2026, 8, 30, 11, 16, 30),
+  receiveRoute: (_) => const SizedBox.shrink(),
+  sendRoute: (_, _) => const SizedBox.shrink(),
+  detailRoute: (_, _, _) => const SizedBox.shrink(),
+  fiat: _fiat(),
+);
+
 /// **The hold window** (LINK-Q1, D-331(b)): a bound socket seven seconds into
 /// a stall. The lamp stays live (the chip's dot keeps pinging), the balance
 /// dims on the data's own five-second clock, and the trust line says the
@@ -1675,6 +1710,26 @@ void main() {
     // Every silence swap passes through this: the hunt inside the hold
     // (`ux-auditor`, L205 — a new state ships its frames).
     framedSurface('home__hold_hunt', () => _shell(_homeHold(hunt: true)));
+    framedSurface(
+      'home__lane_recovering',
+      () => _shell(_homeLane(WalletLaneState.recovering)),
+    );
+    framedSurface(
+      'home__lane_dark',
+      () => _shell(_homeLane(WalletLaneState.dark)),
+    );
+    // **The path users actually take to Dark** (`ux-auditor`, PRE3-LANE): the
+    // repair mounted first, then given up on. `KvLoader` picks its look when it
+    // mounts, so this is the teal loader stopped and dimmed on whatever shape it
+    // held — not the grey disc a cold mount into Dark draws. Judged on glass.
+    framedSurface(
+      'home__lane_recovering_then_dark',
+      () {
+        _laneFlip.value = WalletLaneState.recovering;
+        return _shell(_homeLane(WalletLaneState.recovering, flip: _laneFlip));
+      },
+      act: (tester) async => _laneFlip.value = WalletLaneState.dark,
+    );
     framedSurface('home__drawer', () => _shell(_home()), act: _summonDrawer);
     // `All` — the feed on its own surface (founder, 2026-09-06), and what a
     // scroll costs: the chain clock, and nothing else.

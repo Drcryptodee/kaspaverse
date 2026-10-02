@@ -627,6 +627,26 @@ pub enum LaneRecovery {
     /// Still dark, and this window's rebind is spent — logged, and left to
     /// the next drop, pull or tap.
     GaveUp,
+    /// The lane's processor was dead or stalled (PRE3-LANE): a fresh processor
+    /// and context were built on the live socket.
+    Rebuilt,
+    /// Dead, and the lane's restart budget is spent (PRE3-LANE): it reads dark
+    /// until the next socket or a pull.
+    RebuildsSpent,
+}
+
+/// **What the wallet lane answers its recovery** (PRE3-LANE). A processor whose
+/// task panicked or stalled cannot hear a re-announce — the pin keeps its
+/// `task_is_running` set, so nothing restarts it — and the only repair is a new
+/// lane. The engine attaches these answers, and the recovery asks them first,
+/// inside the one flight it already owns (PB-019: one retry owner).
+pub trait WalletLaneHooks: Send + Sync {
+    /// The supervisor found the lane dead and no rebuild has answered yet.
+    fn lane_dead(&self) -> bool;
+    /// Discard the dead lane's processor and context and build fresh ones.
+    fn rebuild(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = LaneRecovery> + Send + '_>>;
 }
 
 /// A chain event observed by the [`DagMonitor`].
@@ -957,6 +977,10 @@ struct Inner {
     /// Unix-seconds of the last lane rebind (0 = never) — the
     /// [`LANE_REBIND_WINDOW_SECS`] budget.
     lane_rebound_at: AtomicU64,
+    /// The wallet engine's own answers — is its lane dead, and the rebuild —
+    /// so a death rides this same flight (PRE3-LANE). `None` until an engine
+    /// attaches ([`DagMonitor::attach_wallet_lane`]).
+    wallet_lane: std::sync::Mutex<Option<Arc<dyn WalletLaneHooks>>>,
     /// Silence swaps that have landed since the link last HELD
     /// ([`link::SILENCE_HOLD_RESET`]) — the silence deadline's backoff
     /// ([`link::silence_deadline_after`], `consensus-auditor` CONCERNS-1).
@@ -1091,6 +1115,7 @@ impl DagMonitor {
                 lane_recovering: AtomicBool::new(false),
                 lane_report_pending: AtomicBool::new(false),
                 lane_rebound_at: AtomicU64::new(0),
+                wallet_lane: std::sync::Mutex::new(None),
                 silence_backoff: AtomicU32::new(0),
                 swaps_asked: AtomicU64::new(0),
                 network_moved_mono_ms: AtomicU64::new(0),
@@ -3925,6 +3950,15 @@ impl DagMonitor {
         // ([`Self::wallet_lane_known_dark`] reads this socket's own count), so
         // it is born, counted and cleared with the physical socket, under
         // this lock, and no separate record can outlive it.
+        // **Two reports start a check** since PRE3-LANE: a processor error,
+        // and the wallet lane's supervisor finding an open unanswered past
+        // `LANE_STEP_WITHIN` while its negotiation is still out. In the second
+        // case the lane's relay holds this re-announce until that open is
+        // acknowledged (strict alternation, `wallet_lane.rs`), so a lane that
+        // comes up next was answered by the open it was already running: a
+        // `Recovered { reannounced: n }` then counts re-announces the processor
+        // had not yet read. Nothing but `GaveUp` changes the lane's state;
+        // the count is evidence, read with this in mind.
         // **The budget is the SOCKET's** (`wallet-security-auditor`): a
         // negotiation that hangs to the wRPC timeout fails after the check
         // that retried it has ended, and that echo starts a new check — which
@@ -3965,6 +3999,38 @@ impl DagMonitor {
         self.announced_live_socket()
             .and_then(|socket| self.socket_reannounces(socket))
             .is_some_and(|reannounced| reannounced > 0)
+    }
+
+    /// Attach the wallet engine's answers (PRE3-LANE). The bridge's engine
+    /// does this at `attach_link`, before it starts.
+    pub fn attach_wallet_lane(&self, hooks: Arc<dyn WalletLaneHooks>) {
+        *self
+            .inner
+            .wallet_lane
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(hooks);
+    }
+
+    fn wallet_lane_hooks(&self) -> Option<Arc<dyn WalletLaneHooks>> {
+        self.inner
+            .wallet_lane
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Is the wallet lane dead (its supervisor said so, no rebuild yet)?
+    fn wallet_lane_dead(&self) -> bool {
+        self.wallet_lane_hooks()
+            .is_some_and(|hooks| hooks.lane_dead())
+    }
+
+    /// The rebuild, run inside the flight.
+    async fn rebuild_wallet_lane(&self) -> LaneRecovery {
+        match self.wallet_lane_hooks() {
+            Some(hooks) => hooks.rebuild().await,
+            None => LaneRecovery::NotDark,
+        }
     }
 
     /// **The wallet lane's recovery (D-101's deferred arm, owed since
@@ -4011,7 +4077,11 @@ impl DagMonitor {
         // door, with no queued pass and no log line, so a node-paced burst of
         // them costs the RECOVERY nothing (`wallet-security-auditor`, item
         // 22's rider) — the engine's arm still logs each and spawns this call.
-        if lane_up() {
+        //
+        // **A dead lane is never "up"** (PRE3-LANE): a processor that panicked
+        // while connected keeps reading connected — nothing clears its bit —
+        // so the door asks the lane's supervisor too.
+        if lane_up() && !self.wallet_lane_dead() {
             return LaneRecovery::NotDark;
         }
         // The request is on record BEFORE anyone decides who serves it. Whoever
@@ -4044,6 +4114,11 @@ impl DagMonitor {
     }
 
     async fn recover_wallet_lane_once(&self, lane_up: &(dyn Fn() -> bool + Sync)) -> LaneRecovery {
+        // A dead lane first: re-announcing to a task that is gone, or stuck,
+        // would only spend the socket's budget (PRE3-LANE).
+        if self.wallet_lane_dead() {
+            return self.rebuild_wallet_lane().await;
+        }
         if lane_up() {
             return LaneRecovery::NotDark;
         }
@@ -4074,6 +4149,9 @@ impl DagMonitor {
         let mut reannounced = 0u32;
         for wait in LANE_REANNOUNCE_AFTER {
             tokio::time::sleep(wait).await;
+            if self.wallet_lane_dead() {
+                return self.rebuild_wallet_lane().await;
+            }
             if lane_up() {
                 return settled(reannounced);
             }
@@ -4086,6 +4164,9 @@ impl DagMonitor {
             }
         }
         tokio::time::sleep(LANE_SETTLE).await;
+        if self.wallet_lane_dead() {
+            return self.rebuild_wallet_lane().await;
+        }
         if lane_up() {
             return settled(reannounced);
         }
@@ -6741,6 +6822,124 @@ mod tests {
             monitor.recover_wallet_lane(|| false).await,
             LaneRecovery::SocketGone,
             "installed and up but never announced: not a socket the lane was offered"
+        );
+    }
+
+    /// The wallet engine as the recovery sees it (PRE3-LANE), standing in:
+    /// dead or not, and a rebuild that records whether it ran inside the
+    /// flight.
+    struct StandInLane {
+        monitor: DagMonitor,
+        dead: AtomicBool,
+        rebuilds: AtomicU32,
+        rebuilt_inside_the_flight: AtomicBool,
+    }
+
+    impl WalletLaneHooks for StandInLane {
+        fn lane_dead(&self) -> bool {
+            self.dead.load(Ordering::SeqCst)
+        }
+
+        fn rebuild(
+            &self,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = LaneRecovery> + Send + '_>>
+        {
+            Box::pin(async move {
+                self.rebuilt_inside_the_flight.store(
+                    self.monitor.inner.lane_recovering.load(Ordering::SeqCst),
+                    Ordering::SeqCst,
+                );
+                self.rebuilds.fetch_add(1, Ordering::SeqCst);
+                self.dead.store(false, Ordering::SeqCst);
+                LaneRecovery::Rebuilt
+            })
+        }
+    }
+
+    /// **A dead lane is rebuilt inside the one flight, even while it reads up**
+    /// (PRE3-LANE). A processor that panicked while connected keeps its bit
+    /// set — nothing in the pin clears it — so the door's `lane_up()` alone
+    /// would answer `NotDark` and leave it dead. The door asks the lane too,
+    /// and the rebuild runs under the flag D-101's checks take (PB-019): never
+    /// beside a re-announce, and no re-announce is sent to a task that is gone.
+    #[tokio::test(start_paused = true)]
+    async fn a_dead_lane_is_rebuilt_inside_the_flight_even_while_it_reads_up() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        let bind = monitor
+            .install_bind("wss://ella.example/kaspa/mainnet/wrpc/borsh".to_string())
+            .await
+            .expect("arm a bind");
+        stage_live(&monitor, &bind);
+        let ctl = monitor.rpc().rpc_ctl().multiplexer().channel();
+        let lane = Arc::new(StandInLane {
+            monitor: monitor.clone(),
+            dead: AtomicBool::new(true),
+            rebuilds: AtomicU32::new(0),
+            rebuilt_inside_the_flight: AtomicBool::new(false),
+        });
+        monitor.attach_wallet_lane(lane.clone());
+
+        assert_eq!(
+            monitor.recover_wallet_lane(|| true).await,
+            LaneRecovery::Rebuilt
+        );
+        assert_eq!(lane.rebuilds.load(Ordering::SeqCst), 1);
+        assert!(
+            lane.rebuilt_inside_the_flight.load(Ordering::SeqCst),
+            "the rebuild ran outside D-101's single flight"
+        );
+        assert!(
+            !monitor.inner.lane_recovering.load(Ordering::SeqCst),
+            "and the flight was released after it"
+        );
+        assert!(
+            ctl.receiver.try_recv().is_err(),
+            "no re-announce to a dead task"
+        );
+        // Rebuilt, the lane is not dead: an up lane is answered at the door.
+        assert_eq!(
+            monitor.recover_wallet_lane(|| true).await,
+            LaneRecovery::NotDark
+        );
+        assert_eq!(lane.rebuilds.load(Ordering::SeqCst), 1);
+    }
+
+    /// **A death reported while a dark-lane check sleeps turns the check into
+    /// the rebuild** (PRE3-LANE): re-announcing to a task that just died would
+    /// only spend the socket's budget, so the check asks after every sleep and
+    /// hands over — within one re-announce interval, not after the schedule.
+    #[tokio::test(start_paused = true)]
+    async fn a_death_during_a_dark_lane_check_becomes_the_rebuild() {
+        let monitor = DagMonitor::mainnet().expect("construct");
+        let bind = monitor
+            .install_bind("wss://ella.example/kaspa/mainnet/wrpc/borsh".to_string())
+            .await
+            .expect("arm a bind");
+        stage_live(&monitor, &bind);
+        let lane = Arc::new(StandInLane {
+            monitor: monitor.clone(),
+            dead: AtomicBool::new(false),
+            rebuilds: AtomicU32::new(0),
+            rebuilt_inside_the_flight: AtomicBool::new(false),
+        });
+        monitor.attach_wallet_lane(lane.clone());
+
+        let started = tokio::time::Instant::now();
+        let check = {
+            let monitor = monitor.clone();
+            tokio::spawn(async move { monitor.recover_wallet_lane(|| false).await })
+        };
+        // The check is asleep before its first re-announce; the supervisor
+        // reports a death.
+        tokio::time::sleep(LANE_REANNOUNCE_AFTER[0] / 2).await;
+        lane.dead.store(true, Ordering::SeqCst);
+        assert_eq!(check.await.expect("check task"), LaneRecovery::Rebuilt);
+        assert_eq!(lane.rebuilds.load(Ordering::SeqCst), 1);
+        assert!(lane.rebuilt_inside_the_flight.load(Ordering::SeqCst));
+        assert!(
+            started.elapsed() <= LANE_REANNOUNCE_AFTER[0] + Duration::from_millis(50),
+            "handed over after {:?}, not at the first wake",
+            started.elapsed()
         );
     }
 

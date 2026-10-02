@@ -377,6 +377,8 @@ class _MoneyShellState extends State<_MoneyShell> {
       maturity: _maturity,
       outgoing: widget.wallet.outgoing,
       discoveryIncomplete: widget.wallet.discoveryIncomplete,
+      lane: widget.wallet.lane,
+      lastUpdate: widget.wallet.lastUpdate,
       onRefreshActivity: widget.wallet.refreshNow,
     ),
     onReady: () {

@@ -19,13 +19,26 @@
 //! **connection epoch** (`begin_epoch()` before each `signal_open()`), so
 //! assertions read "the subscription re-fired on the NEW connection", which
 //! a total-count assertion cannot distinguish from two epoch-1 firings.
+//!
+//! Each test binary compiles this module on its own and uses a subset of it
+//! (the reconnect suite never delivers a notification; the wallet-lane suite
+//! never walks the chain), so dead-code analysis is off for the module.
+#![allow(dead_code)]
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use kaspa_notify::connection::Connection;
+use kaspa_notify::events::{EventSwitches, EVENT_TYPE_ARRAY};
+use kaspa_notify::listener::ListenerLifespan;
+use kaspa_notify::notifier::Notifier;
+use kaspa_notify::subscriber::test_helpers::{SubscriptionManagerMock, SubscriptionMessage};
+use kaspa_notify::subscriber::Subscriber;
+use kaspa_notify::subscription::context::SubscriptionContext;
+use kaspa_notify::subscription::{Command, MutationPolicies, UtxosChangedMutationPolicy};
 use kaspa_rpc_core::api::connection::DynRpcConnection;
 use kaspa_wallet_core::rpc::{Rpc, RpcCtl};
 use kaspa_wrpc_client::prelude::*;
@@ -58,10 +71,74 @@ pub struct FakeRpc {
     listeners: Mutex<HashMap<ListenerId, ChannelConnection>>,
     listener_seq: AtomicU64,
     activity: tokio::sync::Notify,
+    /// **`unregister_listener` keeps the listener** (PRE3-LANE, run 4's E1).
+    /// The production handle answers `Ok(())` WITHOUT unregistering while no
+    /// socket is bound (`LinkRpc::unregister_listener`, D-101 item 7), and the
+    /// link unbinds before it signals the ctl close — so on every retirement
+    /// the processor's listener stays on the retired client's notifier, which
+    /// can still deliver. This flag makes the fake behave the same way.
+    retain_on_unregister: AtomicBool,
+    /// While set, `get_server_info` waits for a permit — the negotiation's
+    /// round trip, held open (a slow node, or a socket mid-retirement).
+    hold_server_info: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    /// While set, `start_notify(VirtualDaaScoreChanged)` — the processor's own
+    /// subscribe, the step right after it registers its listener — waits.
+    hold_daa_subscribe: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    server_info_calls: AtomicU64,
+    /// How many of the next `start_notify(VirtualDaaScoreChanged)` calls
+    /// panic — on the processor's own task, inside its negotiation, at a
+    /// location outside the wallet framework (`u64::MAX`: every one).
+    panic_daa_subscribes: AtomicU64,
+    /// How many of the next `get_server_info` answers say the node is NOT
+    /// synced — which makes the processor start the pin's sync monitor
+    /// (`sync.rs:47-64`, `:113-124`), polling `get_sync_status`.
+    report_unsynced: AtomicU64,
+    /// How many of the next `get_sync_status` calls panic — on the sync
+    /// monitor's own task, which then dies with its `running` flag still set
+    /// (`sync.rs:163-166` clears it only on a clean exit).
+    panic_sync_status: AtomicU64,
+    sync_status_calls: AtomicU64,
+    /// How many of the next `start_notify(UtxosChanged)` calls the node
+    /// refuses: the call errs and the listener is left WITHOUT the
+    /// subscription — a re-arm that failed at connect, the deaf lane KM5's
+    /// pull must repair.
+    refuse_utxos_subscribes: AtomicU64,
+    /// **The node's side of every subscription** (PRE3-LANE, `consensus-
+    /// auditor` CONCERNS-3): the pin's own `Notifier`, with the AddressSet
+    /// policy the wRPC client uses (`rpc/wrpc/client/src/client.rs:181`),
+    /// compounds every listener's calls into what a node would receive, and
+    /// the pin's own `SubscriptionManagerMock` records it. A call at the
+    /// `RpcApi` seam that the notifier answers with no mutation sends the node
+    /// nothing — which the seam-level record (`calls`) cannot show.
+    notifier: Arc<Notifier<Notification, ChannelConnection>>,
+    node_rx: async_channel::Receiver<SubscriptionMessage>,
+    node_seen: Mutex<Vec<SubscriptionMessage>>,
+    /// This fake's listener id → the notifier's.
+    notifier_ids: Mutex<HashMap<ListenerId, ListenerId>>,
 }
 
 impl FakeRpc {
+    /// Must be called inside a tokio runtime: the node-side notifier starts
+    /// its tasks here.
     pub fn new(network_id: NetworkId) -> Arc<Self> {
+        let (node_tx, node_rx) = async_channel::unbounded();
+        let enabled: EventSwitches = EVENT_TYPE_ARRAY[..].into();
+        let node = Arc::new(Subscriber::new(
+            "fake node",
+            enabled,
+            Arc::new(SubscriptionManagerMock::new(node_tx)),
+            0,
+        ));
+        let notifier = Arc::new(Notifier::new(
+            "fake rpc",
+            enabled,
+            vec![],
+            vec![node],
+            SubscriptionContext::new(),
+            1,
+            MutationPolicies::new(UtxosChangedMutationPolicy::AddressSet),
+        ));
+        notifier.clone().start();
         Arc::new(Self {
             network_id,
             epoch: AtomicU64::new(1),
@@ -69,7 +146,172 @@ impl FakeRpc {
             listeners: Mutex::new(HashMap::new()),
             listener_seq: AtomicU64::new(1),
             activity: tokio::sync::Notify::new(),
+            retain_on_unregister: AtomicBool::new(false),
+            hold_server_info: Mutex::new(None),
+            hold_daa_subscribe: Mutex::new(None),
+            server_info_calls: AtomicU64::new(0),
+            panic_daa_subscribes: AtomicU64::new(0),
+            report_unsynced: AtomicU64::new(0),
+            panic_sync_status: AtomicU64::new(0),
+            sync_status_calls: AtomicU64::new(0),
+            refuse_utxos_subscribes: AtomicU64::new(0),
+            notifier,
+            node_rx,
+            node_seen: Mutex::new(Vec::new()),
+            notifier_ids: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Refuse the next `n` `start_notify(UtxosChanged)` calls (see the field).
+    pub fn refuse_utxos_changed_subscribes(&self, n: u64) {
+        self.refuse_utxos_subscribes.store(n, Ordering::SeqCst);
+    }
+
+    /// Every `UtxosChanged` subscribe the NODE has received so far, as the
+    /// address set of each — what crossed the notifier, not what was asked.
+    pub fn node_utxos_changed_subscribes(&self) -> Vec<Vec<Address>> {
+        let mut seen = self
+            .node_seen
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        while let Ok(message) = self.node_rx.try_recv() {
+            seen.push(message);
+        }
+        seen.iter()
+            .filter_map(
+                |message| match (&message.mutation.command, &message.mutation.scope) {
+                    (Command::Start, Scope::UtxosChanged(scope)) => Some(scope.addresses.clone()),
+                    _ => None,
+                },
+            )
+            .collect()
+    }
+
+    /// Wait, bounded, until the node's record satisfies `pred` (the
+    /// notifier's subscriber reports on its own task).
+    pub async fn wait_node(
+        &self,
+        what: &str,
+        timeout: Duration,
+        pred: impl Fn(&[Vec<Address>]) -> bool,
+    ) {
+        tokio::time::timeout(timeout, async {
+            while !pred(&self.node_utxos_changed_subscribes()) {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "timed out waiting for {what}; the node saw: {:?}",
+                self.node_utxos_changed_subscribes()
+            )
+        });
+    }
+
+    /// Make the next `n` processor subscribes panic (see the field).
+    pub fn panic_on_daa_subscribes(&self, n: u64) {
+        self.panic_daa_subscribes.store(n, Ordering::SeqCst);
+    }
+
+    /// Answer the next `n` `get_server_info` calls as an unsynced node.
+    pub fn report_unsynced(&self, n: u64) {
+        self.report_unsynced.store(n, Ordering::SeqCst);
+    }
+
+    /// Make the next `n` `get_sync_status` calls panic (see the field).
+    pub fn panic_on_sync_status(&self, n: u64) {
+        self.panic_sync_status.store(n, Ordering::SeqCst);
+    }
+
+    /// `get_sync_status` calls begun so far.
+    pub fn sync_status_calls(&self) -> u64 {
+        self.sync_status_calls.load(Ordering::SeqCst)
+    }
+
+    /// Take one from a "the next `n`" counter, if any is left.
+    fn take_one(counter: &AtomicU64) -> bool {
+        counter
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+    }
+
+    /// Hold every `get_server_info` until a permit is added to the returned
+    /// semaphore (`add_permits(n)` lets `n` through; `add_permits(usize::MAX
+    /// >> 4)` opens it for good).
+    pub fn hold_server_info(&self) -> Arc<tokio::sync::Semaphore> {
+        let hold = Arc::new(tokio::sync::Semaphore::new(0));
+        *self
+            .hold_server_info
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(hold.clone());
+        hold
+    }
+
+    /// Hold every `start_notify(VirtualDaaScoreChanged)` the same way.
+    pub fn hold_daa_subscribe(&self) -> Arc<tokio::sync::Semaphore> {
+        let hold = Arc::new(tokio::sync::Semaphore::new(0));
+        *self
+            .hold_daa_subscribe
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(hold.clone());
+        hold
+    }
+
+    /// `get_server_info` calls begun so far (held ones included).
+    pub fn server_info_calls(&self) -> u64 {
+        self.server_info_calls.load(Ordering::SeqCst)
+    }
+
+    /// `start_notify(VirtualDaaScoreChanged)` calls recorded so far, any epoch.
+    pub fn daa_subscribes(&self) -> usize {
+        self.calls()
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    RecordedCall::StartNotify {
+                        scope: Scope::VirtualDaaScoreChanged(_),
+                        ..
+                    }
+                )
+            })
+            .count()
+    }
+
+    async fn pass(hold: &Mutex<Option<Arc<tokio::sync::Semaphore>>>) {
+        let hold = hold.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        if let Some(hold) = hold {
+            if let Ok(permit) = hold.acquire().await {
+                permit.forget();
+            }
+        }
+    }
+
+    /// Unregister as `LinkRpc` does with nothing bound: answer `Ok(())` and
+    /// keep the listener, so it can still be delivered to.
+    pub fn retain_listeners_on_unregister(&self) {
+        self.retain_on_unregister.store(true, Ordering::SeqCst);
+    }
+
+    /// Deliver `notification` to every listener this fake holds, retained ones
+    /// included, the way a notifier's broadcaster sends to a connection. A
+    /// closed connection is skipped (the broadcaster purges those).
+    pub async fn deliver(&self, notification: Notification) -> usize {
+        let connections: Vec<ChannelConnection> = self
+            .listeners
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect();
+        let mut delivered = 0;
+        for connection in connections {
+            if connection.send(notification.clone()).await.is_ok() {
+                delivered += 1;
+            }
+        }
+        delivered
     }
 
     /// The injectable seam: exactly what `DagMonitor::rpc()` hands the app.
@@ -201,13 +443,17 @@ impl RpcApi for FakeRpc {
         _connection: Option<&DynRpcConnection>,
         _request: GetServerInfoRequest,
     ) -> RpcResult<GetServerInfoResponse> {
+        self.server_info_calls.fetch_add(1, Ordering::SeqCst);
+        self.activity.notify_waiters();
+        Self::pass(&self.hold_server_info).await;
+        let is_synced = !Self::take_one(&self.report_unsynced);
         Ok(GetServerInfoResponse {
             rpc_api_version: 1,
             rpc_api_revision: 0,
             server_version: "fake".to_string(),
             network_id: self.network_id,
             has_utxo_index: true,
-            is_synced: true,
+            is_synced,
             virtual_daa_score: 1_000_000,
         })
     }
@@ -302,6 +548,11 @@ impl RpcApi for FakeRpc {
         _connection: Option<&DynRpcConnection>,
         _request: GetSyncStatusRequest,
     ) -> RpcResult<GetSyncStatusResponse> {
+        self.sync_status_calls.fetch_add(1, Ordering::SeqCst);
+        self.activity.notify_waiters();
+        if Self::take_one(&self.panic_sync_status) {
+            panic!("forced: the sync monitor dies inside get_sync_status");
+        }
         Err(RpcError::NotImplemented)
     }
 
@@ -569,12 +820,22 @@ impl RpcApi for FakeRpc {
         Err(RpcError::NotImplemented)
     }
 
-    // ── Notification API: a hand-rolled registry, no pin Notifier ──────────
-    // The harness asserts on the REGISTRATION side (exactly what D-083
-    // changed); it never needs to deliver a notification.
+    // ── Notification API: a hand-rolled registry, mirrored into the pin's
+    // Notifier ──────────────────────────────────────────────────────────────
+    // The registry holds each listener's connection, so a test can deliver to
+    // it directly (a retired listener included); every call is also mirrored
+    // into the node-side `Notifier`, so a test can assert what a node would
+    // have received (PRE3-LANE).
 
     fn register_new_listener(&self, connection: ChannelConnection) -> ListenerId {
         let id = self.listener_seq.fetch_add(1, Ordering::SeqCst);
+        let mirrored = self
+            .notifier
+            .register_new_listener(connection.clone(), ListenerLifespan::Dynamic);
+        self.notifier_ids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id, mirrored);
         self.listeners
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -583,22 +844,77 @@ impl RpcApi for FakeRpc {
     }
 
     async fn unregister_listener(&self, id: ListenerId) -> RpcResult<()> {
+        if self.retain_on_unregister.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         self.listeners
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&id);
+        let mirrored = self
+            .notifier_ids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
+        if let Some(mirrored) = mirrored {
+            let _ = self.notifier.unregister_listener(mirrored);
+        }
         Ok(())
     }
 
-    async fn start_notify(&self, _id: ListenerId, scope: Scope) -> RpcResult<()> {
+    async fn start_notify(&self, id: ListenerId, scope: Scope) -> RpcResult<()> {
+        let daa = matches!(scope, Scope::VirtualDaaScoreChanged(_));
+        let utxos = matches!(scope, Scope::UtxosChanged(_));
         self.record(RecordedCall::StartNotify {
             epoch: self.current_epoch(),
-            scope,
+            scope: scope.clone(),
         });
+        if daa {
+            let armed = self
+                .panic_daa_subscribes
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| match n {
+                    0 => None,
+                    u64::MAX => Some(u64::MAX),
+                    n => Some(n - 1),
+                })
+                .is_ok();
+            if armed {
+                panic!("forced: the processor's task dies inside its negotiation");
+            }
+            Self::pass(&self.hold_daa_subscribe).await;
+        }
+        if utxos
+            && self
+                .refuse_utxos_subscribes
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+        {
+            return Err(RpcError::General(
+                "the node refused the subscription".to_string(),
+            ));
+        }
+        let mirrored = self
+            .notifier_ids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .copied();
+        if let Some(mirrored) = mirrored {
+            let _ = self.notifier.try_start_notify(mirrored, scope);
+        }
         Ok(())
     }
 
-    async fn stop_notify(&self, _id: ListenerId, _scope: Scope) -> RpcResult<()> {
+    async fn stop_notify(&self, id: ListenerId, scope: Scope) -> RpcResult<()> {
+        let mirrored = self
+            .notifier_ids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .copied();
+        if let Some(mirrored) = mirrored {
+            let _ = self.notifier.try_stop_notify(mirrored, scope);
+        }
         Ok(())
     }
 }

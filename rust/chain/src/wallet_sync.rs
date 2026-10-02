@@ -19,9 +19,13 @@
 //! module (it never sees a seed or keychain — the bridge hands it public
 //! [`Address`]es only).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::time::Duration;
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use kaspa_addresses::{Address, Prefix};
@@ -29,11 +33,13 @@ use kaspa_txscript::extract_script_pub_key_address;
 use kaspa_wallet_core::events::Events;
 use kaspa_wallet_core::rpc::Rpc;
 use kaspa_wallet_core::storage::transaction::{TransactionData, TransactionId, TransactionRecord};
-use kaspa_wallet_core::utxo::{
-    Maturity, NetworkParams, UtxoContext, UtxoContextBinding, UtxoProcessor,
-};
+use kaspa_wallet_core::utxo::{Maturity, NetworkParams, UtxoContext};
 use kaspa_wrpc_client::prelude::{NetworkId, NetworkType};
 use tokio::sync::{broadcast, oneshot};
+use tokio::time::Instant;
+
+use crate::dag_monitor::{LaneRecovery, WalletLaneHooks};
+use crate::wallet_lane::{Lane, Transition, LANE_HOLD_WITHIN, LANE_STEP_WITHIN};
 
 use crate::error::{ChainError, Result};
 
@@ -175,6 +181,29 @@ pub enum WalletEvent {
     Activity(Vec<WalletActivityRecord>),
     /// A non-fatal processor error (safe to surface; safe to ignore).
     Error(String),
+    /// The wallet lane's own health, on every change (PRE3-LANE, KM4) — what
+    /// the money plate reads beside the link's, because a socket that ticks
+    /// says nothing about a processor that died behind it (F1).
+    Lane(WalletLaneHealth),
+}
+
+/// **Is the wallet lane itself what holds the balance back?** (PRE3-LANE)
+///
+/// Three answers, from the supervisor's evidence. `Live` does not mean the
+/// balance is fresh — a lost socket is the link's to say, and the plate reads
+/// both — only that nothing in the wallet lane adds a reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WalletLaneHealth {
+    /// The processor is alive and following the link.
+    #[default]
+    Live,
+    /// The lane stopped serving and is being repaired: a processor that died
+    /// or stalled is being rebuilt, or one that could not negotiate on a live
+    /// socket is being re-announced (D-101). Live updates are paused.
+    Recovering,
+    /// The repair stopped trying: the rebuild budget is spent, or D-101's
+    /// recovery gave up. The lane waits for the next socket or a pull.
+    Dark,
 }
 
 /// The amount a wallet-originated send displays: the PAYMENT that left the wallet
@@ -630,9 +659,150 @@ impl ActivityStore {
     }
 }
 
+/// **R — at most this many lane rebuilds in any [`LANE_REBUILD_WINDOW`]**, after
+/// which the lane reads dark until the next socket or a pull (Erlang/OTP's
+/// restart intensity, MaxR in MaxT).
+///
+/// **Fit on recorded data.** The window is D-334's own wallet-lane window
+/// (`LANE_REBIND_WINDOW_SECS`, 600 s): one bad patch of the link. The worst rate
+/// the supervisor could have had to absorb is the socket-death rate — every
+/// F1 death needed a socket to retire under it — and the current link's
+/// re-soak measured **0.72 involuntary socket ends per bound hour** in natural
+/// use (LINK-Q4, 2026-09-29, 4.14 h, 3 deaths, none within ten minutes of
+/// another). Even if every one killed the lane, four in one window is a
+/// Poisson tail of 7.8 × 10⁻⁶ per window (λ = 0.12): **calm**, the budget never binds on the
+/// natural rate. A crash loop — a node whose frame kills every fresh
+/// processor — spends three rebuilds in seconds and then stops: **bias**, at
+/// most three rescans of the window before the lane goes dark. The flap tests'
+/// clusters (up to 8 socket ends in 10 min, deliberate Wi-Fi toggles) do not
+/// need the budget: each is a new socket, and a new socket grants one rebuild.
+pub const LANE_REBUILDS: usize = 3;
+/// T — see [`LANE_REBUILDS`].
+pub const LANE_REBUILD_WINDOW: Duration = Duration::from_secs(600);
+
+/// **When the supervisor looks again after a recorded panic.** The hook runs
+/// before the unwind, and the panicking task's future — which holds the
+/// processor's ctl listener — is dropped on that thread right after it, inside
+/// tokio's panic guard (`harness.rs:521-538`): microseconds. The first look
+/// almost always sees the witness flipped; the later two are for a runtime too
+/// starved to have unwound yet, because between transitions nothing else
+/// would wake the supervisor for a processor that died mid-session. Each look
+/// is cheap, and a death found ends the ladder.
+const PANIC_LOOKS: [Duration; 3] = [
+    Duration::from_millis(5),
+    Duration::from_millis(50),
+    Duration::from_millis(500),
+];
+
+/// The supervisor's record (PRE3-LANE). One per engine, across lanes.
+#[derive(Default)]
+struct Supervision {
+    /// The health as last published.
+    health: WalletLaneHealth,
+    /// Deaths found, process lifetime — E1's "lane deaths" counter.
+    deaths: u64,
+    /// The number of the lane whose death was reported and not yet answered by
+    /// a rebuild (0: none). One report per death.
+    reported: u64,
+    /// A rebuilt lane, until its processor comes up (reads Recovering).
+    awaiting_up: Option<u64>,
+    /// When each rebuild in the current window ran.
+    rebuilds: VecDeque<Instant>,
+    /// The budget refused a rebuild: the lane reads dark.
+    dark: bool,
+    /// Sockets the dead lane had seen when it went dark — one more is a new
+    /// socket, which grants a rebuild.
+    dark_binds: u64,
+    /// One rebuild past the budget, granted by a new socket — the user's pull
+    /// on a dark lane brings one, through the link's hard path.
+    granted: bool,
+    rebuilding: bool,
+    /// D-101 checks running on a lane that was down when it reported.
+    checking: u32,
+    /// D-101's recovery gave up on this lane.
+    gave_up: bool,
+    /// The open stall already reported to D-101, as (lane, step): one report
+    /// per stalled negotiation, however often the supervisor looks.
+    open_stall_reported: (u64, u64),
+    /// Reports handed to D-101's recovery, process lifetime — so "once per
+    /// stall" is a fact a test can read, not a reading of a log.
+    link_reports: u64,
+}
+
+/// Clears the record's `rebuilding` however a rebuild ends — returned, or
+/// dropped mid-await by a caller's timeout (the pull's 10 s budget) — so the
+/// glass can never be left reading Recovering for a rebuild nobody is running.
+/// At this pin the one await it spans cannot be interrupted (a fresh lane's
+/// ctl is never connected, so `start()` returns in one poll); a pin whose
+/// `start()` awaits would make it reachable (`consensus-auditor` delta).
+struct RebuildingGuard(WalletEngine);
+
+impl Drop for RebuildingGuard {
+    fn drop(&mut self) {
+        self.0.supervision().rebuilding = false;
+        self.0.inner.supervision_changed.notify_waiters();
+    }
+}
+
+/// Tells the supervisor its lane's fold task ended — on return, on a panic's
+/// unwind and on an abort alike (its `Drop` runs in every one).
+struct FoldEnded(Arc<Lane>);
+
+impl Drop for FoldEnded {
+    fn drop(&mut self) {
+        self.0.fold_ended.store(true, Ordering::SeqCst);
+        self.0.changed.notify_waiters();
+    }
+}
+
+/// The engine as D-101's recovery sees it: whether the lane is dead, and the
+/// rebuild. Weak, because the engine holds the monitor.
+struct EngineHooks(Weak<Inner>);
+
+impl WalletLaneHooks for EngineHooks {
+    fn lane_dead(&self) -> bool {
+        self.0
+            .upgrade()
+            .is_some_and(|inner| WalletEngine { inner }.lane_dead_now())
+    }
+
+    fn rebuild(&self) -> Pin<Box<dyn Future<Output = LaneRecovery> + Send + '_>> {
+        let engine = self.0.upgrade().map(|inner| WalletEngine { inner });
+        Box::pin(async move {
+            match engine {
+                Some(engine) => engine.rebuild_lane().await,
+                None => LaneRecovery::NotDark,
+            }
+        })
+    }
+}
+
 struct Inner {
-    processor: UtxoProcessor,
-    context: UtxoContext,
+    /// The monitor's stable handle every lane is built on (D-101: the client
+    /// behind it rotates, this does not).
+    rpc: Rpc,
+    network_id: NetworkId,
+    /// Where the activity log lives — and beside it the dev flags file.
+    store_path: PathBuf,
+    /// **The lane serving now** (PRE3-LANE): one processor and context behind
+    /// the boundary in `wallet_lane.rs`. A rebuild replaces it whole and never
+    /// restarts a dead one: its `task_is_running` stays set after a panic
+    /// (pin `processor.rs:690-701, :775`), so `start()` would refuse.
+    lane: Mutex<Arc<Lane>>,
+    /// Lanes built so far (the next lane's number is this plus one).
+    lanes_built: AtomicU64,
+    /// The supervisor's record: deaths, rebuilds, health.
+    supervision: Mutex<Supervision>,
+    /// A rebuild never overlaps another.
+    rebuild_flight: tokio::sync::Mutex<()>,
+    /// Set by [`WalletEngine::stop`] under the rebuild flight: a rebuild in
+    /// flight finishes first, and none runs after. A reported death can reach
+    /// the flight long after its report — D-101's check sleeps between its
+    /// re-announces, and a lane held dark is rebuilt once its window slides.
+    stopped: AtomicBool,
+    /// Wakes the supervisor when the lane is replaced or its record changes.
+    supervision_changed: tokio::sync::Notify,
+    supervisor: Mutex<Option<(oneshot::Sender<()>, tokio::task::JoinHandle<()>)>>,
     events: broadcast::Sender<WalletEvent>,
     store: Mutex<ActivityStore>,
     event_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -671,14 +841,21 @@ impl WalletEngine {
     /// One `UtxoContext` = one account (P1 §0.8). `store_path` is an app-private
     /// file for the activity log (INV-3).
     pub fn new(rpc: Rpc, network_id: NetworkId, store_path: PathBuf) -> Result<Self> {
-        let processor = UtxoProcessor::new(Some(rpc), Some(network_id), None, None);
-        let context = UtxoContext::new(&processor, UtxoContextBinding::default());
-        let store = ActivityStore::load(store_path)?;
+        let lane = Lane::new(1, &rpc, network_id);
+        let store = ActivityStore::load(store_path.clone())?;
         let (events, _) = broadcast::channel(256);
         Ok(Self {
             inner: Arc::new(Inner {
-                processor,
-                context,
+                rpc,
+                network_id,
+                store_path,
+                lane: Mutex::new(lane),
+                lanes_built: AtomicU64::new(1),
+                supervision: Mutex::new(Supervision::default()),
+                rebuild_flight: tokio::sync::Mutex::new(()),
+                stopped: AtomicBool::new(false),
+                supervision_changed: tokio::sync::Notify::new(),
+                supervisor: Mutex::new(None),
                 events,
                 store: Mutex::new(store),
                 event_task: Mutex::new(None),
@@ -695,11 +872,25 @@ impl WalletEngine {
     /// [`crate::DagMonitor::recover_wallet_lane`], which decides whether the lane
     /// is actually dark on a live socket and, only then, retries it (D-101).
     pub fn attach_link(&self, link: crate::DagMonitor) {
+        // The lane's death and rebuild ride the same single flight as D-101's
+        // dark-lane check (PB-019: one retry owner). The monitor holds the
+        // engine weakly — the engine already holds the monitor.
+        link.attach_wallet_lane(Arc::new(EngineHooks(Arc::downgrade(&self.inner))));
         *self
             .inner
             .link
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(link);
+    }
+
+    /// The lane serving now. Taken by value (an `Arc` bump), so no lock is
+    /// ever held across an await.
+    pub(crate) fn lane(&self) -> Arc<Lane> {
+        self.inner
+            .lane
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// **Is the wallet lane up** — has the processor negotiated its connection
@@ -724,7 +915,7 @@ impl WalletEngine {
     /// named "listener registration" as the residue; that was the wrong step,
     /// and D-334 corrects it.)
     pub fn lane_up(&self) -> bool {
-        self.inner.processor.is_connected()
+        self.lane().processor.is_connected()
     }
 
     /// A snapshot of the current watched window. Taken by value (an `Arc` bump)
@@ -773,7 +964,7 @@ impl WalletEngine {
     /// A clone shares the SAME underlying context (Arc) — the exact watched set
     /// the balance reflects, so a send spends only what the UI shows as mature.
     pub fn context(&self) -> UtxoContext {
-        self.inner.context.clone()
+        self.lane().context.clone()
     }
 
     /// DAA score at which a recorded activity tx was accepted — for incoming
@@ -821,9 +1012,10 @@ impl WalletEngine {
 
     /// Start watching `addresses` (the derived receive+change window — public
     /// strings derived by the bridge from the unlocked vault; this layer never
-    /// sees a secret). Spawns the fold task and starts the processor; if the
-    /// shared client is already connected the processor fires `UtxoProcStart`
-    /// immediately (`processor.rs:704`), which triggers the initial scan.
+    /// sees a secret). Starts the first lane — its fold task, its processor,
+    /// its relay — and the supervisor. If the monitor's socket is already up,
+    /// the relay replays that open to the processor at once, its negotiation
+    /// ends in `UtxoProcStart`, and that triggers the initial scan.
     ///
     /// Must be called from within a tokio runtime (FRB's). `change_addresses` is
     /// the change subset of `addresses` — used to recognise our own returning
@@ -834,16 +1026,6 @@ impl WalletEngine {
         addresses: Vec<Address>,
         change_addresses: Vec<Address>,
     ) -> Result<()> {
-        // Register on the Events multiplexer BEFORE start() so a synchronous
-        // UtxoProcStart on an already-connected client is buffered, not missed.
-        let channel = self.inner.processor.multiplexer().channel();
-        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
-        *self
-            .inner
-            .shutdown
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(shutdown_tx);
-
         // The window lives in `Inner`, not in this task's captures: discovery
         // can widen it after start (`extend_watch`), and a fold task holding a
         // private copy would keep re-registering the narrow set on every
@@ -867,8 +1049,37 @@ impl WalletEngine {
         // history. Earlier boots masked this behind instant Discovery events.
         self.emit_activity(&self.change_set());
 
+        let lane = self.lane();
+        // The dev install's fault arm (D-340's fence; `lanefault=1`): staged
+        // once, on the first lane only.
+        if crate::devab::lane_fault_armed(&self.inner.store_path) {
+            lane.arm_fault();
+        }
+        self.start_lane(&lane).await?;
+        self.start_supervisor();
+        self.emit(WalletEvent::Lane(WalletLaneHealth::Live));
+        Ok(())
+    }
+
+    /// Bring `lane` up: its fold task, then its processor, then its relay. The
+    /// fold registers on the processor's event multiplexer BEFORE `start()`,
+    /// so nothing the processor says first is missed; the relay starts last,
+    /// after the processor listens on its ctl, so the open it replays reaches
+    /// the processor's own task and the structural witness counts that task.
+    async fn start_lane(&self, lane: &Arc<Lane>) -> Result<()> {
+        let channel = lane.processor.multiplexer().channel();
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+        *self
+            .inner
+            .shutdown
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(shutdown_tx);
         let engine = self.clone();
+        let fold_lane = lane.clone();
         let task = tokio::spawn(async move {
+            // Its drop — a return, a panic unwinding, or an abort — tells the
+            // supervisor the fold ended (our own task: watched directly).
+            let _ended = FoldEnded(fold_lane.clone());
             loop {
                 tokio::select! {
                     // Drain events before honoring shutdown (mirrors the
@@ -876,7 +1087,7 @@ impl WalletEngine {
                     biased;
                     msg = channel.receiver.recv() => {
                         match msg {
-                            Ok(event) => engine.handle_event(*event).await,
+                            Ok(event) => engine.handle_event(&fold_lane, *event).await,
                             Err(_) => break, // multiplexer closed
                         }
                     }
@@ -892,32 +1103,91 @@ impl WalletEngine {
             .event_task
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(task);
-
-        self.inner.processor.start().await?;
+        lane.processor.start().await?;
+        lane.start_relay();
         Ok(())
     }
 
-    /// In-place node re-ask (V6 soft pull-refresh, amending the V3 pull heal
-    /// — register item 12): re-fetch the watched window's UTXO set over the
-    /// LIVE connection using the pin's own scan primitive — the same
-    /// `scan_and_register_addresses` call the `UtxoProcStart` arm makes
-    /// (INV-9; the known-address filter only gates the subscription half,
-    /// the UTXO fetch always runs the full list). No socket drop, no
-    /// `UtxoProcStart`, no beacon flicker; Balance/Discovery events flow
-    /// through the normal fold. Errs when the engine hasn't started or the
-    /// processor has no live DAA — callers treat an `Err` as "soft path
-    /// unavailable" and escalate to the hard reconnect.
+    /// **The pull** (V6 soft pull-refresh, amending the V3 pull heal — register
+    /// item 12; PRE3-LANE, KM5): re-ask the node over the live connection, and
+    /// never just re-scan a lane that cannot hear what happens next.
+    ///
+    /// - **A lane held dark** (its restart budget spent — a node whose answers
+    ///   keep killing fresh processors, say) is not rebuilt on the same socket:
+    ///   the pull answers `Err`, the bridge escalates to the link's hard path,
+    ///   and the new socket grants the lane one more rebuild there
+    ///   (`consensus-auditor`, PRE3-LANE: a rebuild on the socket that killed
+    ///   it would only spend the budget again).
+    /// - **A dead lane** whose rebuild is under way joins that rebuild; the new
+    ///   lane's `UtxoProcStart` re-arms and re-scans by itself. "Joins" means
+    ///   queues behind: if the supervisor's own rebuild holds D-101's flight,
+    ///   the pull answers `Ok` before the rebuild decides, and a budget that
+    ///   then refuses it shows Dark on the glass, so the next pull escalates.
+    /// - **A live lane is re-armed, then re-scanned.** The pin's context-level
+    ///   register filters every address it already knows (`context.rs:704-727`),
+    ///   so a scan alone never reaches `start_notify(UtxosChanged)` (run 3's
+    ///   F15). The processor-level `register_addresses` — D-083's primitive,
+    ///   the `UtxoProcStart` arm's own — does, while connected: it restores a
+    ///   subscription the listener LOST (a re-arm that failed at connect).
+    ///   **What it does not do:** re-subscribe what the listener already holds
+    ///   — the pin's notifier answers an `Add` that changes nothing with no
+    ///   mutation (`notify/src/subscription/single.rs:506-519`), so a node that
+    ///   silently dropped a subscription it still believes in is not reached
+    ///   from here; that is a new socket's work (the hard path). Unsubscribing
+    ///   first would reach it, and was rejected: while the listener is
+    ///   unsubscribed a spend can be missed, and a scan never removes a coin
+    ///   (`context.rs:447-486` inserts only what is new), so the balance would
+    ///   keep a spent coin.
+    ///
+    /// No socket drop, no beacon flicker; Balance/Discovery events flow through
+    /// the normal fold. Errs when the engine hasn't started, the lane is held
+    /// dark, or the processor has no live DAA — callers treat an `Err` as "soft
+    /// path unavailable" and escalate to the hard reconnect.
     pub async fn rescan(&self) -> Result<()> {
         let addresses = self.watched();
         if addresses.is_empty() {
             return Err(ChainError::Message("wallet engine not started".into()));
         }
+        if self.supervision().dark {
+            log::info!(
+                "wallet-sync: pull on a wallet lane held dark — escalating to a new socket, \
+                 which grants it one more rebuild (PRE3-LANE)"
+            );
+            return Err(ChainError::Message(
+                "wallet lane held dark — a new socket rebuilds it".into(),
+            ));
+        }
+        if self.lane_dead_now() {
+            log::info!(
+                "wallet-sync: pull on a dead wallet lane — joining its rebuild instead of \
+                 re-scanning (PRE3-LANE)"
+            );
+            self.request_rebuild().await;
+            // The budget may have refused it: then nothing re-asked the node,
+            // and the pull must say so, so the bridge escalates to a new socket
+            // (`consensus-auditor` delta).
+            if self.supervision().dark {
+                return Err(ChainError::Message(
+                    "wallet lane held dark — a new socket rebuilds it".into(),
+                ));
+            }
+            return Ok(());
+        }
+        let lane = self.lane();
         let count = addresses.len();
-        self.inner
-            .context
+        lane.processor
+            .register_addresses(
+                addresses.iter().cloned().map(Arc::new).collect(),
+                &lane.context,
+            )
+            .await?;
+        lane.context
             .scan_and_register_addresses(addresses.as_ref().clone(), None)
             .await?;
-        log::info!("wallet-sync: in-place rescan re-asked the node for {count} addresses");
+        log::info!(
+            "wallet-sync: in-place rescan re-asked the node for {count} addresses (a lost \
+             utxos-changed subscription re-armed with it)"
+        );
         Ok(())
     }
 
@@ -983,7 +1253,7 @@ impl WalletEngine {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) =
             Arc::new(change_addresses.into_iter().collect());
-        self.inner
+        self.lane()
             .context
             .scan_and_register_addresses(added, None)
             .await?;
@@ -993,10 +1263,34 @@ impl WalletEngine {
         Ok(count)
     }
 
-    /// Stop the processor and drain the fold task (e.g. on vault lock — the
-    /// shared wRPC socket stays up, owned by the DagMonitor).
+    /// Stop the supervisor, then the lane — its relay, its processor, its fold
+    /// task (e.g. on vault lock; the shared wRPC socket stays up, owned by the
+    /// DagMonitor). The pinned `stop()` runs under [`LANE_STEP_WITHIN`]: a
+    /// processor whose task died never answers it (pin `processor.rs:780-783`
+    /// waits on a response only that task sends), and that must not hang us.
+    /// No rebuild outlives it. A D-101 check already asleep when it runs is not
+    /// stopped with it — read gap register `LANE-4` before giving this a
+    /// production caller (vault lock) or a second engine on one monitor.
     pub async fn stop(&self) -> Result<()> {
-        self.inner.processor.stop().await?;
+        let supervisor = self
+            .inner
+            .supervisor
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some((tx, task)) = supervisor {
+            let _ = tx.send(());
+            let _ = task.await;
+        }
+        // No rebuild outlives the stop: one in flight ends first, so the lane
+        // read below is the last one, and every later one reads the flag.
+        {
+            let _flight = self.inner.rebuild_flight.lock().await;
+            self.inner.stopped.store(true, Ordering::SeqCst);
+        }
+        let lane = self.lane();
+        lane.retire();
+        Self::stop_processor(&lane).await?;
         // Take both handles out from under their locks BEFORE awaiting — never
         // hold a std MutexGuard across an await (clippy::await_holding_lock;
         // mirrors dag_monitor.rs:148).
@@ -1021,6 +1315,460 @@ impl WalletEngine {
         Ok(())
     }
 
+    /// The pinned `stop()`, bounded. A timeout is logged and is not an error:
+    /// the processor it could not stop is dead or stuck, and is being dropped.
+    async fn stop_processor(lane: &Lane) -> Result<()> {
+        match tokio::time::timeout(LANE_STEP_WITHIN, lane.processor.stop()).await {
+            Ok(result) => Ok(result?),
+            Err(_) => {
+                log::warn!(
+                    "wallet-lane: lane {}'s processor did not stop inside {:?} — its task is \
+                     dead or stuck; left behind (PRE3-LANE)",
+                    lane.number,
+                    LANE_STEP_WITHIN
+                );
+                Ok(())
+            }
+        }
+    }
+
+    // ── The supervisor (PRE3-LANE, run 4's E1) ─────────────────────────────
+
+    /// How many times this engine found its lane dead or stalled.
+    pub fn lane_deaths(&self) -> u64 {
+        self.supervision().deaths
+    }
+
+    /// Frames the current lane's gate refused because their socket had closed
+    /// — each one a frame that, before PRE3-LANE, met a disconnected processor.
+    pub fn frames_refused(&self) -> u64 {
+        self.lane().dropped_frames()
+    }
+
+    /// How many times this engine handed its lane to D-101's recovery — a
+    /// processor error, or an open that went unanswered past its bound (once
+    /// per stall).
+    pub fn lane_reports_to_link(&self) -> u64 {
+        self.supervision().link_reports
+    }
+
+    /// How many lanes this engine has built (1 + rebuilds).
+    pub fn lanes_built(&self) -> u64 {
+        self.inner.lanes_built.load(Ordering::SeqCst)
+    }
+
+    /// The wallet lane's health, as last published.
+    pub fn lane_health(&self) -> WalletLaneHealth {
+        self.supervision().health
+    }
+
+    fn supervision(&self) -> std::sync::MutexGuard<'_, Supervision> {
+        self.inner
+            .supervision
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn start_supervisor(&self) {
+        let (tx, rx) = oneshot::channel();
+        let engine = self.clone();
+        let task = tokio::spawn(async move { engine.supervise(rx).await });
+        *self
+            .inner
+            .supervisor
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some((tx, task));
+    }
+
+    /// **The supervisor's loop**: look at the lane whenever anything that could
+    /// mean a death happens — a panic anywhere in the process, a transition
+    /// beginning or ending, the fold task ending, the stall clock running out —
+    /// and report a death to the one recovery that rebuilds. It never rebuilds
+    /// a lane twice for one death, and it is the only thing that publishes the
+    /// lane's health.
+    async fn supervise(self, mut shutdown: oneshot::Receiver<()>) {
+        loop {
+            // Arm every wake-up BEFORE reading state: tokio's `Notified` sees a
+            // `notify_waiters` from the moment it is created, so nothing that
+            // happens during the reads below is lost.
+            let lane = self.lane();
+            let panicked = crate::lane_health::panicked();
+            let changed = lane.changed.notified();
+            let record = self.inner.supervision_changed.notified();
+            // Read before the look, so a deadline falling during it is armed
+            // (and runs out at once) rather than neither judged nor armed
+            // (`wallet-security-auditor` delta, N-1).
+            let looked = Instant::now();
+            self.assess(&lane);
+            self.publish_health();
+            // The stall and held-frame clocks arm only while this lane's death
+            // is unreported:
+            // once reported, its transition can never be acknowledged and the
+            // deadline stays in the past — armed, it would wake this loop at
+            // once, forever (found by the crash-loop test, whose paused clock
+            // froze on the spin).
+            // And a deadline at or before the look arms nothing: the look
+            // above judged it, so re-arming would wake this loop at once again
+            // (a mutant that silenced the stall verdict spun here, S4).
+            let deadline = if self.supervision().reported == lane.number {
+                None
+            } else {
+                [lane.stall_deadline(), lane.held_deadline()]
+                    .into_iter()
+                    .flatten()
+                    .filter(|at| *at > looked)
+                    .min()
+            };
+            tokio::select! {
+                _ = &mut shutdown => return,
+                _ = panicked => {
+                    // The hook runs before the unwind; the task's future (and
+                    // with it the structural witness) drops a few microseconds
+                    // later on the panicking thread. Look again after that,
+                    // and twice more if a starved runtime has not unwound yet.
+                    for settle in PANIC_LOOKS {
+                        tokio::time::sleep(settle).await;
+                        self.assess(&lane);
+                        if self.supervision().reported == lane.number {
+                            break;
+                        }
+                    }
+                }
+                _ = changed => {}
+                _ = record => {}
+                _ = async {
+                    match deadline {
+                        Some(at) => tokio::time::sleep_until(at).await,
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {}
+            }
+        }
+    }
+
+    /// One look at `lane`: dead, stalled, or dark with a new chance?
+    ///
+    /// **Only the lane's own witnesses convict it** (`consensus-auditor`,
+    /// PRE3-LANE): its processor's task gone (the structural witness), its fold
+    /// task gone, a close it never acknowledged, or a `UtxosChanged` it has
+    /// held past the bound, its task alive but no longer taking frames
+    /// (`wallet-security-auditor` C-1). A panic elsewhere in the
+    /// process is a reason to LOOK — the ladder after every recorded panic —
+    /// never a verdict: the wallet framework's code runs on other tasks too (a
+    /// send's submit, for one), and a panic there leaves a healthy lane healthy.
+    /// An open it never acknowledged is a negotiation waiting on the node — the
+    /// link's case: reported to D-101's recovery once per stall, never a death.
+    fn assess(&self, lane: &Arc<Lane>) {
+        let (death, report_open_stall) = {
+            let mut record = self.supervision();
+            if record.reported == lane.number {
+                // A death already reported for this lane. If the budget held
+                // it dark, a new socket buys one more rebuild (the OTP
+                // escalation: the parent restarted what we depend on). The
+                // user's pull on a dark lane is what usually brings one: it
+                // escalates to the link's hard path ([`Self::rescan`]).
+                if record.dark && lane.binds.load(Ordering::SeqCst) > record.dark_binds {
+                    record.granted = true;
+                    record.dark = false;
+                    drop(record);
+                    log::info!(
+                        "wallet-lane: a new socket arrived while lane {} was held dark — one more \
+                         rebuild (PRE3-LANE)",
+                        lane.number
+                    );
+                    self.spawn_rebuild_request();
+                }
+                return;
+            }
+            let stalled = lane.stalled();
+            let death = if lane.processor_ended() {
+                Some(
+                    match crate::lane_health::panic_after(lane.born_after_panic) {
+                        Some(panic) => format!(
+                            "the processor's task ended, after a panic at {}",
+                            panic.location
+                        ),
+                        None => "the processor's task ended".to_string(),
+                    },
+                )
+            } else if lane.fold_ended.load(Ordering::SeqCst) {
+                Some("the fold task ended".to_string())
+            } else if stalled == Some(Transition::Close) {
+                Some(format!(
+                    "no acknowledgement of a close (no UtxoProcStop) inside {LANE_STEP_WITHIN:?}"
+                ))
+            } else if lane.held_stalled() {
+                Some(format!(
+                    "a utxos-changed held past {LANE_HOLD_WITHIN:?} (the processor stopped taking frames)"
+                ))
+            } else {
+                None
+            };
+            let mut report_open_stall = false;
+            if let Some(cause) = &death {
+                record.deaths += 1;
+                record.reported = lane.number;
+                record.awaiting_up = Some(lane.number);
+                log::warn!(
+                    "wallet-lane: lane {} died ({cause}) — death {} of this process; rebuilding \
+                     through the recovery's single flight (PRE3-LANE)",
+                    lane.number,
+                    record.deaths
+                );
+            } else if stalled == Some(Transition::Open)
+                && record.open_stall_reported != (lane.number, lane.step())
+            {
+                record.open_stall_reported = (lane.number, lane.step());
+                report_open_stall = true;
+                log::warn!(
+                    "wallet-lane: lane {}'s negotiation unanswered after {:?} — the lane is \
+                     dark on its socket; reporting it to the link's recovery (D-101), not a \
+                     death (PRE3-LANE)",
+                    lane.number,
+                    LANE_STEP_WITHIN
+                );
+            }
+            (death, report_open_stall)
+        };
+        if death.is_some() {
+            self.spawn_rebuild_request();
+        }
+        if report_open_stall {
+            self.report_dark_lane();
+        }
+    }
+
+    /// **Hand a lane that is down on its socket to D-101's recovery** — the
+    /// one owner of a negotiation that cannot complete (PB-019): it
+    /// re-announces, then rebinds to a new socket, from its own evidence. The
+    /// check is counted while it runs, so the glass reads Recovering, and Dark
+    /// if it gives up — until the lane comes up. A lane reported while up
+    /// changes nothing on the glass (no flicker). With no link — a harness —
+    /// there is nobody to ask, and the stall reads Recovering by itself.
+    fn report_dark_lane(&self) {
+        let Some(link) = self
+            .inner
+            .link
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+        else {
+            return;
+        };
+        self.supervision().link_reports += 1;
+        let counted = !self.lane_up();
+        if counted {
+            self.supervision().checking += 1;
+            self.inner.supervision_changed.notify_waiters();
+        }
+        let engine = self.clone();
+        tokio::spawn(async move {
+            let outcome = link
+                .recover_wallet_lane({
+                    let engine = engine.clone();
+                    move || engine.lane_up()
+                })
+                .await;
+            if counted {
+                let mut record = engine.supervision();
+                record.checking = record.checking.saturating_sub(1);
+                if outcome == LaneRecovery::GaveUp {
+                    record.gave_up = true;
+                }
+                drop(record);
+                engine.inner.supervision_changed.notify_waiters();
+            }
+        });
+    }
+
+    /// A death the supervisor reported and no rebuild has answered yet — the
+    /// recovery's door asks this ([`WalletLaneHooks::lane_dead`]).
+    fn lane_dead_now(&self) -> bool {
+        self.supervision().reported == self.lane().number
+    }
+
+    fn spawn_rebuild_request(&self) {
+        let engine = self.clone();
+        tokio::spawn(async move { engine.request_rebuild().await });
+    }
+
+    /// **Through D-101's single flight** (PB-019): with a link attached, the
+    /// death is reported exactly as a processor error is, and the recovery —
+    /// which now asks the lane whether it is dead before anything else — runs
+    /// the rebuild inside the flight it already owns. Without one (a harness),
+    /// the rebuild runs directly; it never overlaps itself either way.
+    async fn request_rebuild(&self) {
+        let link = self
+            .inner
+            .link
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        match link {
+            Some(link) => {
+                let engine = self.clone();
+                link.recover_wallet_lane(move || engine.lane_up()).await;
+            }
+            None => {
+                self.rebuild_lane().await;
+            }
+        }
+    }
+
+    /// **The rebuild**: discard the dead lane's processor and context, build
+    /// fresh ones on the live socket, and bring them up — never `start()` on
+    /// the old processor, whose `task_is_running` a panic leaves set.
+    ///
+    /// **Bounded the OTP way**: at most [`LANE_REBUILDS`] in any
+    /// [`LANE_REBUILD_WINDOW`]. Past that the lane reads dark, says so, and
+    /// waits for the next socket or a pull, each of which grants one more.
+    pub(crate) async fn rebuild_lane(&self) -> LaneRecovery {
+        let _flight = self.inner.rebuild_flight.lock().await;
+        if self.inner.stopped.load(Ordering::SeqCst) {
+            // A stopped engine's lane is down by design: a fresh processor
+            // would subscribe on the node for nobody.
+            return LaneRecovery::NotDark;
+        }
+        let old = self.lane();
+        {
+            let mut record = self.supervision();
+            if record.reported != old.number {
+                // Answered already (a queued report after its rebuild).
+                return LaneRecovery::NotDark;
+            }
+            let now = Instant::now();
+            while record
+                .rebuilds
+                .front()
+                .is_some_and(|at| now.duration_since(*at) >= LANE_REBUILD_WINDOW)
+            {
+                record.rebuilds.pop_front();
+            }
+            if record.rebuilds.len() >= LANE_REBUILDS && !record.granted {
+                if !record.dark {
+                    record.dark = true;
+                    record.dark_binds = old.binds.load(Ordering::SeqCst);
+                    log::warn!(
+                        "wallet-lane: lane {} is dead and {} rebuilds already ran in the last \
+                         {:?} — the lane reads dark until the next socket or a pull (PRE3-LANE)",
+                        old.number,
+                        record.rebuilds.len(),
+                        LANE_REBUILD_WINDOW
+                    );
+                }
+                drop(record);
+                self.inner.supervision_changed.notify_waiters();
+                return LaneRecovery::RebuildsSpent;
+            }
+            record.granted = false;
+            record.dark = false;
+            record.rebuilding = true;
+            record.rebuilds.push_back(now);
+        }
+        let rebuilding = RebuildingGuard(self.clone());
+        self.publish_health();
+
+        // The old lane stops cold: its gate refuses everything, its relay ends,
+        // its fold task is cancelled (nothing it would still fold matters), and
+        // its pinned `stop()` runs bounded on the side.
+        old.retire();
+        let old_fold = self
+            .inner
+            .event_task
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(task) = old_fold {
+            task.abort();
+        }
+        let stopping = old.clone();
+        tokio::spawn(async move {
+            let _ = Self::stop_processor(&stopping).await;
+        });
+
+        let number = self.inner.lanes_built.fetch_add(1, Ordering::SeqCst) + 1;
+        let lane = Lane::new(number, &self.inner.rpc, self.inner.network_id);
+        *self
+            .inner
+            .lane
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = lane.clone();
+        let started = self.start_lane(&lane).await;
+        drop(rebuilding);
+        match started {
+            Ok(()) => {
+                log::info!(
+                    "wallet-lane: lane {} rebuilt as lane {number} — a fresh processor and \
+                     context on the live socket (PRE3-LANE)",
+                    old.number
+                );
+                LaneRecovery::Rebuilt
+            }
+            Err(e) => {
+                // Unreachable at this pin: `start()` errs only when its task is
+                // already running (`processor.rs:690-694`), which a fresh
+                // processor never is. If it ever does, the new lane started no
+                // relay and no witness would ever see it, so it is reported
+                // dead here — and rebuilt under the same budget.
+                log::warn!(
+                    "wallet-lane: lane {number} failed to start: {} — reported dead",
+                    crate::link::sanitize_node_text(&e.to_string())
+                );
+                {
+                    let mut record = self.supervision();
+                    record.deaths += 1;
+                    record.reported = number;
+                    record.awaiting_up = Some(number);
+                }
+                self.inner.supervision_changed.notify_waiters();
+                self.spawn_rebuild_request();
+                LaneRecovery::Rebuilt
+            }
+        }
+    }
+
+    /// The fold saw `UtxoProcStart` on `lane`: the lane is up.
+    fn lane_came_up(&self, lane: &Lane) {
+        let mut record = self.supervision();
+        if record.awaiting_up == Some(lane.number)
+            || record.awaiting_up.is_some_and(|n| n < lane.number)
+        {
+            record.awaiting_up = None;
+        }
+        record.gave_up = false;
+        drop(record);
+        self.inner.supervision_changed.notify_waiters();
+    }
+
+    /// The health the evidence supports, published on change.
+    fn publish_health(&self) {
+        let lane = self.lane();
+        let health = {
+            let mut record = self.supervision();
+            let health = if record.dark || record.gave_up {
+                WalletLaneHealth::Dark
+            } else if record.reported == lane.number
+                || record.rebuilding
+                || record.awaiting_up.is_some()
+                || record.checking > 0
+                // A negotiation past its bound is a lane down on its socket,
+                // with or without a link to report it to.
+                || lane.stalled() == Some(Transition::Open)
+            {
+                WalletLaneHealth::Recovering
+            } else {
+                WalletLaneHealth::Live
+            };
+            if health == record.health {
+                return;
+            }
+            record.health = health;
+            health
+        };
+        log::info!("wallet-lane: health {health:?} (lane {})", lane.number);
+        self.emit(WalletEvent::Lane(health));
+    }
+
     fn emit(&self, event: WalletEvent) {
         // Fails only with zero receivers — fine to drop.
         let _ = self.inner.events.send(event);
@@ -1041,7 +1789,7 @@ impl WalletEngine {
     /// (never a fabricated 0: with DAA 0 every receive classifies Pending,
     /// the finding-13 storm).
     fn current_daa(&self) -> Option<u64> {
-        self.inner.processor.current_daa_score()
+        self.lane().processor.current_daa_score()
     }
 
     fn emit_activity(&self, change_set: &HashSet<Address>) {
@@ -1066,13 +1814,14 @@ impl WalletEngine {
     /// subset are read from `Inner` per event rather than captured at start:
     /// discovery may widen them mid-session and every arm below must see the
     /// current fact, not the one this task was born with.
-    async fn handle_event(&self, event: Events) {
+    async fn handle_event(&self, lane: &Arc<Lane>, event: Events) {
         let addresses = self.watched();
         let addresses = addresses.as_slice();
         let change_set = self.change_set();
         let change_set = change_set.as_ref();
         match event {
             Events::UtxoProcStart => {
+                self.lane_came_up(lane);
                 self.emit(WalletEvent::Syncing);
                 log::info!(
                     "wallet-sync: utxo-proc start — scanning {} addresses",
@@ -1092,10 +1841,9 @@ impl WalletEngine {
                 // node-side; the context scan below then extends UTXO state.
                 let arc_addresses: Vec<Arc<Address>> =
                     addresses.iter().cloned().map(Arc::new).collect();
-                match self
-                    .inner
+                match lane
                     .processor
-                    .register_addresses(arc_addresses, &self.inner.context)
+                    .register_addresses(arc_addresses, &lane.context)
                     .await
                 {
                     // Logged on success ONLY (wallet-security audit nit): a
@@ -1111,8 +1859,7 @@ impl WalletEngine {
                 // this drives Discovery + Balance events (the latter even for an
                 // empty wallet → a live zero). DAA is already stored by
                 // handle_connect_impl (processor.rs:529) before UtxoProcStart.
-                if let Err(e) = self
-                    .inner
+                if let Err(e) = lane
                     .context
                     .scan_and_register_addresses(addresses.to_vec(), None)
                     .await
@@ -1227,8 +1974,7 @@ impl WalletEngine {
                 // URL — the pin sets it from `options.url` verbatim
                 // (`client.rs:243,443`) — so a token-auth path segment would
                 // land in logcat here too.
-                let endpoint = self
-                    .inner
+                let endpoint = lane
                     .processor
                     .try_rpc_ctl()
                     .and_then(|ctl| ctl.descriptor());
@@ -1244,24 +1990,14 @@ impl WalletEngine {
                     ),
                     message
                 );
-                let link = self
-                    .inner
-                    .link
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .clone();
-                if let Some(link) = link {
-                    // Detached: the fold task owes the glass its next event,
-                    // and the check waits seconds by design. Decided inside:
-                    // a report with the lane up (the notification handler's,
-                    // `:747`) is answered at the door with no log line, a
-                    // burst of dark reports runs one check, and a report that
-                    // lands mid-check queues one more pass, never none.
-                    let engine = self.clone();
-                    tokio::spawn(async move {
-                        link.recover_wallet_lane(move || engine.lane_up()).await;
-                    });
-                }
+                // Detached: the fold task owes the glass its next event, and
+                // the check waits seconds by design. Decided inside: a report
+                // with the lane up (the notification handler's, `:747`) is
+                // answered at the door with no log line, a burst of dark
+                // reports runs one check, and a report that lands mid-check
+                // queues one more pass, never none. **The glass hears the
+                // check** (PRE3-LANE, KM4): see [`Self::report_dark_lane`].
+                self.report_dark_lane();
                 self.emit_error(&message)
             }
             // Same source, same filter (ffi-leak): node text never crosses the
@@ -1308,7 +2044,7 @@ mod tests {
                 message: hostile.to_string(),
             },
         ] {
-            engine.handle_event(event).await;
+            engine.handle_event(&engine.lane(), event).await;
             let Ok(WalletEvent::Error(message)) = events.try_recv() else {
                 panic!("the error must reach the fold");
             };

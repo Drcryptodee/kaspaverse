@@ -290,15 +290,20 @@ void main() {
         tester.platformDispatcher.clearTextScaleFactorTestValue();
       });
       for (final (seconds, searching, said, token) in const [
-        (20, false, 'as of 20\u00A0s ago', '20\u00A0s'),
-        (12, false, 'connected · last update 12\u00A0s ago', '12\u00A0s'),
+        (20, false, 'as\u00A0of\u00A020\u00A0s\u00A0ago', '20\u00A0s'),
+        (
+          12,
+          false,
+          'connected · last\u00A0update\u00A012\u00A0s\u00A0ago',
+          '12\u00A0s',
+        ),
         // The longest trust sentence the plate can show: a silence hunt
         // inside the hold, which every silence swap passes through (the
         // deadline fires at 9 s, inside the lamp's 15).
         (
           12,
           true,
-          'looking for a different node… · last update 12\u00A0s ago',
+          'looking for a different node… · last\u00A0update\u00A012\u00A0s\u00A0ago',
           '12\u00A0s',
         ),
       ]) {

@@ -18,6 +18,7 @@ pub mod discovery;
 mod error;
 pub mod history_fill;
 mod kvlog;
+pub mod lane_health;
 pub mod link;
 mod link_rpc;
 pub mod node_config;
@@ -29,6 +30,7 @@ mod spend_policy;
 mod transport;
 mod transport_store;
 mod walk;
+mod wallet_lane;
 mod wallet_sync;
 
 pub use acceptance::{
@@ -38,7 +40,8 @@ pub use acceptance::{
 pub use block_list::{BlockList, BlockedContact};
 pub use contact_names::{sanitize_name, ContactNames, MAX_CONTACT_NAME};
 pub use dag_monitor::{
-    DagEvent, DagMonitor, LaneRecovery, LinkProbe, NetworkEvent, INTAKE_SETTLE_WAIT, PROBE_TIMEOUT,
+    DagEvent, DagMonitor, LaneRecovery, LinkProbe, NetworkEvent, WalletLaneHooks,
+    INTAKE_SETTLE_WAIT, PROBE_TIMEOUT,
 };
 pub use error::{ChainError, Result};
 pub use link::{sanitize_node_text, validate_node_url, EscalationOutcome, SignedTxRetention};
@@ -62,9 +65,10 @@ pub use transport_store::{
     MessageDirection, MessageRecord, RowSource, StoredKind, TransportStore, WipeReport,
 };
 pub use walk::{MessageSink, Verdict, VerdictFuture, WalkMatcher, WalkPage};
+pub use wallet_lane::{LANE_HOLD_WITHIN, LANE_STEP_WITHIN};
 pub use wallet_sync::{
     maturity_params, ActivityDirection, ActivityMaturity, MaturityParams, WalletActivityRecord,
-    WalletEngine, WalletEvent,
+    WalletEngine, WalletEvent, WalletLaneHealth, LANE_REBUILDS, LANE_REBUILD_WINDOW,
 };
 // Re-export so downstream crates (bridge) name network types, addresses and the
 // shared wRPC handle from one place.

@@ -72,7 +72,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.12.0';
 
   @override
-  int get rustContentHash => 1842560574;
+  int get rustContentHash => 635450773;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -377,6 +377,8 @@ abstract class RustLibApi extends BaseApi {
   Future<VaultStatus> crateApiVaultVaultStatusDefault();
 
   Stream<VaultStatus> crateApiVaultVaultStatusStream();
+
+  Future<WalletLaneState> crateApiWalletWalletLaneStateDefault();
 
   Future<WalletSnapshot> crateApiWalletWalletSnapshotDefault();
 
@@ -3376,7 +3378,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "vault_status_stream", argNames: ["sink"]);
 
   @override
-  Future<WalletSnapshot> crateApiWalletWalletSnapshotDefault() {
+  Future<WalletLaneState> crateApiWalletWalletLaneStateDefault() {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
@@ -3385,6 +3387,33 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             generalizedFrbRustBinding,
             serializer,
             funcId: 100,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_wallet_lane_state,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiWalletWalletLaneStateDefaultConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiWalletWalletLaneStateDefaultConstMeta =>
+      const TaskConstMeta(debugName: "wallet_lane_state_default", argNames: []);
+
+  @override
+  Future<WalletSnapshot> crateApiWalletWalletSnapshotDefault() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 101,
             port: port_,
           );
         },
@@ -3411,7 +3440,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 101,
+            funcId: 102,
             port: port_,
           );
         },
@@ -4308,11 +4337,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  WalletLaneState dco_decode_wallet_lane_state(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return WalletLaneState.values[raw as int];
+  }
+
+  @protected
   WalletSnapshot dco_decode_wallet_snapshot(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 9)
-      throw Exception('unexpected arr length: expect 9 but see ${arr.length}');
+    if (arr.length != 10)
+      throw Exception('unexpected arr length: expect 10 but see ${arr.length}');
     return WalletSnapshot(
       connected: dco_decode_bool(arr[0]),
       syncing: dco_decode_bool(arr[1]),
@@ -4323,6 +4358,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       outgoingSompi: dco_decode_opt_box_autoadd_u_64(arr[6]),
       activity: dco_decode_list_activity_record(arr[7]),
       error: dco_decode_opt_String(arr[8]),
+      lane: dco_decode_wallet_lane_state(arr[9]),
     );
   }
 
@@ -5472,6 +5508,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  WalletLaneState sse_decode_wallet_lane_state(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return WalletLaneState.values[inner];
+  }
+
+  @protected
   WalletSnapshot sse_decode_wallet_snapshot(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_connected = sse_decode_bool(deserializer);
@@ -5483,6 +5526,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_outgoingSompi = sse_decode_opt_box_autoadd_u_64(deserializer);
     var var_activity = sse_decode_list_activity_record(deserializer);
     var var_error = sse_decode_opt_String(deserializer);
+    var var_lane = sse_decode_wallet_lane_state(deserializer);
     return WalletSnapshot(
       connected: var_connected,
       syncing: var_syncing,
@@ -5493,6 +5537,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       outgoingSompi: var_outgoingSompi,
       activity: var_activity,
       error: var_error,
+      lane: var_lane,
     );
   }
 
@@ -6514,6 +6559,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_wallet_lane_state(
+    WalletLaneState self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
   void sse_encode_wallet_snapshot(
     WalletSnapshot self,
     SseSerializer serializer,
@@ -6528,6 +6582,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_opt_box_autoadd_u_64(self.outgoingSompi, serializer);
     sse_encode_list_activity_record(self.activity, serializer);
     sse_encode_opt_String(self.error, serializer);
+    sse_encode_wallet_lane_state(self.lane, serializer);
   }
 
   @protected

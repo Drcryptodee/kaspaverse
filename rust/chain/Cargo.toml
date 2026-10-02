@@ -38,6 +38,10 @@ serde_json.workspace = true
 # refusal in link::probe_endpoint (wallet-core's own handshake gate is the
 # precedent — processor.rs:504-515 at the pin). Same pin, zero new packages.
 kaspa-rpc-core.workspace = true
+# PRE3-LANE: the wallet lane's gate delivers into the processor's own
+# `ChannelConnection` through `kaspa_notify::connection::Connection::send`
+# (the trait the pin does not re-export). Same pin, zero new packages.
+kaspa-notify.workspace = true
 
 [dev-dependencies]
 # (async-trait moved to [dependencies] at R4 — the reconnect-survival fake,

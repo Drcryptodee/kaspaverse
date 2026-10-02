@@ -9,7 +9,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `apply_overrides`, `deadline`, `depth_for`, `discover_and_persist_window`, `discovery_proven`, `engine_handle`, `finish_scan`, `fold`, `latest_snapshot`, `map_activity`, `next_change_index`, `overlaid`, `persist_from_probe`, `publish`, `record_pass`, `republish_latest`, `republish_window`, `retry_discovery_if_unproven`, `run_discovery_pass`, `snapshots`, `wallet_network_id`, `wallet_signer`, `wallet_window`, `window_after_discovery`, `window_from`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Discovery`, `ScanReach`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// Probe far deeper than an automatic pass will, at the user's explicit request —
 /// the "scan for more addresses" control.
@@ -368,6 +368,25 @@ class WalletAddressDto {
           coinCount == other.coinCount;
 }
 
+/// **Is the wallet lane itself what holds the balance back?** (PRE3-LANE, KM4.)
+/// The chain layer's `WalletLaneHealth`, carried across as a plain enum. The
+/// money plate reads it beside the link's own state: a socket that ticks says
+/// nothing about a wallet processor that died behind it, which is how F1 kept
+/// a frozen balance at full brightness.
+enum WalletLaneState {
+  /// Nothing in the wallet lane holds the balance back (the link may still).
+  live,
+
+  /// The lane stopped and is being repaired; live updates are paused.
+  recovering,
+
+  /// The repair stopped trying; it waits for the next connection or a pull.
+  dark;
+
+  static Future<WalletLaneState> default_() =>
+      RustLib.instance.api.crateApiWalletWalletLaneStateDefault();
+}
+
 /// Live wallet state, streamed on every change. Balances are `Option` so the UI
 /// can tell "not synced yet" (`None` → DS-1 unknown `—`) from a real, live zero
 /// (`Some(0)` → an empty wallet shows `0.00000000`, never unknown). A plain
@@ -400,6 +419,10 @@ class WalletSnapshot {
   final List<ActivityRecord> activity;
   final String? error;
 
+  /// The wallet lane's own health (PRE3-LANE): `Live` unless the lane's
+  /// supervisor has found it dead, stalled or dark.
+  final WalletLaneState lane;
+
   const WalletSnapshot({
     required this.connected,
     required this.syncing,
@@ -410,6 +433,7 @@ class WalletSnapshot {
     this.outgoingSompi,
     required this.activity,
     this.error,
+    required this.lane,
   });
 
   static Future<WalletSnapshot> default_() =>
@@ -425,7 +449,8 @@ class WalletSnapshot {
       pendingSompi.hashCode ^
       outgoingSompi.hashCode ^
       activity.hashCode ^
-      error.hashCode;
+      error.hashCode ^
+      lane.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -440,5 +465,6 @@ class WalletSnapshot {
           pendingSompi == other.pendingSompi &&
           outgoingSompi == other.outgoingSompi &&
           activity == other.activity &&
-          error == other.error;
+          error == other.error &&
+          lane == other.lane;
 }

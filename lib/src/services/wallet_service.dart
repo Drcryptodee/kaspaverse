@@ -74,6 +74,15 @@ class WalletService {
   /// Last bridge/stream error message, null while healthy.
   final ValueNotifier<String?> error = ValueNotifier(null);
 
+  /// **The wallet lane's own health** (PRE3-LANE, KM4): whether the wallet's
+  /// processor is following the link, being repaired, or held dark. The money
+  /// plate reads it beside the link's state, because a socket that ticks says
+  /// nothing about a wallet processor that died behind it — the frozen balance
+  /// at full brightness of run 4's F1.
+  final ValueNotifier<WalletLaneState> lane = ValueNotifier(
+    WalletLaneState.live,
+  );
+
   /// Wall-clock of the last synced balance — the freshness clock (BG-8); null
   /// until the first balance.
   final ValueNotifier<DateTime?> lastUpdate = ValueNotifier(null);
@@ -288,11 +297,17 @@ class WalletService {
     outgoing.value = snapshot.outgoingSompi;
     activity.value = snapshot.activity;
     error.value = snapshot.error;
+    lane.value = snapshot.lane;
     // Bumped LAST, so a listener that reads the notifiers in its callback sees
     // the whole snapshot and never half of one.
     if (moved) coins.value++;
-    // Freshness clock: a connected snapshot bearing a real balance is fresh.
-    if (snapshot.connected && snapshot.matureSompi != null) {
+    // Freshness clock: a connected snapshot bearing a real balance, from a
+    // live lane, is fresh. A lane that is being repaired or held dark is not
+    // folding anything new, so its balance ages from its last live fold — the
+    // age the plate shows beside it (BG-8).
+    if (snapshot.connected &&
+        snapshot.matureSompi != null &&
+        snapshot.lane == WalletLaneState.live) {
       lastUpdate.value = DateTime.now();
     }
   }
@@ -315,6 +330,7 @@ class WalletService {
     outgoing.value = null;
     activity.value = const [];
     error.value = null;
+    lane.value = WalletLaneState.live;
     lastUpdate.value = null;
   }
 }

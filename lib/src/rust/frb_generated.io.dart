@@ -311,6 +311,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   WalletAddressDto dco_decode_wallet_address_dto(dynamic raw);
 
   @protected
+  WalletLaneState dco_decode_wallet_lane_state(dynamic raw);
+
+  @protected
   WalletSnapshot dco_decode_wallet_snapshot(dynamic raw);
 
   @protected
@@ -663,6 +666,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   WalletAddressDto sse_decode_wallet_address_dto(SseDeserializer deserializer);
+
+  @protected
+  WalletLaneState sse_decode_wallet_lane_state(SseDeserializer deserializer);
 
   @protected
   WalletSnapshot sse_decode_wallet_snapshot(SseDeserializer deserializer);
@@ -1111,6 +1117,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_wallet_address_dto(
     WalletAddressDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_wallet_lane_state(
+    WalletLaneState self,
     SseSerializer serializer,
   );
 

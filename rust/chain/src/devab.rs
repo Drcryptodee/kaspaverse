@@ -99,6 +99,12 @@ pub struct DevFlags {
     pub nagle_on: bool,
     /// `frames=1`: per-block parents statistics (under `ba=1`), every 10 s.
     pub frames: bool,
+    /// `lanefault=1` (PRE3-LANE): at the wallet lane's next close, replay the
+    /// ordering before PRE3-LANE — the close straight through, no sever, no
+    /// drain, one `UtxosChanged` after it — so the pinned processor dies at its
+    /// own line and the supervisor must rebuild the lane on glass. Once per
+    /// process, read when the wallet engine starts.
+    pub lane_fault: bool,
 }
 
 impl DevFlags {
@@ -117,6 +123,7 @@ impl DevFlags {
                 ("ba", "1") => f.block_added_on = true,
                 ("nagle", "1") => f.nagle_on = true,
                 ("frames", "1") => f.frames = true,
+                ("lanefault", "1") => f.lane_fault = true,
                 ("cell", cell) => f.cell = sanitize_cell(cell),
                 _ => {}
             }
@@ -147,12 +154,13 @@ impl DevFlags {
     /// The log form — every key, so a capture line states the whole arm.
     pub fn line(&self) -> String {
         format!(
-            "on={} probe={} ba={} nagle={} frames={} cell={}",
+            "on={} probe={} ba={} nagle={} frames={} lanefault={} cell={}",
             u8::from(self.on),
             u8::from(self.probe),
             u8::from(self.block_added_on),
             u8::from(self.nagle_on),
             u8::from(self.frames),
+            u8::from(self.lane_fault),
             self.cell_or_dash(),
         )
     }
@@ -586,6 +594,25 @@ pub(crate) fn read_armed(path: &Path) -> DevFlags {
     }
 }
 
+/// **Is the wallet lane's fault arm set?** (`lanefault=1`, PRE3-LANE.) The
+/// flags file beside the wallet's activity log — the same file, in the same
+/// `wallet/` dir, the monitor reads beside `endpoint.cache` — read through
+/// [`read_armed`], so outside the dev install the answer is always no. True at
+/// most once per process: the arm stages one death, and the lane the
+/// supervisor rebuilds must not inherit it.
+pub(crate) fn lane_fault_armed(store_path: &Path) -> bool {
+    static SPENT: AtomicBool = AtomicBool::new(false);
+    let flags = read_armed(&store_path.with_file_name(FLAGS_FILE));
+    if !(flags.on && flags.lane_fault) || SPENT.swap(true, Ordering::SeqCst) {
+        return false;
+    }
+    log::warn!(
+        "devab: flags {} — the wallet lane's fault arm is set",
+        flags.line()
+    );
+    true
+}
+
 /// Is `path` inside the dev install's own data dir? A path component, never a
 /// substring, so no other package's name can pass for it.
 pub(crate) fn is_dev_install(path: &Path) -> bool {
@@ -871,8 +898,62 @@ mod tests {
         assert_eq!(long.cell.len(), 32);
         assert_eq!(
             DevFlags::default().line(),
-            "on=0 probe=0 ba=0 nagle=0 frames=0 cell=-"
+            "on=0 probe=0 ba=0 nagle=0 frames=0 lanefault=0 cell=-"
         );
+    }
+
+    /// **The wallet lane's fault arm is fenced like every other** (PRE3-LANE,
+    /// D-340): only `lanefault=1` under `on=1`, only in the dev install's
+    /// `wallet/` dir, and at most once per process.
+    #[test]
+    fn the_lane_fault_arm_is_fenced_and_fires_once() {
+        assert!(
+            DevFlags::parse(
+                "on=1
+lanefault=1"
+            )
+            .lane_fault
+        );
+        assert!(
+            !DevFlags::parse("lanefault=1").lane_fault,
+            "on=1 is the master switch"
+        );
+        assert!(
+            !DevFlags::parse(
+                "on=1
+lanefault=yes"
+            )
+            .lane_fault
+        );
+
+        let base = std::env::temp_dir().join(format!("kv-lanefault-{}", std::process::id()));
+        // The real wallet's dir: the file says arm, the fence says no.
+        let wallet = base.join("org.kaspaverse.app").join("files").join("wallet");
+        std::fs::create_dir_all(&wallet).unwrap();
+        std::fs::write(
+            wallet.join(FLAGS_FILE),
+            "on=1
+lanefault=1
+",
+        )
+        .unwrap();
+        assert!(!lane_fault_armed(&wallet.join("activity.kvlog")));
+        // The dev install's dir: armed, once.
+        let dev = base.join(DEV_PACKAGE).join("files").join("wallet");
+        std::fs::create_dir_all(&dev).unwrap();
+        std::fs::write(
+            dev.join(FLAGS_FILE),
+            "on=1
+lanefault=1
+",
+        )
+        .unwrap();
+        assert!(lane_fault_armed(&dev.join("activity.kvlog")));
+        assert!(
+            !lane_fault_armed(&dev.join("activity.kvlog")),
+            "a rebuilt lane must not inherit the arm"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     fn h(n: u8) -> RpcHash {

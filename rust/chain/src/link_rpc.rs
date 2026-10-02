@@ -252,61 +252,73 @@ macro_rules! link_rpc_delegate {
     };
 }
 
-link_rpc_delegate! {
-    ping_call(PingRequest) -> PingResponse;
-    get_system_info_call(GetSystemInfoRequest) -> GetSystemInfoResponse;
-    get_connections_call(GetConnectionsRequest) -> GetConnectionsResponse;
-    get_metrics_call(GetMetricsRequest) -> GetMetricsResponse;
-    get_server_info_call(GetServerInfoRequest) -> GetServerInfoResponse;
-    get_sync_status_call(GetSyncStatusRequest) -> GetSyncStatusResponse;
-    get_current_network_call(GetCurrentNetworkRequest) -> GetCurrentNetworkResponse;
-    submit_block_call(SubmitBlockRequest) -> SubmitBlockResponse;
-    get_block_template_call(GetBlockTemplateRequest) -> GetBlockTemplateResponse;
-    get_peer_addresses_call(GetPeerAddressesRequest) -> GetPeerAddressesResponse;
-    get_sink_call(GetSinkRequest) -> GetSinkResponse;
-    get_mempool_entry_call(GetMempoolEntryRequest) -> GetMempoolEntryResponse;
-    get_mempool_entries_call(GetMempoolEntriesRequest) -> GetMempoolEntriesResponse;
-    get_connected_peer_info_call(GetConnectedPeerInfoRequest) -> GetConnectedPeerInfoResponse;
-    add_peer_call(AddPeerRequest) -> AddPeerResponse;
-    submit_transaction_call(SubmitTransactionRequest) -> SubmitTransactionResponse;
-    submit_transaction_replacement_call(SubmitTransactionReplacementRequest)
-        -> SubmitTransactionReplacementResponse;
-    get_block_call(GetBlockRequest) -> GetBlockResponse;
-    get_seq_commit_lane_proof_call(GetSeqCommitLaneProofRequest) -> GetSeqCommitLaneProofResponse;
-    get_subnetwork_call(GetSubnetworkRequest) -> GetSubnetworkResponse;
-    get_virtual_chain_from_block_call(GetVirtualChainFromBlockRequest)
-        -> GetVirtualChainFromBlockResponse;
-    get_virtual_chain_from_block_v2_call(GetVirtualChainFromBlockV2Request)
-        -> GetVirtualChainFromBlockV2Response;
-    get_blocks_call(GetBlocksRequest) -> GetBlocksResponse;
-    get_block_count_call(GetBlockCountRequest) -> GetBlockCountResponse;
-    get_block_dag_info_call(GetBlockDagInfoRequest) -> GetBlockDagInfoResponse;
-    resolve_finality_conflict_call(ResolveFinalityConflictRequest)
-        -> ResolveFinalityConflictResponse;
-    shutdown_call(ShutdownRequest) -> ShutdownResponse;
-    get_headers_call(GetHeadersRequest) -> GetHeadersResponse;
-    get_balance_by_address_call(GetBalanceByAddressRequest) -> GetBalanceByAddressResponse;
-    get_balances_by_addresses_call(GetBalancesByAddressesRequest)
-        -> GetBalancesByAddressesResponse;
-    get_utxos_by_addresses_call(GetUtxosByAddressesRequest) -> GetUtxosByAddressesResponse;
-    get_sink_blue_score_call(GetSinkBlueScoreRequest) -> GetSinkBlueScoreResponse;
-    ban_call(BanRequest) -> BanResponse;
-    unban_call(UnbanRequest) -> UnbanResponse;
-    get_info_call(GetInfoRequest) -> GetInfoResponse;
-    estimate_network_hashes_per_second_call(EstimateNetworkHashesPerSecondRequest)
-        -> EstimateNetworkHashesPerSecondResponse;
-    get_mempool_entries_by_addresses_call(GetMempoolEntriesByAddressesRequest)
-        -> GetMempoolEntriesByAddressesResponse;
-    get_coin_supply_call(GetCoinSupplyRequest) -> GetCoinSupplyResponse;
-    get_daa_score_timestamp_estimate_call(GetDaaScoreTimestampEstimateRequest)
-        -> GetDaaScoreTimestampEstimateResponse;
-    get_utxo_return_address_call(GetUtxoReturnAddressRequest) -> GetUtxoReturnAddressResponse;
-    get_fee_estimate_call(GetFeeEstimateRequest) -> GetFeeEstimateResponse;
-    get_fee_estimate_experimental_call(GetFeeEstimateExperimentalRequest)
-        -> GetFeeEstimateExperimentalResponse;
-    get_current_block_color_call(GetCurrentBlockColorRequest) -> GetCurrentBlockColorResponse;
-    get_block_reward_info_call(GetBlockRewardInfoRequest) -> GetBlockRewardInfoResponse;
+/// **The pin's `RpcApi` call surface, written once** (PRE3-LANE). Each line is
+/// one `_call` method with its request and response types; a delegate macro is
+/// handed the whole list. Two handles use it — the link's [`LinkRpc`] and the
+/// wallet lane's `LaneRpc` (`wallet_lane.rs`) — so a pin bump that adds,
+/// removes or re-types a call breaks both at compile time from this one table.
+macro_rules! rpc_call_table {
+    ($delegate:ident) => {
+        $delegate! {
+            ping_call(PingRequest) -> PingResponse;
+            get_system_info_call(GetSystemInfoRequest) -> GetSystemInfoResponse;
+            get_connections_call(GetConnectionsRequest) -> GetConnectionsResponse;
+            get_metrics_call(GetMetricsRequest) -> GetMetricsResponse;
+            get_server_info_call(GetServerInfoRequest) -> GetServerInfoResponse;
+            get_sync_status_call(GetSyncStatusRequest) -> GetSyncStatusResponse;
+            get_current_network_call(GetCurrentNetworkRequest) -> GetCurrentNetworkResponse;
+            submit_block_call(SubmitBlockRequest) -> SubmitBlockResponse;
+            get_block_template_call(GetBlockTemplateRequest) -> GetBlockTemplateResponse;
+            get_peer_addresses_call(GetPeerAddressesRequest) -> GetPeerAddressesResponse;
+            get_sink_call(GetSinkRequest) -> GetSinkResponse;
+            get_mempool_entry_call(GetMempoolEntryRequest) -> GetMempoolEntryResponse;
+            get_mempool_entries_call(GetMempoolEntriesRequest) -> GetMempoolEntriesResponse;
+            get_connected_peer_info_call(GetConnectedPeerInfoRequest) -> GetConnectedPeerInfoResponse;
+            add_peer_call(AddPeerRequest) -> AddPeerResponse;
+            submit_transaction_call(SubmitTransactionRequest) -> SubmitTransactionResponse;
+            submit_transaction_replacement_call(SubmitTransactionReplacementRequest)
+                -> SubmitTransactionReplacementResponse;
+            get_block_call(GetBlockRequest) -> GetBlockResponse;
+            get_seq_commit_lane_proof_call(GetSeqCommitLaneProofRequest) -> GetSeqCommitLaneProofResponse;
+            get_subnetwork_call(GetSubnetworkRequest) -> GetSubnetworkResponse;
+            get_virtual_chain_from_block_call(GetVirtualChainFromBlockRequest)
+                -> GetVirtualChainFromBlockResponse;
+            get_virtual_chain_from_block_v2_call(GetVirtualChainFromBlockV2Request)
+                -> GetVirtualChainFromBlockV2Response;
+            get_blocks_call(GetBlocksRequest) -> GetBlocksResponse;
+            get_block_count_call(GetBlockCountRequest) -> GetBlockCountResponse;
+            get_block_dag_info_call(GetBlockDagInfoRequest) -> GetBlockDagInfoResponse;
+            resolve_finality_conflict_call(ResolveFinalityConflictRequest)
+                -> ResolveFinalityConflictResponse;
+            shutdown_call(ShutdownRequest) -> ShutdownResponse;
+            get_headers_call(GetHeadersRequest) -> GetHeadersResponse;
+            get_balance_by_address_call(GetBalanceByAddressRequest) -> GetBalanceByAddressResponse;
+            get_balances_by_addresses_call(GetBalancesByAddressesRequest)
+                -> GetBalancesByAddressesResponse;
+            get_utxos_by_addresses_call(GetUtxosByAddressesRequest) -> GetUtxosByAddressesResponse;
+            get_sink_blue_score_call(GetSinkBlueScoreRequest) -> GetSinkBlueScoreResponse;
+            ban_call(BanRequest) -> BanResponse;
+            unban_call(UnbanRequest) -> UnbanResponse;
+            get_info_call(GetInfoRequest) -> GetInfoResponse;
+            estimate_network_hashes_per_second_call(EstimateNetworkHashesPerSecondRequest)
+                -> EstimateNetworkHashesPerSecondResponse;
+            get_mempool_entries_by_addresses_call(GetMempoolEntriesByAddressesRequest)
+                -> GetMempoolEntriesByAddressesResponse;
+            get_coin_supply_call(GetCoinSupplyRequest) -> GetCoinSupplyResponse;
+            get_daa_score_timestamp_estimate_call(GetDaaScoreTimestampEstimateRequest)
+                -> GetDaaScoreTimestampEstimateResponse;
+            get_utxo_return_address_call(GetUtxoReturnAddressRequest) -> GetUtxoReturnAddressResponse;
+            get_fee_estimate_call(GetFeeEstimateRequest) -> GetFeeEstimateResponse;
+            get_fee_estimate_experimental_call(GetFeeEstimateExperimentalRequest)
+                -> GetFeeEstimateExperimentalResponse;
+            get_current_block_color_call(GetCurrentBlockColorRequest) -> GetCurrentBlockColorResponse;
+            get_block_reward_info_call(GetBlockRewardInfoRequest) -> GetBlockRewardInfoResponse;
+        }
+    };
 }
+pub(crate) use rpc_call_table;
+
+rpc_call_table!(link_rpc_delegate);
 
 #[cfg(test)]
 mod tests {

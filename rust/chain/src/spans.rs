@@ -18,6 +18,10 @@
 //! - `resume_start`                     → resume→resynced span (pairs with
 //!   the next `wallet_balance`)
 //! - `wallet_balance`                   → a real sync completed
+//! - `submit_start(txid)`               → a submit RPC began (pairs with
+//!   `submit_ok` or `submit_err`: the submit's round trip, which bounds the
+//!   wallet lane's `LANE_HOLD_WITHIN`, PRE3-LANE)
+//! - `submit_err(txid)`                 → the submit RPC failed
 //! - `submit_ok(txid)`                  → node acked the submit RPC
 //! - `accepted(txid)`                   → VCC reported acceptance
 //! - `open_gap_min`                     → gap-age at open (value in txid slot)

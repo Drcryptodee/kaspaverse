@@ -114,11 +114,14 @@ class HomeScreen extends StatefulWidget {
   /// **untappable**: a row that swallowed a tap would teach distrust of every
   /// other control on the screen (BG-12).
   ///
-  /// Like [sendRoute] it is handed **this screen's own `_dimmed` bit** rather
-  /// than deriving one of its own. The detail plots a burial depth against the
-  /// live DAA, so it owes BG-8's live/stale exactly as this screen does, and
-  /// two independent foldings of the link state are how a screen and the screen
-  /// behind it start disagreeing about whether the wallet is connected.
+  /// Like [sendRoute] it is handed **one of this screen's own bits** rather
+  /// than deriving one of its own: two independent foldings of the link state
+  /// are how a screen and the screen behind it start disagreeing about whether
+  /// the wallet is connected. **The link's data bit, not the plate's**
+  /// (PRE3-LANE, `ux-auditor`): the detail plots a burial depth from the
+  /// link's live DAA and a record already known, so a wallet lane being
+  /// repaired changes nothing it shows — and its stopped gauge says *"the link
+  /// is not live"*, which over a live link would be false.
   final Widget Function(
     BuildContext context,
     String txid,
@@ -238,6 +241,8 @@ class WalletScope {
     required this.maturity,
     this.outgoing,
     this.discoveryIncomplete,
+    this.lane,
+    this.lastUpdate,
     this.onRefreshActivity,
   });
 
@@ -271,6 +276,18 @@ class WalletScope {
   /// reason — without it the plate paints a confidently wrong number, which this
   /// project treats as worse than a visible unknown.
   final ValueListenable<bool>? discoveryIncomplete;
+
+  /// **The wallet lane's own health** (PRE3-LANE, KM4). The link can tick
+  /// while the wallet's processor behind it has died — run 4's F1 kept a
+  /// frozen balance at full brightness that way — so the plate reads this
+  /// beside the link and dims the balance on either. Optional like the C7
+  /// link truths: absent reads as `live`, the behaviour before PRE3-LANE.
+  final ValueListenable<WalletLaneState>? lane;
+
+  /// When the wallet last folded a live balance. The age a dimmed balance owes
+  /// (BG-8) when it is the WALLET lane, not the link, that stopped: the link's
+  /// own clock is fresh then, and would say nothing.
+  final ValueListenable<DateTime?>? lastUpdate;
 
   /// Swipe-to-refresh heal (founder request, V2 sitting): pulls the latest
   /// folded snapshot directly, bypassing the stream. `null` ⇒ no refresh UI.
@@ -334,6 +351,12 @@ class _HomeScreenState extends State<HomeScreen> {
   late final KvDerived<_LinkView> _link;
   late final KvDerived<bool> _dimmed;
 
+  /// The LINK's data bit alone — for the readings the link computes (the DAA
+  /// counter, a burial depth), which a wallet lane being repaired does not
+  /// touch. [_dimmed] adds the lane, for what the lane folds (the balance,
+  /// the ledger's list).
+  late final KvDerived<bool> _linkDimmed;
+
   /// The lamp's own bit — the chip and the short bar's live dot (LINK-Q1).
   /// Deliberately NOT [_dimmed]: that is the data's clock, and since D-331(b)
   /// the lamp holds live longer than the data stays fresh.
@@ -386,9 +409,17 @@ class _HomeScreenState extends State<HomeScreen> {
     // link can read *finding a node…* or *phone offline* instead of stale, and
     // last-known data must never sit at full brightness through any of them.
     // It reads the DATA's clock — the lamp's longer hold never reaches it.
-    _dimmed = KvDerived([
+    //
+    // **And the wallet lane's own state** (PRE3-LANE, KM4): a lane being
+    // repaired or held dark is not folding deposits, whatever the link's clock
+    // says — that clock is exactly what kept F1's frozen balance bright.
+    _linkDimmed = KvDerived([
       _link,
     ], () => _link.value.dataState != BeaconState.connected);
+    _dimmed = KvDerived([
+      _linkDimmed,
+      if (widget.wallet.lane != null) widget.wallet.lane!,
+    ], () => _linkDimmed.value || _laneDown());
     _lampLive = KvDerived([
       _link,
     ], () => _link.value.state == BeaconState.connected);
@@ -398,6 +429,11 @@ class _HomeScreenState extends State<HomeScreen> {
       widget.wallet.utxoIndexMissing,
       if (widget.wallet.discoveryIncomplete != null)
         widget.wallet.discoveryIncomplete!,
+      if (widget.wallet.lane != null) widget.wallet.lane!,
+      if (widget.wallet.lastUpdate != null) widget.wallet.lastUpdate!,
+      // The wallet's age advances by the clock while its lane is down; the
+      // derived value swallows the ticks that change nothing.
+      _now,
     ], _computeTrust);
     _balance = KvDerived(
       [
@@ -422,6 +458,9 @@ class _HomeScreenState extends State<HomeScreen> {
       widget.wallet.activity,
       widget.chain.virtualDaaScore,
       _dimmed,
+      // The rows' depths read the link's bit; under a lane already down,
+      // `_dimmed` never notifies when the link changes.
+      _linkDimmed,
       _now,
     ]);
     // Re-evaluate freshness every second so the stale state and "as of N ago"
@@ -477,6 +516,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _trust.dispose();
     _lampLive.dispose();
     _dimmed.dispose();
+    _linkDimmed.dispose();
     _link.dispose();
     _now.dispose();
     super.dispose();
@@ -485,6 +525,25 @@ class _HomeScreenState extends State<HomeScreen> {
   Duration? _age() {
     final last = widget.chain.lastUpdate.value;
     return last == null ? null : _now.value.difference(last);
+  }
+
+  WalletLaneState _lane() => widget.wallet.lane?.value ?? WalletLaneState.live;
+
+  bool _laneDown() => _lane() != WalletLaneState.live;
+
+  /// `N ago`, bound whole: the number, its unit and the word never part.
+  static String _ago(Duration age) => '${formatAge(age)}\u00A0ago';
+
+  /// `last update N ago`, bound whole (one clause, one rule — BG-21).
+  static String _lastUpdate(Duration age) =>
+      'last\u00A0update\u00A0${_ago(age)}';
+
+  /// How old the wallet's last live balance is, floored to the second.
+  Duration? _walletAge() {
+    final last = widget.wallet.lastUpdate?.value;
+    return last == null
+        ? null
+        : Duration(seconds: _now.value.difference(last).inSeconds);
   }
 
   /// Time since the link died — the churn hold's clock (null ⇒ up/never up).
@@ -568,6 +627,17 @@ class _HomeScreenState extends State<HomeScreen> {
   _TrustView _computeTrust() {
     final link = _link.value;
     final syncing = widget.wallet.syncing.value;
+    // **The balance is as old as the older of its two clocks** (`ux-auditor`,
+    // PRE3-LANE): the link's — how long since the node was heard — and, while
+    // the wallet lane is down, the lane's own — how long since it last folded a
+    // live balance. The link keeps the words; the older clock gives the age, so
+    // a lane dark for ten minutes never reads "20 s ago" when the network drops.
+    final walletAge = _laneDown() ? _walletAge() : null;
+    Duration? olderAge(Duration? linkAge) => linkAge == null
+        ? walletAge
+        : walletAge == null || linkAge >= walletAge
+        ? linkAge
+        : walletAge;
     final link_ = switch (link.state) {
       BeaconState.error => link.error ?? 'connection error',
       // The phone's own network, stated plainly — nothing for the user to
@@ -575,9 +645,9 @@ class _HomeScreenState extends State<HomeScreen> {
       BeaconState.offline => 'phone offline — no network',
       BeaconState.connecting => 'finding a node…',
       BeaconState.stale =>
-        link.age == null
+        olderAge(link.age) == null
             ? 'no recent update'
-            : 'as of ${formatAge(link.age!)} ago',
+            : 'as\u00A0of\u00A0${_ago(olderAge(link.age)!)}',
       // Silence is the healthy state. A live link says nothing at all — with
       // one exception since P0b: `searching` may now be true WHILE the socket
       // is up (the find-then-swap hunt), and a swap the user asked for should
@@ -595,12 +665,22 @@ class _HomeScreenState extends State<HomeScreen> {
       // for a different node…"* over a wallet that had NO node: on every 2 s
       // Wi-Fi blip, and on every PINNED redial — a wallet that by definition
       // will never look for a different one.
-      BeaconState.connected =>
-        syncing
-            ? 'syncing…'
-            : (link.hunting && link.live
-                  ? 'looking for a different node…'
-                  : null),
+      //
+      // **The wallet lane, when the link is fine and it is not** (PRE3-LANE,
+      // KM4): the link outranks it everywhere else, because a lane that cannot
+      // reach a node is the link's consequence; over a live link it is the one
+      // fact the plate has to say. One fact a sentence (COPY-1): what is
+      // happening, and — when the app has stopped trying — the user's lever.
+      BeaconState.connected => switch (_lane()) {
+        WalletLaneState.recovering => 'restarting wallet updates…',
+        WalletLaneState.dark => 'wallet updates paused — pull to retry',
+        WalletLaneState.live =>
+          syncing
+              ? 'syncing…'
+              : (link.hunting && link.live
+                    ? 'looking for a different node…'
+                    : null),
+      },
     };
     // What is wrong with the NUMBER, as distinct from what is wrong with the
     // LINK. Most consequential first: a balance that may be short outranks a
@@ -646,13 +726,24 @@ class _HomeScreenState extends State<HomeScreen> {
     // (the P0.3 scar).
     final dataAge = link.dataAge;
     final linkWord = link_ ?? (link.live ? 'connected' : null);
-    final linkSaid = dataAge != null
+    // A lane down over a live link owes the WALLET's age (BG-8): the link's
+    // clock is fresh, and the balance is as old as its last live fold.
+    final laneDown = link.state == BeaconState.connected && _laneDown();
+    // One clause, one typesetting rule (BG-21): `last update N ago` is bound
+    // whole in every arm, so the plate's longest sentence never breaks inside
+    // it (at 393 dp it broke inside `last update`, `ux-auditor`).
+    final laneAge = laneDown ? olderAge(dataAge) : null;
+    final linkSaid = laneDown
+        ? (laneAge == null ? link_ : '$link_ · ${_lastUpdate(laneAge)}')
+        : dataAge != null
         ? (linkWord == null
-              ? 'last update ${formatAge(dataAge)} ago'
-              : '$linkWord · last update ${formatAge(dataAge)} ago')
-        : link_ == null || age == null || link.state == BeaconState.stale
+              ? _lastUpdate(olderAge(dataAge)!)
+              : '$linkWord · ${_lastUpdate(olderAge(dataAge)!)}')
+        : link_ == null ||
+              olderAge(age) == null ||
+              link.state == BeaconState.stale
         ? link_
-        : '$link_ · last update ${formatAge(age)} ago';
+        : '$link_ · ${_lastUpdate(olderAge(age)!)}';
     // **One indicator, however many facts it has.** These used to be two
     // stacked amber lamps on one plate, which is BG-2's cap spent on saying
     // "something is amber" twice and D-192's redundancy in miniature. The lamp
@@ -672,17 +763,23 @@ class _HomeScreenState extends State<HomeScreen> {
     // short keeps the amber lamp, because that is the more consequential fact,
     // and this arm must never launder it; a first scan is amber too.
     final linkOnly =
-        number == null && !syncing && link.state == BeaconState.connected;
+        number == null &&
+        !syncing &&
+        !laneDown &&
+        link.state == BeaconState.connected;
     return (
       words: said.isEmpty ? null : said.join('\n'),
       // **Motion means something is happening.** A hunt and a first scan are
       // both happening; a dead or stale link is not, and the meter freezing is
       // exactly what makes "live" a felt thing rather than a claimed one.
+      // A lane being rebuilt is work; one held dark is not — its loader
+      // stops, and the sentence says what restarts it.
       running:
           link.hunting ||
           link.state == BeaconState.connecting ||
           link.state == BeaconState.offline ||
-          syncing,
+          syncing ||
+          (laneDown && _lane() == WalletLaneState.recovering),
       // **The phone offline is a wait, not work** (LINK-Q4, the founder): the
       // loader turns grey and keeps moving, listening for the network.
       waiting: link.state == BeaconState.offline,
@@ -857,7 +954,10 @@ class _HomeScreenState extends State<HomeScreen> {
                   ? null
                   : _ChainClock(
                       daa: widget.chain.virtualDaaScore,
-                      dimmed: _dimmed,
+                      // The link's DAA, on the link's clock: a lane being
+                      // repaired must not change how the link's own counter
+                      // moves (`ux-auditor`, PRE3-LANE).
+                      dimmed: _linkDimmed,
                     ),
               indicator: _indicator(),
             ),
@@ -936,6 +1036,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 now: _now.value,
                 virtualDaaScore: widget.chain.virtualDaaScore.value,
                 stale: _dimmed.value,
+                depthStale: _linkDimmed.value,
                 gutter: gutter,
                 selected: metrics.isTwoPane ? _selected : null,
                 foot: foot,
@@ -1059,7 +1160,7 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
       );
     }
-    return route(context, txid, _dimmed);
+    return route(context, txid, _linkDimmed);
   }
 
   /// Opens one row: **the detail column in `expanded`+, a pushed route below
@@ -1074,7 +1175,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (route == null) return;
     Navigator.of(
       context,
-    ).push(KvPageRoute<void>(builder: (c) => route(c, txid, _dimmed)));
+    ).push(KvPageRoute<void>(builder: (c) => route(c, txid, _linkDimmed)));
   }
 
   /// The plate is pinned INSIDE the scroll view rather than sitting above it,
@@ -1493,6 +1594,7 @@ class _Ledger extends StatefulWidget {
     required this.maturity,
     this.virtualDaaScore,
     this.stale = false,
+    this.depthStale = false,
     this.selected,
     this.onOpen,
     this.onRefresh,
@@ -1516,9 +1618,18 @@ class _Ledger extends StatefulWidget {
 
   final ScrollController controller;
 
-  /// BG-8: a stale link must not stream a frozen counter at full presence —
-  /// counters fall back to their static words until the link is live again.
+  /// BG-8: the list as the wallet lane folded it — a lane being repaired, or a
+  /// link that is not live, mutes the rows' amounts and ages, because the list
+  /// may be missing what arrived since.
   final bool stale;
+
+  /// The LINK's bit, for the rows' depths alone: a depth is the link's DAA
+  /// minus a known record's score, so it counts while the link is live and
+  /// falls back to its static words only when the link is not (BG-8). A lane
+  /// being repaired changes no depth — and the detail beside the row, which
+  /// reads the same bit, must never show the same record's depth differently
+  /// (`ux-auditor`, PRE3-LANE).
+  final bool depthStale;
 
   /// Live DAA — the streaming counter for both directions is a DAA-distance.
   final BigInt? virtualDaaScore;
@@ -1778,7 +1889,7 @@ class _LedgerState extends State<_Ledger> {
               confirmations: KvBurial.depthOf(
                 record,
                 widget.virtualDaaScore,
-                stale: widget.stale,
+                stale: widget.depthStale,
               ),
               onOpen: widget.onOpen,
             ),

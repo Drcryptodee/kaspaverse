@@ -50,6 +50,13 @@ kaspa-txscript = { version = "2.1.0", git = "https://github.com/kaspanet/rusty-k
 # pin, already resolved in the lock via kaspa-wrpc-client — a direct line on
 # an existing transitive adds zero new code (the D-028 §0.2 pattern).
 kaspa-rpc-core = { version = "2.1.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "01b532e8b553523216471682649693af92f0fd16" }
+# Notification plumbing (PRE3-LANE): the `Connection` trait, whose `send` is
+# the only way to deliver into a `ChannelConnection` — the wallet lane's gate
+# forwards to the processor's own connection through it. The pin's rpc-core
+# and wrpc-client re-export `ChannelConnection` but not the trait. Same pin,
+# already resolved in the lock via kaspa-wrpc-client — a direct line on an
+# existing transitive adds zero new code (the D-028 §0.2 pattern).
+kaspa-notify = { version = "2.1.0", git = "https://github.com/kaspanet/rusty-kaspa.git", rev = "01b532e8b553523216471682649693af92f0fd16" }
 # Vault crypto (P1 §0.2 Path B). Same crates the pinned tree's own storage
 # AEAD uses; the wallet crates above bring them in regardless. Containment
 # caveat (P1.1 audit, D-031): "in the pinned tree" holds at crate-name level —

@@ -188,6 +188,84 @@ async fn soft_rescan_reasks_the_node_without_touching_the_connection() {
     let _ = std::fs::remove_file(&store);
 }
 
+/// **KM5 (PRE3-LANE; run 3's F15): a pull repairs a deaf lane on the NODE.**
+///
+/// The deaf lane, as it really happens: a reconnect whose D-083 re-arm the
+/// node refused. The new listener holds no `UtxosChanged` subscription, and
+/// the pin's context-level register filters every address it already knows
+/// (`context.rs:704-727` @ `01b532e`), so a pull that only re-scans fixes the
+/// number and leaves the lane deaf — the "I just have to refresh" symptom that
+/// hid D-083. The pull must put the subscription back where it matters: on
+/// the node. Asserted through the pin's own `Notifier` (`consensus-auditor`,
+/// CONCERNS-3: a call at the `RpcApi` seam proves nothing about the node).
+///
+/// And its limit, pinned: a pull on a lane that already holds the
+/// subscription sends the node nothing — the pin answers an `Add` that
+/// changes nothing with no mutation. A node that silently dropped a
+/// subscription it is still believed to hold is a new socket's work.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pull_restores_a_lost_subscription_on_the_node() {
+    let network_id = NetworkId::new(NetworkType::Mainnet);
+    let fake = FakeRpc::new(network_id);
+    let ctl = RpcCtl::new();
+    let store = tmp("pull-rearm.kvlog");
+    let _ = std::fs::remove_file(&store);
+
+    let engine =
+        WalletEngine::new(fake.rpc(ctl.clone()), network_id, store.clone()).expect("engine");
+    let mut events = engine.subscribe();
+    let (receive, change) = test_addresses();
+    let window = |addrs: &Vec<Address>| addrs.contains(&receive) && addrs.contains(&change);
+    engine
+        .start(vec![receive.clone(), change.clone()], vec![change.clone()])
+        .await
+        .expect("engine start");
+    ctl.signal_open().await.expect("signal open");
+    fake.wait_node(
+        "the first socket's subscription on the node",
+        WAIT,
+        |subs| subs.iter().any(window),
+    )
+    .await;
+
+    // The next socket: its re-arm is refused, so its listener is deaf.
+    ctl.signal_close().await.expect("signal close");
+    await_event(&mut events, "disconnect", |e| {
+        matches!(e, WalletEvent::Disconnected)
+    })
+    .await;
+    fake.refuse_utxos_changed_subscribes(1);
+    fake.begin_epoch();
+    ctl.signal_open().await.expect("signal reopen");
+    fake.wait_until("the second socket's scan", WAIT, |f| f.utxo_scans(2) >= 1)
+        .await;
+    let on_the_node = fake.node_utxos_changed_subscribes().len();
+
+    engine.rescan().await.expect("the pull");
+    fake.wait_node("the pull's subscription on the node", WAIT, |subs| {
+        subs.len() > on_the_node && subs.last().is_some_and(window)
+    })
+    .await;
+    assert!(
+        fake.utxo_scans(2) >= 2,
+        "and the pull still re-asked the node"
+    );
+
+    // The limit: the lane holds its subscription now, and a second pull
+    // sends the node nothing new.
+    let held = fake.node_utxos_changed_subscribes().len();
+    engine.rescan().await.expect("a second pull");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        fake.node_utxos_changed_subscribes().len(),
+        held,
+        "the pin's notifier answers an Add that changes nothing with no mutation"
+    );
+
+    engine.stop().await.expect("engine stop");
+    let _ = std::fs::remove_file(&store);
+}
+
 /// The acceptance-spine guard: on every `DagEvent::Connected` the tracker
 /// must re-run its VCC catch-up walk (the monitor re-registered the scope;
 /// the tracker recovers the gap). A tracker that only catches up at boot

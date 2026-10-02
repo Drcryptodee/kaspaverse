@@ -220,6 +220,10 @@ impl PreparedSend {
                     submitted_txids,
                 };
             }
+            // Its pair is `submit_ok` below: together they time the submit's
+            // round trip, the hold that bounds `LANE_HOLD_WITHIN` (PRE3-LANE;
+            // until now only probes stood in for it). Public txid only, INV-3.
+            crate::spans::mark_with("submit_start", &pt.id().to_string());
             match pt.try_submit(self.rpc.rpc_api()).await {
                 Ok(txid) => {
                     submitted += 1;
@@ -311,6 +315,10 @@ impl PreparedSend {
                     }
                 }
                 Err(e) => {
+                    // The other end of `submit_start`: a submit that failed
+                    // still held the lock until here, so the soak counts its
+                    // round trip too, apart from one never answered.
+                    crate::spans::mark_with("submit_err", &pt.id().to_string());
                     return SendOutcome {
                         final_txid,
                         submitted,

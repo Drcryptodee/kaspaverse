@@ -292,7 +292,7 @@ void main() {
           .widget<Text>(find.textContaining('finding a node…'))
           .data!;
       expect(said, startsWith('finding a node…'));
-      expect(said, contains('last update 20\u00A0s ago'));
+      expect(said, contains('last\u00A0update\u00A020\u00A0s\u00A0ago'));
       // Motion means something is happening, and a hunt IS something
       // happening — the meter is the tell that separates searching from dead.
       expect(tester.widget<KvLoader>(find.byType(KvLoader)).running, isTrue);
@@ -390,7 +390,7 @@ void main() {
       now = now.add(const Duration(seconds: 1));
       await tester.pump(const Duration(seconds: 1));
 
-      expect(find.text('as of 21\u00A0s ago'), findsOneWidget);
+      expect(find.text('as\u00A0of\u00A021\u00A0s\u00A0ago'), findsOneWidget);
       expect(
         tester.widget<KvLoader>(find.byType(KvLoader)).running,
         isFalse,
@@ -434,7 +434,7 @@ void main() {
           reason: 'the balance keeps its own five-second clock (BG-8)',
         );
         expect(
-          find.text('connected · last update 7\u00A0s ago'),
+          find.text('connected · last\u00A0update\u00A07\u00A0s\u00A0ago'),
           findsOneWidget,
           reason:
               'a dimmed balance carries its age (BG-8), and the link says in '
@@ -454,7 +454,7 @@ void main() {
         now = now.add(const Duration(seconds: 9));
         await tester.pump(const Duration(seconds: 1));
         expect(linkReadsLive(tester), isFalse);
-        expect(find.text('as of 16\u00A0s ago'), findsOneWidget);
+        expect(find.text('as\u00A0of\u00A016\u00A0s\u00A0ago'), findsOneWidget);
         expect(find.textContaining('connected'), findsNothing);
         expect(trustLampTone(tester), KvLampTone.warn);
         await tester.pumpWidget(const SizedBox());
@@ -485,7 +485,7 @@ void main() {
       await tester.pump();
       expect(linkReadsLive(tester), isTrue);
       expect(
-        find.text('connected · last update 11\u00A0s ago'),
+        find.text('connected · last\u00A0update\u00A011\u00A0s\u00A0ago'),
         findsOneWidget,
       );
       connected.value = false;
@@ -496,7 +496,10 @@ void main() {
       // The lamp holds; the WORD does not claim a socket that is not there
       // (`ux-auditor`, BG-8) — the age alone, still not the stale line.
       expect(find.textContaining('connected'), findsNothing);
-      expect(find.text('last update 11\u00A0s ago'), findsOneWidget);
+      expect(
+        find.text('last\u00A0update\u00A011\u00A0s\u00A0ago'),
+        findsOneWidget,
+      );
       await tester.pumpWidget(const SizedBox());
     });
   });

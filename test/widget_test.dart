@@ -254,7 +254,10 @@ void main() {
     // wears the network sheet's fuller phrasing (D-196: shipped strings).
     // Twelve seconds on a bound socket is inside the lamp's hold (D-331(b)):
     // the data is stale, the link is not, and the line says both in words.
-    expect(find.text('connected · last update 12\u00A0s ago'), findsOneWidget);
+    expect(
+      find.text('connected · last\u00A0update\u00A012\u00A0s\u00A0ago'),
+      findsOneWidget,
+    );
     // DS-1: a stale link never streams a counter — the frozen last-known DAA
     // must not tick at full presence; the chip falls back to its static word.
     // **And the word says which one it is** (BG-20, UX-5): a stale link has no

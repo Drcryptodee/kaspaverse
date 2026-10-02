@@ -34,6 +34,7 @@ void main() {
     BigInt? outgoing,
     List<ActivityRecord> activity = const [],
     String? error,
+    WalletLaneState lane = WalletLaneState.live,
   }) => WalletSnapshot(
     discoveryIncomplete: false,
     connected: connected,
@@ -44,6 +45,7 @@ void main() {
     outgoingSompi: outgoing,
     activity: activity,
     error: error,
+    lane: lane,
   );
 
   final wallet = WalletService.instance;
@@ -93,6 +95,45 @@ void main() {
       await wallet.refreshNow();
       expect(wallet.mature.value, BigInt.from(777));
       expect(wallet.activity.value, hasLength(1));
+    },
+  );
+
+  /// **PRE3-LANE (KM4): the lane's health lands, and a lane that is down
+  /// never refreshes the freshness clock.** The bridge keeps re-serving the
+  /// fold while the lane is being repaired (acceptance overlays, re-serves),
+  /// each one connected and bearing the last balance; stamping them would
+  /// show a dead lane's balance as seconds old (PB-041).
+  test(
+    'a down wallet lane lands, and its balance ages from the last live fold',
+    () async {
+      wallet.start();
+      controller.add(snap(mature: BigInt.from(5)));
+      await Future<void>.delayed(Duration.zero);
+      expect(wallet.lane.value, WalletLaneState.live);
+      final lastLive = wallet.lastUpdate.value;
+      expect(lastLive, isNotNull);
+
+      await Future<void>.delayed(const Duration(milliseconds: 5));
+      controller.add(
+        snap(mature: BigInt.from(5), lane: WalletLaneState.recovering),
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(wallet.lane.value, WalletLaneState.recovering);
+      expect(
+        wallet.lastUpdate.value,
+        lastLive,
+        reason: 'a repairing lane is not fresh',
+      );
+
+      controller.add(snap(mature: BigInt.from(5), lane: WalletLaneState.dark));
+      await Future<void>.delayed(Duration.zero);
+      expect(wallet.lane.value, WalletLaneState.dark);
+      expect(wallet.lastUpdate.value, lastLive, reason: 'nor is one held dark');
+
+      controller.add(snap(mature: BigInt.from(6)));
+      await Future<void>.delayed(Duration.zero);
+      expect(wallet.lane.value, WalletLaneState.live);
+      expect(wallet.lastUpdate.value!.isAfter(lastLive!), isTrue);
     },
   );
 

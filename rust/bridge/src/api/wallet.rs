@@ -22,6 +22,7 @@ use std::sync::{Mutex, PoisonError};
 use kaspaverse_chain::{
     AcceptanceEvent, ActivityDirection as ChainDirection, ActivityMaturity as ChainMaturity,
     NetworkId, NetworkType, TxStatus, WalletActivityRecord, WalletEngine, WalletEvent,
+    WalletLaneHealth,
 };
 use tokio::sync::broadcast::{self, error::RecvError};
 
@@ -994,6 +995,22 @@ pub struct ActivityRecord {
     pub stalled: bool,
 }
 
+/// **Is the wallet lane itself what holds the balance back?** (PRE3-LANE, KM4.)
+/// The chain layer's `WalletLaneHealth`, carried across as a plain enum. The
+/// money plate reads it beside the link's own state: a socket that ticks says
+/// nothing about a wallet processor that died behind it, which is how F1 kept
+/// a frozen balance at full brightness.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WalletLaneState {
+    /// Nothing in the wallet lane holds the balance back (the link may still).
+    #[default]
+    Live,
+    /// The lane stopped and is being repaired; live updates are paused.
+    Recovering,
+    /// The repair stopped trying; it waits for the next connection or a pull.
+    Dark,
+}
+
 /// Live wallet state, streamed on every change. Balances are `Option` so the UI
 /// can tell "not synced yet" (`None` → DS-1 unknown `—`) from a real, live zero
 /// (`Some(0)` → an empty wallet shows `0.00000000`, never unknown). A plain
@@ -1022,6 +1039,9 @@ pub struct WalletSnapshot {
     /// Newest-first, capped by the chain layer.
     pub activity: Vec<ActivityRecord>,
     pub error: Option<String>,
+    /// The wallet lane's own health (PRE3-LANE): `Live` unless the lane's
+    /// supervisor has found it dead, stalled or dark.
+    pub lane: WalletLaneState,
 }
 
 /// The process-lifetime sync engine, kept alive here (its broadcast Sender must
@@ -1175,6 +1195,13 @@ fn fold(snapshot: &mut WalletSnapshot, event: WalletEvent) {
             snapshot.activity = records.into_iter().map(map_activity).collect();
         }
         WalletEvent::Error(message) => snapshot.error = Some(message),
+        WalletEvent::Lane(health) => {
+            snapshot.lane = match health {
+                WalletLaneHealth::Live => WalletLaneState::Live,
+                WalletLaneHealth::Recovering => WalletLaneState::Recovering,
+                WalletLaneHealth::Dark => WalletLaneState::Dark,
+            }
+        }
     }
 }
 
@@ -1270,15 +1297,17 @@ async fn snapshots() -> Result<&'static broadcast::Sender<WalletSnapshot>, AppEr
                                         // `UtxoProcessor::start()` on an
                                         // ALREADY-connected client calls
                                         // `handle_connect()` directly without
-                                        // it (`processor.rs:704-705, 717-723`)
-                                        // — which is the normal path here,
-                                        // since the chain service connects at
-                                        // app start and the engine starts after
-                                        // unlock. `Syncing` is our forward of
-                                        // `UtxoProcStart`, which
+                                        // it (`processor.rs:704-705, 717-723`).
+                                        // Since PRE3-LANE the processor reads a
+                                        // lane-private ctl that starts closed and
+                                        // the relay's open drives that arm, so
+                                        // `Connect` arrives on the normal path
+                                        // too — but a pin or a lane change can
+                                        // move that again. `Syncing` is our
+                                        // forward of `UtxoProcStart`, which
                                         // `handle_connect_impl` fires on both
                                         // (`processor.rs:541`). Hanging the
-                                        // retry on the one event that does not
+                                        // retry on one event that may not
                                         // arrive is how the original defect
                                         // would have survived its own fix.
                                         //

@@ -13,4 +13,9 @@ pub fn init_app() {
     crate::sockstat::install();
     // Default utilities - feel free to customize
     flutter_rust_bridge::setup_default_user_utils();
+    // PRE3-LANE: every panic in the process is recorded as shape (location,
+    // thread, time — never its payload) so the wallet lane's supervisor sees a
+    // pinned task die. LAST, because FRB's utils above install a hook of their
+    // own (its backtrace capture): ours chains it, so both still run.
+    kaspaverse_chain::lane_health::install_panic_hook();
 }
