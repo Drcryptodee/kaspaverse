@@ -8241,7 +8241,18 @@ fn hide_conversation_rows(
     store
         .tombstone_conversation(conversation_id)
         .map_err(AppError::chain)?;
-    store.scrub().map_err(AppError::chain)
+    // **Done once the tombstone lands.** A scrub that fails after it leaves
+    // the bytes owed to the next start (`finish_removals`), and the row is off
+    // the list, so an error here would report a hide that happened and offer
+    // no row to retry from: the block and wipe ruling (`consensus-auditor`,
+    // PRE3-LOG). A lane the user can retry reports the scrub's failure; one
+    // they cannot retry reports done and owes it.
+    if let Err(e) = store.scrub() {
+        log::warn!(
+            "transport-hub: the scrub after a hide failed ({e}); the next start finishes it"
+        );
+    }
+    Ok(())
 }
 
 /// Forget what was SAID in one conversation, keeping the conversation itself.
@@ -13123,6 +13134,33 @@ mod tests {
             !aside.exists(),
             "the start deleted the copy the erase could not"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A hide whose tombstone landed is done** (`consensus-auditor`,
+    /// PRE3-LOG): a scrub that fails afterwards is owed to the next start, not
+    /// reported as a hide that failed over a row already off the list.
+    #[test]
+    fn a_hide_whose_scrub_fails_is_done_and_the_start_finishes_it() {
+        let (mut store, dir) = stash_store("hide-scrub-owed");
+        store
+            .upsert_conversation(row_for("thread", PARTNER_A, ConversationStatus::Active))
+            .unwrap();
+        message_in(&mut store, "m1", "thread", StoredKind::Comm);
+        let aside = dir.join("messages.kvlog.unreadable-8-1-00000000");
+        std::fs::create_dir_all(aside.join("undeletable")).unwrap();
+
+        assert!(
+            hide_conversation_rows(&mut store, "thread").is_ok(),
+            "the hide happened"
+        );
+        assert!(store.is_conversation_tombstoned("thread"));
+        assert!(store.message("m1").is_none());
+
+        std::fs::remove_dir_all(&aside).unwrap();
+        std::fs::write(&aside, b"the words").unwrap();
+        start_store_step(&mut store, &[]);
+        assert!(!aside.exists(), "and the next start finished the scrub");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

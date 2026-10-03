@@ -30,7 +30,8 @@
 //! log), are copied aside first as
 //! `<file>.unreadable-<offset>-<length>-<crc32>`, the block list's quarantine
 //! posture, so a repair never destroys bytes it could not read. An erase the
-//! user asks for and [`Log::wipe`] remove the copies.
+//! user asks for removes the copies ([`Log::remove_asides`], called by the
+//! store's scrub and wipe).
 //!
 //! **The writer always writes at the end it knows is good, and cuts only what
 //! it knows is garbage**: a write of its own that failed half-way, or a tail
@@ -128,6 +129,9 @@ const FRAME_ABC_CRC: u32 = 0x66E1_5D33;
 /// `frame_crc` of the 4 KiB pattern as a body: a carried state reaching the
 /// accelerated path in the second update (zlib; `dependency-steward`).
 const FRAME_LONG_CRC: u32 = 0x6F23_BA11;
+/// `frame_crc` of bytes 1..4094 of that pattern (4093 bytes): unaligned start,
+/// leftover words and trailing bytes on every path (zlib; `dependency-steward`).
+const FRAME_UNALIGNED_CRC: u32 = 0x3EE0_5566;
 
 fn long_pattern() -> Vec<u8> {
     (0..4096u32)
@@ -153,6 +157,7 @@ fn checksum_holds() -> bool {
             && crc32fast::hash(&long_pattern()) == LONG_PATTERN_CRC
             && frame_crc(&3u32.to_le_bytes(), b"abc") == FRAME_ABC_CRC
             && frame_crc(&4096u32.to_le_bytes(), &long_pattern()) == FRAME_LONG_CRC
+            && frame_crc(&4093u32.to_le_bytes(), &long_pattern()[1..4094]) == FRAME_UNALIGNED_CRC
     })
 }
 
@@ -1230,7 +1235,7 @@ mod tests {
     /// **A v1 file with bytes after its last good frame keeps a copy.** The
     /// v1 writer appended past tears (F3), so those bytes may be frames; the
     /// migration keeps what it read and copies the cut bytes aside before the
-    /// cut. A wipe takes the copy with the log.
+    /// cut. Deleting the copies, then wiping, leaves nothing.
     #[test]
     fn a_v1_log_with_an_unreadable_tail_is_copied_aside_before_the_cut() {
         let path = test_path("v1-unreadable");
@@ -1501,6 +1506,11 @@ mod tests {
             frame_crc(&4096u32.to_le_bytes(), &long_pattern()),
             FRAME_LONG_CRC,
             "and a long body in its second update"
+        );
+        assert_eq!(
+            frame_crc(&4093u32.to_le_bytes(), &long_pattern()[1..4094]),
+            FRAME_UNALIGNED_CRC,
+            "and an unaligned one"
         );
         assert!(checksum_holds());
         assert_ne!(

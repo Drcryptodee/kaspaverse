@@ -274,10 +274,11 @@ pub struct WipeReport {
 pub struct TransportStore {
     conversations: Log<ConversationRecord>,
     messages: Log<MessageRecord>,
-    /// A scrub started and did not finish: [`Self::finish_removals`] retries
-    /// it whole. In memory only, because the store lives for the process; a
-    /// relaunch's load compacts the removed rows, and the copies wait for the
-    /// next erase or wipe (the residual this cannot reach).
+    /// A scrub started and did not finish, or a wipe left a copy that resisted:
+    /// [`Self::finish_removals`] retries the scrub whole. In memory only,
+    /// because the store lives for the process; a relaunch's load compacts the
+    /// removed rows, and the copies wait for the next erase or wipe (the
+    /// residual this cannot reach).
     scrub_owed: bool,
 }
 
@@ -554,22 +555,24 @@ impl TransportStore {
         let report = self.wipe_preview();
         // Every copy kept aside is tried first; one that resists never stops
         // the logs being emptied (`consensus-auditor`, PRE3-LOG). It is owed
-        // instead, and the next transport start deletes it: reporting a failed
-        // wipe over a store that is empty would be the worst lie this lane
-        // can tell.
+        // instead, and the next transport start in this process deletes it:
+        // reporting a failed wipe over a store that is empty would be the
+        // worst lie this lane can tell.
         let copies = [
             self.messages.remove_asides().map(drop),
             self.conversations.remove_asides().map(drop),
         ];
+        if let Some(e) = copies.into_iter().find_map(Result::err) {
+            // Owed before anything else can fail, so even a wipe that then
+            // fails on a log still owes the copy.
+            self.scrub_owed = true;
+            log::error!(
+                "transport-store: a copy kept aside resisted the wipe ({e}); the next transport \
+                 start in this process deletes it, and after a relaunch the next erase or wipe"
+            );
+        }
         self.messages.wipe()?;
         self.conversations.wipe()?;
-        if let Some(e) = copies.into_iter().find_map(Result::err) {
-            log::error!(
-                "transport-store: a copy kept aside resisted the wipe ({e}); the next start \
-                 deletes it"
-            );
-            self.scrub_owed = true;
-        }
         Ok(report)
     }
 
