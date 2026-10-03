@@ -98,9 +98,10 @@ const V1_FRAME_HEADER_LEN: usize = 4;
 /// (`auto-aof-rewrite-percentage 100`, rewrite when the file has doubled,
 /// with a minimum size), which is Kafka's default `min.cleanable.dirty.ratio`
 /// of 0.5 seen from the dead side. Each rewrite resets the file to its live
-/// size, so a byte is rewritten a bounded number of times however long the
-/// log lives, and a load starts from at most twice what the log keeps plus
-/// what the last session appended (the rule runs at load, not between).
+/// size, so rewrite work is amortized over the bytes appended since, and a
+/// load starts from at most the larger of [`COMPACT_FLOOR`] and twice the live
+/// size the previous load left, plus what was appended since (the rule runs
+/// at load, not between).
 const COMPACT_RATIO: u64 = 2;
 
 /// **The floor under which a log is left to grow.** Fitted on the funded
@@ -121,6 +122,9 @@ const COMPACT_FLOOR: u64 = 64 * 1024;
 /// of the one in use.
 const CHECK_VALUE: u32 = 0xCBF4_3926;
 const LONG_PATTERN_CRC: u32 = 0x5D1C_4EE3;
+/// `frame_crc` of a three-byte body `abc` (its length, then the body, through
+/// two hasher updates), also from zlib.
+const FRAME_ABC_CRC: u32 = 0x66E1_5D33;
 
 fn long_pattern() -> Vec<u8> {
     (0..4096u32)
@@ -144,6 +148,7 @@ fn checksum_holds() -> bool {
     *HOLDS.get_or_init(|| {
         crc32fast::hash(b"123456789") == CHECK_VALUE
             && crc32fast::hash(&long_pattern()) == LONG_PATTERN_CRC
+            && frame_crc(&3u32.to_le_bytes(), b"abc") == FRAME_ABC_CRC
     })
 }
 
@@ -391,9 +396,10 @@ fn classify(format: Format, rest: &[u8]) -> Tail {
             }
             // **A tear is at most one frame**: one append was in flight when
             // the process died, so its declared extent reaches the end of the
-            // file. Anything longer is not a tear, and is kept: it is what a
-            // checksum failing on EVERY frame looks like (the dependency
-            // steward's case), and cutting it would empty the log.
+            // file. Anything longer is not a tear, and is copied aside before
+            // the cut: it is what a checksum failing on EVERY frame looks like
+            // (the dependency steward's case), and a cut without a copy would
+            // destroy every frame.
             let len = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
             if FRAME_HEADER_LEN.saturating_add(len) >= n {
                 Tail::Torn(n)
@@ -455,12 +461,12 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
             held: None,
             removed: found.removed,
         };
-        if found.format == Format::Empty {
-            return Ok(log);
-        }
         let name = log.name();
         let file_len = bytes.len() as u64;
 
+        // Before the empty-file return, or a fresh or wiped log would take
+        // frames sealed with the broken checksum (`consensus-auditor` and
+        // `dependency-steward`, PRE3-LOG round 3).
         if !verify {
             // Frames were read on their lengths alone, as v1 always was. Judge
             // nothing and write nothing: a write would carry a wrong checksum
@@ -471,6 +477,9 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
                  unverified, the log is read-only and nothing was cut",
                 log.records.len()
             );
+            return Ok(log);
+        }
+        if found.format == Format::Empty {
             return Ok(log);
         }
 
@@ -1444,6 +1453,11 @@ mod tests {
     fn the_checksum_gives_the_standard_answers() {
         assert_eq!(crc32fast::hash(b"123456789"), CHECK_VALUE);
         assert_eq!(crc32fast::hash(&long_pattern()), LONG_PATTERN_CRC);
+        assert_eq!(
+            frame_crc(&3u32.to_le_bytes(), b"abc"),
+            FRAME_ABC_CRC,
+            "the log's own hasher"
+        );
         assert!(checksum_holds());
         assert_ne!(
             frame_crc(&[0; 4], &[]),
@@ -1471,9 +1485,10 @@ mod tests {
     /// **A checksum failing on every frame is not a tear**: one append is in
     /// flight when a process dies, so a tear is at most one frame. A file
     /// whose every checksum fails (a broken implementation, the steward's
-    /// case) is kept whole aside rather than cut to nothing.
+    /// case) has every frame copied aside before the cut; the live log reads
+    /// empty, and the bytes survive in the copy.
     #[test]
-    fn a_file_whose_every_checksum_fails_is_kept_aside_not_emptied() {
+    fn a_file_whose_every_checksum_fails_is_copied_aside_before_the_cut() {
         let path = test_path("all-crc-bad");
         let mut log = Log::load(path.clone(), key_of).unwrap();
         for id in ["a", "b", "c"] {
@@ -1491,7 +1506,7 @@ mod tests {
         let reloaded = Log::load(path.clone(), key_of).unwrap();
         assert!(
             reloaded.records.is_empty(),
-            "point in time: nothing before the first frame"
+            "point in time: nothing before the first frame, so the live log is empty"
         );
         let names = files_in(&path);
         assert_eq!(
@@ -1589,10 +1604,17 @@ mod tests {
         std::fs::create_dir_all(v1.parent().unwrap()).unwrap();
         std::fs::write(&v1, &v1_bytes).unwrap();
 
+        let fresh = test_path("crc-broken-fresh");
+
         testing::CHECKSUM_BROKEN.with(|broken| broken.set(true));
         let mut held = Log::load(v2.clone(), key_of).unwrap();
         let mut unmigrated = Log::load(v1.clone(), key_of).unwrap();
+        let mut empty = Log::load(fresh.clone(), key_of).unwrap();
         testing::CHECKSUM_BROKEN.with(|broken| broken.set(false));
+
+        assert!(empty.hold().is_some(), "a missing file is held too");
+        assert!(empty.upsert("y".into(), row("y", 8)).is_err());
+        assert!(!fresh.exists(), "and nothing was written");
 
         assert_eq!(
             sorted_keys(&held),
@@ -1614,6 +1636,7 @@ mod tests {
         assert_eq!(std::fs::read(&v1).unwrap(), v1_bytes);
         let _ = std::fs::remove_dir_all(v2.parent().unwrap());
         let _ = std::fs::remove_dir_all(v1.parent().unwrap());
+        let _ = std::fs::remove_dir_all(fresh.parent().unwrap());
     }
 
     /// A removal marks the file until a compaction drops the removed bytes,

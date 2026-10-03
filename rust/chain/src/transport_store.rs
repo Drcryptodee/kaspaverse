@@ -582,9 +582,17 @@ impl TransportStore {
     /// deleting needs no space and frees some for the rewrite.
     pub fn scrub(&mut self) -> Result<()> {
         self.scrub_owed = true;
-        self.messages.remove_asides()?;
-        self.conversations.remove_asides()?;
-        self.compact()?;
+        // Every step is tried whatever an earlier one did, and the first
+        // failure is reported: one copy that cannot be deleted must not keep
+        // the erased words in both logs too (`consensus-auditor`, PRE3-LOG).
+        let steps = [
+            self.messages.remove_asides().map(drop),
+            self.conversations.remove_asides().map(drop),
+            self.compact(),
+        ];
+        if let Some(e) = steps.into_iter().find_map(Result::err) {
+            return Err(e);
+        }
         self.scrub_owed = false;
         Ok(())
     }
@@ -3302,6 +3310,35 @@ mod tests {
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert!(holding.is_empty(), "no file holds the words: {holding:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A copy that cannot be deleted does not stop the rewrite**: the scrub
+    /// reports the failure, and the logs are clean anyway.
+    #[test]
+    fn an_undeletable_copy_does_not_keep_the_words_in_the_logs() {
+        let dir = test_dir("scrub-continues");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        let marker: Vec<u8> = (0..61u8).map(|i| i.wrapping_mul(13) ^ 0x77).collect();
+        let mut row = message("tx-gone", "c1", 100, 1);
+        row.envelope = marker.clone();
+        store.record_message(row).unwrap();
+        store.remove_message("tx-gone").unwrap();
+        std::fs::create_dir_all(
+            dir.join("messages.kvlog.unreadable-8-61-00000000")
+                .join("x"),
+        )
+        .unwrap();
+
+        assert!(
+            store.scrub().is_err(),
+            "the copy could not go, and it says so"
+        );
+        let log = std::fs::read(dir.join("messages.kvlog")).unwrap();
+        assert!(
+            !log.windows(marker.len()).any(|w| w == marker.as_slice()),
+            "but the log was rewritten all the same"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

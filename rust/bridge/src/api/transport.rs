@@ -2046,13 +2046,7 @@ pub async fn transport_start() -> Result<(), AppError> {
             .cloned()
             .collect();
         let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
-        sweep_blocked_rows(&mut store, &addresses);
-        // And whatever an erase left undone (PRE3-LOG, F30): the store lives
-        // for the process now, so this start is where a failed scrub or an
-        // uncompacted removal is finished, not a reload that no longer comes.
-        if let Err(e) = store.finish_removals() {
-            log::warn!("transport-store: finishing removals at start failed: {e}");
-        }
+        start_store_step(&mut store, &addresses);
     }
 
     // **A request whose sender never resolved gets another go.** In the
@@ -8342,11 +8336,10 @@ fn clear_conversation_rows(
         .collect();
     // COUNT WHAT WENT, NOT WHAT WAS ASKED FOR, and surface a failure
     // instead of warning past it (`ffi-leak-auditor`, 2026-08-17). The
-    // sibling purge inside `hide_conversation_rows` uses
-    // `warn_store`, which is survivable there because it reports no
-    // number; here the count reaches the user as "N messages cleared", and
-    // a swallowed write error would make that a promise the disk never
-    // kept. Partial progress is reported honestly by the error, not
+    // sibling purge inside `hide_conversation_rows` now reports its first
+    // failed removal too (PRE3-LOG); here the count reaches the user as "N
+    // messages cleared", and a swallowed write error would make that a
+    // promise the disk never kept. Partial progress is reported honestly by the error, not
     // rolled back — the rows that did go are gone.
     let mut cleared = 0usize;
     for txid in txids {
@@ -8760,6 +8753,19 @@ fn sweep_blocked_rows(store: &mut TransportStore, addresses: &[String]) -> (usiz
         }
     }
     swept
+}
+
+/// The transport start's store step: the blocked-address sweep (D-308), then
+/// whatever an erase left undone (PRE3-LOG, F30). The store lives for the
+/// process, so this start is where a failed scrub or an uncompacted removal is
+/// finished, not a reload that no longer comes. Pure over the store, so it is
+/// tested without a hub (`consensus-auditor`: the call was otherwise one
+/// untested line that the gate could lose).
+fn start_store_step(store: &mut TransportStore, blocked: &[String]) {
+    sweep_blocked_rows(store, blocked);
+    if let Err(e) = store.finish_removals() {
+        log::warn!("transport-store: finishing removals at start failed: {e}");
+    }
 }
 
 /// The block's store half: every row for the address, then their sealed
@@ -13066,6 +13072,14 @@ mod tests {
         message_in(&mut store, "m1", "thread", StoredKind::Comm);
         let log = dir.join("messages.kvlog");
         std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o444)).unwrap();
+        // The precondition, checked rather than assumed: a privileged runner
+        // can write a read-only file, and then this test cannot make the
+        // removal fail.
+        if std::fs::OpenOptions::new().write(true).open(&log).is_ok() {
+            eprintln!("skipped: this runner can write a read-only file");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
 
         assert!(hide_conversation_rows(&mut store, "thread").is_err());
         assert!(
@@ -13073,6 +13087,33 @@ mod tests {
             "the row was not removed, and hide says so"
         );
         let _ = std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The start finishes a scrub an erase could not** (`consensus-auditor`,
+    /// PRE3-LOG): the start's store step runs `finish_removals`, so a copy that
+    /// could not be deleted at the erase is deleted at the next start.
+    #[test]
+    fn the_start_step_finishes_a_failed_scrub() {
+        let (mut store, dir) = stash_store("start-finishes");
+        store
+            .upsert_conversation(row_for("thread", PARTNER_A, ConversationStatus::Active))
+            .unwrap();
+        message_in(&mut store, "m1", "thread", StoredKind::Comm);
+        let aside = dir.join("messages.kvlog.unreadable-8-1-00000000");
+        std::fs::create_dir_all(aside.join("undeletable")).unwrap();
+        assert!(
+            clear_conversation_rows(&mut store, "thread").is_err(),
+            "the scrub failed"
+        );
+
+        std::fs::remove_dir_all(&aside).unwrap();
+        std::fs::write(&aside, b"the words").unwrap();
+        start_store_step(&mut store, &[]);
+        assert!(
+            !aside.exists(),
+            "the start deleted the copy the erase could not"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

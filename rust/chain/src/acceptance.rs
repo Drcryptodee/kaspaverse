@@ -2605,8 +2605,8 @@ mod tests {
     /// **The tracker refuses a watch log it cannot write**
     /// (`wallet-security-auditor`, PRE3-LOG): its fold warns past failed
     /// writes and advances `vcc.cursor` anyway, so it must not run on a
-    /// read-only log. The load fails, the documented soft fallback takes over,
-    /// and the cursor is never touched.
+    /// read-only log. The load fails (no tracker exists, so nothing can move
+    /// the cursor) and the documented soft fallback takes over.
     #[test]
     fn the_tracker_refuses_a_watch_log_it_cannot_write() {
         let dir = test_dir("held");
@@ -2627,10 +2627,6 @@ mod tests {
         std::fs::create_dir_all(dir.join(".acceptance.kvlog.tmp")).unwrap();
 
         assert!(AcceptanceTracker::load(dir.clone()).is_err());
-        assert!(
-            !dir.join("vcc.cursor").exists(),
-            "the cursor is never touched"
-        );
         assert_eq!(std::fs::read(dir.join("acceptance.kvlog")).unwrap(), bytes);
         let _ = std::fs::remove_dir_all(&dir);
     }
