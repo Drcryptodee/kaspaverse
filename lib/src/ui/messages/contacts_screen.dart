@@ -212,11 +212,18 @@ class _ContactsScreenState extends State<ContactsScreen> {
   /// alias survives and a later message still finds its home.
   Future<void> _dismissExpired(ConversationDto conversation) async {
     KvHaptic.selection();
-    await _messaging.hide(conversation.conversationId);
-    if (!mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('Invitation dismissed.')));
+    try {
+      await _messaging.hide(conversation.conversationId);
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Invitation dismissed.')));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(displayError(e))));
+    }
   }
 
   /// Long-press: name the contact, or hide the conversation.
@@ -356,11 +363,20 @@ class _ContactsScreenState extends State<ContactsScreen> {
       ),
     );
     if (confirmed != true) return;
-    await _messaging.hide(conversation.conversationId);
-    if (!mounted) return;
-    ScaffoldMessenger.of(
-      context,
-    ).showSnackBar(const SnackBar(content: Text('Conversation hidden.')));
+    try {
+      await _messaging.hide(conversation.conversationId);
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Conversation hidden.')));
+    } catch (e) {
+      if (!mounted) return;
+      // A hide that failed left the thread listed so a retry reaches it;
+      // saying "hidden" here would send the user away from it.
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(displayError(e))));
+    }
   }
 
   /// **One card: the tab row, then this tab's rows** (`M1` measured at 4× —

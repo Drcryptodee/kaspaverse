@@ -1713,6 +1713,32 @@ void main() {
       await tester.pumpAndSettle();
       expect(hideCalls, 0);
     });
+
+    // PRE3-LOG: a hide whose message removal fails reports it and leaves the
+    // thread listed for a retry, so the screen must not announce it as done.
+    testWidgets('a hide that fails says why, never "Conversation hidden."', (
+      tester,
+    ) async {
+      MessagingService.hideFn = (_) async =>
+          throw const AppError(message: 'the disk refused the change');
+      MessagingService.conversationsFn = () async => [conversation('c1')];
+      await MessagingService.instance.refresh();
+      await tester.pumpWidget(
+        MaterialApp(builder: _kvWindow, home: ContactsScreen()),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.longPress(_row());
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Hide conversation'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Hide'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('the disk refused the change'), findsOneWidget);
+      expect(find.text('Conversation hidden.'), findsNothing);
+      expect(_row(), findsOneWidget, reason: 'the thread is still listed');
+    });
   });
 
   group('ContactsScreen — Block (D-308)', () {

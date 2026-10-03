@@ -456,13 +456,15 @@ class MessagingService {
   /// Hide (tombstone) a conversation locally — the zombie-cleanup affordance
   /// (D-068). Removes nothing on-chain. The row is TOMBSTONED, not deleted:
   /// the contact's alias survives, and their next message reopens the thread.
-  /// Re-pulls the list so the row drops immediately.
+  /// Re-pulls the list either way, so the screen shows what really happened.
+  /// Rethrows, like [clearMessages]: since PRE3-LOG a hide whose message
+  /// removal fails leaves the thread listed for a retry, and swallowing the
+  /// error here let the screen announce a hide that did not happen.
   Future<void> hide(String conversationId) async {
     try {
       await hideFn(conversationId);
+    } finally {
       await refresh();
-    } on AppError catch (e) {
-      error.value = e.message;
     }
   }
 

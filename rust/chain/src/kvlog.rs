@@ -125,6 +125,9 @@ const LONG_PATTERN_CRC: u32 = 0x5D1C_4EE3;
 /// `frame_crc` of a three-byte body `abc` (its length, then the body, through
 /// two hasher updates), also from zlib.
 const FRAME_ABC_CRC: u32 = 0x66E1_5D33;
+/// `frame_crc` of the 4 KiB pattern as a body: a carried state reaching the
+/// accelerated path in the second update (zlib; `dependency-steward`).
+const FRAME_LONG_CRC: u32 = 0x6F23_BA11;
 
 fn long_pattern() -> Vec<u8> {
     (0..4096u32)
@@ -149,6 +152,7 @@ fn checksum_holds() -> bool {
         crc32fast::hash(b"123456789") == CHECK_VALUE
             && crc32fast::hash(&long_pattern()) == LONG_PATTERN_CRC
             && frame_crc(&3u32.to_le_bytes(), b"abc") == FRAME_ABC_CRC
+            && frame_crc(&4096u32.to_le_bytes(), &long_pattern()) == FRAME_LONG_CRC
     })
 }
 
@@ -789,8 +793,10 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
         self.tombstoned.contains(key)
     }
 
-    /// Erase every record, on disk and in memory, and every copy a load kept
-    /// aside.
+    /// Erase every record, on disk and in memory. The copies a load kept aside
+    /// are not this function's: a store deletes them itself
+    /// ([`Self::remove_asides`]) so that a copy that resists can never stop a
+    /// log from being emptied (`consensus-auditor`, PRE3-LOG).
     ///
     /// **The file is emptied before the maps are, and that order is the whole
     /// safety property.** These two must never disagree: clear memory first
@@ -798,11 +804,7 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
     /// would extend, so a restart resurrects everything the user asked to
     /// destroy. Emptying the file first means a failure returns `Err` with
     /// both halves still intact and consistent — the caller retries, and
-    /// nothing is half-deleted. The aside copies are tried first, because the
-    /// cut bytes they hold may include the user's words; a copy that cannot be
-    /// deleted does not stop the wipe of the log itself, and its failure is
-    /// what the wipe reports (`wallet-security-auditor`), so a retry reaches
-    /// it.
+    /// nothing is half-deleted.
     ///
     /// Atomic and durable through [`atomic_write`]: a crash mid-wipe leaves
     /// either the whole old log or an empty one, never a torn frame, and a
@@ -814,14 +816,13 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
     /// diagnose than an empty file.
     pub(crate) fn wipe(&mut self) -> Result<()> {
         self.refuse_if_held()?;
-        let copies = self.remove_asides();
         atomic_write(&self.path, &[])?;
         self.records.clear();
         self.tombstoned.clear();
         self.end = 0;
         self.cut_owed = false;
         self.removed = false;
-        copies.map(drop)
+        Ok(())
     }
 
     /// The file this state rewrites to: one `Upsert` per live record and one
@@ -849,10 +850,17 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
     /// otherwise be lost by the very rewrite meant to keep it.
     pub(crate) fn compact(&mut self) -> Result<()> {
         self.refuse_if_held()?;
-        // [`Self::append`]'s rule, for the rewrite too: a file that grew
-        // behind this log holds another writer's frames, and a rewrite from
-        // this log's state would drop them (`ffi-leak-auditor`, PRE3-LOG).
-        let on_disk = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
+        // [`Self::append`]'s rule, for the rewrite too: a file that GREW behind
+        // this log holds another writer's frames, and a rewrite from this
+        // log's state would drop them (`ffi-leak-auditor`, PRE3-LOG). A file
+        // that shrank behind it is rewritten whole from memory: a restore, not
+        // a cut. The real guarantee is one instance per file per process; this
+        // only refuses to make a second writer's damage worse.
+        let on_disk = match std::fs::metadata(&self.path) {
+            Ok(meta) => meta.len(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(e) => return Err(e.into()),
+        };
         if on_disk > self.end && !self.cut_owed {
             log::error!(
                 "kvlog: {} is {on_disk} bytes but this log wrote {} — another writer; refusing \
@@ -1253,11 +1261,12 @@ mod tests {
 
         let leftover = path.with_file_name(".test.kvlog.unreadable-7-00000000.tmp");
         std::fs::write(&leftover, b"a copy a crash cut short").unwrap();
+        assert_eq!(log.remove_asides().unwrap(), 2);
         log.wipe().unwrap();
         assert_eq!(
             files_in(&path),
             ["test.kvlog"],
-            "the wipe removes the copy, and a crash's leftover temp copy too"
+            "the copy goes, a crash's leftover temp copy too, then the log"
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -1487,6 +1496,11 @@ mod tests {
             frame_crc(&3u32.to_le_bytes(), b"abc"),
             FRAME_ABC_CRC,
             "the log's own hasher"
+        );
+        assert_eq!(
+            frame_crc(&4096u32.to_le_bytes(), &long_pattern()),
+            FRAME_LONG_CRC,
+            "and a long body in its second update"
         );
         assert!(checksum_holds());
         assert_ne!(
@@ -1861,36 +1875,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
-    /// **A copy that cannot be deleted does not stop a wipe**: the log is
-    /// emptied, the other copies go, and the failure is what the wipe reports.
+    /// **Deleting copies tries every one** (`wallet-security-auditor`,
+    /// PRE3-LOG): one that cannot be deleted is reported, and the copies on
+    /// either side of it go anyway, whatever order the directory lists them in.
     #[test]
-    fn an_undeletable_copy_does_not_stop_a_wipe() {
-        let path = test_path("wipe-undeletable");
-        let mut log = Log::load(path.clone(), key_of).unwrap();
-        log.upsert("a".into(), row("a", 1)).unwrap();
-        std::fs::create_dir_all(
-            path.with_file_name("test.kvlog.unreadable-1-1-00000001")
-                .join("x"),
-        )
-        .unwrap();
-        std::fs::write(
-            path.with_file_name("test.kvlog.unreadable-2-1-00000002"),
-            b"w",
-        )
-        .unwrap();
+    fn deleting_copies_tries_every_one() {
+        let path = test_path("asides-every");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let log = Log::<Row>::load(path.clone(), key_of).unwrap();
+        for n in 1..=3 {
+            std::fs::write(
+                path.with_file_name(format!("test.kvlog.unreadable-{n}-1-0")),
+                b"w",
+            )
+            .unwrap();
+        }
+        std::fs::create_dir_all(path.with_file_name("test.kvlog.unreadable-4-1-0").join("x"))
+            .unwrap();
+        for n in 5..=7 {
+            std::fs::write(
+                path.with_file_name(format!("test.kvlog.unreadable-{n}-1-0")),
+                b"w",
+            )
+            .unwrap();
+        }
 
-        assert!(log.wipe().is_err(), "the undeletable copy is reported");
-        assert!(log.records.is_empty());
-        assert_eq!(
-            std::fs::metadata(&path).unwrap().len(),
-            0,
-            "the log itself is wiped"
-        );
         assert!(
-            !path
-                .with_file_name("test.kvlog.unreadable-2-1-00000002")
-                .exists(),
-            "and the deletable copy is gone"
+            log.remove_asides().is_err(),
+            "the undeletable copy is reported"
+        );
+        let names = files_in(&path);
+        assert_eq!(
+            names,
+            ["test.kvlog.unreadable-4-1-0"],
+            "every other copy is gone"
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

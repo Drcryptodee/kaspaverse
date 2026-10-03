@@ -552,8 +552,24 @@ impl TransportStore {
     /// by no lookup and invisible to every screen.
     pub fn wipe(&mut self) -> Result<WipeReport> {
         let report = self.wipe_preview();
+        // Every copy kept aside is tried first; one that resists never stops
+        // the logs being emptied (`consensus-auditor`, PRE3-LOG). It is owed
+        // instead, and the next transport start deletes it: reporting a failed
+        // wipe over a store that is empty would be the worst lie this lane
+        // can tell.
+        let copies = [
+            self.messages.remove_asides().map(drop),
+            self.conversations.remove_asides().map(drop),
+        ];
         self.messages.wipe()?;
         self.conversations.wipe()?;
+        if let Some(e) = copies.into_iter().find_map(Result::err) {
+            log::error!(
+                "transport-store: a copy kept aside resisted the wipe ({e}); the next start \
+                 deletes it"
+            );
+            self.scrub_owed = true;
+        }
         Ok(report)
     }
 
@@ -3341,6 +3357,35 @@ mod tests {
             !log.windows(marker.len()).any(|w| w == marker.as_slice()),
             "but the log was rewritten all the same"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A copy that resists never stops the wipe** (`consensus-auditor`,
+    /// PRE3-LOG): both logs are emptied, the wipe reports what it destroyed,
+    /// and the copy is owed to the next start, which deletes it.
+    #[test]
+    fn a_copy_that_resists_does_not_stop_the_wipe() {
+        let dir = test_dir("wipe-resists");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        store.upsert_conversation(conversation("c1", 10)).unwrap();
+        store.record_message(message("tx1", "c1", 100, 1)).unwrap();
+        let aside = dir.join("messages.kvlog.unreadable-8-1-00000000");
+        std::fs::create_dir_all(aside.join("undeletable")).unwrap();
+
+        let report = store.wipe().unwrap();
+        assert_eq!((report.conversations, report.messages), (1, 1));
+        for log in ["messages.kvlog", "conversations.kvlog"] {
+            assert_eq!(
+                std::fs::metadata(dir.join(log)).unwrap().len(),
+                0,
+                "{log} emptied"
+            );
+        }
+
+        std::fs::remove_dir_all(&aside).unwrap();
+        std::fs::write(&aside, b"the words").unwrap();
+        store.finish_removals().unwrap();
+        assert!(!aside.exists(), "the next start deleted the copy");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

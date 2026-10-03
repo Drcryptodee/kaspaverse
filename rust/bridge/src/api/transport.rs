@@ -8198,8 +8198,9 @@ pub fn transport_hide_conversation(conversation_id: String) -> Result<(), AppErr
         hide_conversation_rows(&mut store, &conversation_id)
     };
     // Nudge any open list to re-pull. The thread does NOT 404 — the row
-    // survives by design; it simply stops being listed. Pinged even when the
-    // scrub failed: the hide itself is on disk by then (PRE3-LOG).
+    // survives by design; it simply stops being listed. Pinged on every
+    // outcome: even a hide that failed may have removed rows, and the thread
+    // must show what is left (PRE3-LOG).
     ping(&conversation_id);
     hidden
 }
@@ -8216,8 +8217,9 @@ fn hide_conversation_rows(
     // row is NOT hidden: a hidden row's unremoved words could be retried by
     // nothing and would come back with the contact's next message. Listed,
     // the user's retry reaches them (`ffi-leak-auditor` +
-    // `wallet-security-auditor`, PRE3-LOG). What was removed is scrubbed
-    // either way.
+    // `wallet-security-auditor`, PRE3-LOG). What was removed is scrubbed; if
+    // the tombstone or the scrub fails, the next start's `finish_removals`
+    // compacts the removed rows.
     let txids: Vec<String> = store
         .messages_for(conversation_id)
         .into_iter()
@@ -8754,9 +8756,10 @@ fn sweep_blocked_rows(store: &mut TransportStore, addresses: &[String]) -> (usiz
             swept.0,
             swept.1
         );
-        // A compaction, not a scrub: copies kept aside are deleted by an erase
-        // the user asks for or by a wipe, never by the start's housekeeping
-        // (the first start's load may have made one moments ago).
+        // A compaction, not a scrub: copies kept aside are deleted only for an
+        // erase the user asked for (a scrub, a wipe, or the start finishing one
+        // of those), never by housekeeping (the first start's load may have
+        // made one moments ago).
         if let Err(e) = store.compact() {
             log::warn!("transport-block: compaction after the start sweep failed: {e}");
         }
