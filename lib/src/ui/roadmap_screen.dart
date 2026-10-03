@@ -51,7 +51,7 @@ class RoadmapScreen extends StatelessWidget {
   ];
 
   /// **Which one is actually being built.** `P3` is the covenant engine and
-  /// the first covenant games on L1 are what it exists for (D-008/D-019), so
+  /// covenant games on L1 are what it exists for (D-008/D-019), so
   /// Games is `Next` and everything else is `Planned`. A name, not a date:
   /// the project can keep an order and cannot keep a quarter, and `T6`'s
   /// status column may not carry a promise this repo cannot honour.
