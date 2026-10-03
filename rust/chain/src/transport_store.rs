@@ -274,6 +274,11 @@ pub struct WipeReport {
 pub struct TransportStore {
     conversations: Log<ConversationRecord>,
     messages: Log<MessageRecord>,
+    /// A scrub started and did not finish: [`Self::finish_removals`] retries
+    /// it whole. In memory only, because the store lives for the process; a
+    /// relaunch's load compacts the removed rows, and the copies wait for the
+    /// next erase or wipe (the residual this cannot reach).
+    scrub_owed: bool,
 }
 
 impl TransportStore {
@@ -291,7 +296,9 @@ impl TransportStore {
     ///
     /// **A removal's bytes do not outlive the next start** (F30): a log that
     /// still holds a `Remove` frame (an erase whose own compaction failed, or
-    /// a removal no erase lane made) is compacted here.
+    /// a removal no erase lane made) is compacted here, and at every transport
+    /// start after it by [`Self::finish_removals`], because a re-unlock no
+    /// longer reloads the store.
     pub fn load(dir: PathBuf) -> Result<Self> {
         let mut store = Self {
             conversations: Log::load(dir.join("conversations.kvlog"), |c: &ConversationRecord| {
@@ -300,6 +307,7 @@ impl TransportStore {
             messages: Log::load(dir.join("messages.kvlog"), |m: &MessageRecord| {
                 m.txid.clone()
             })?,
+            scrub_owed: false,
         };
         if let Some(why) = store.messages.hold().or(store.conversations.hold()) {
             return Err(ChainError::Message(format!(
@@ -307,10 +315,8 @@ impl TransportStore {
                  is lost"
             )));
         }
-        if store.messages.holds_removed() || store.conversations.holds_removed() {
-            if let Err(e) = store.compact() {
-                log::warn!("transport-store: compaction of removed rows at load failed: {e}");
-            }
+        if let Err(e) = store.finish_removals() {
+            log::warn!("transport-store: compaction of removed rows at load failed: {e}");
         }
         Ok(store)
     }
@@ -575,9 +581,27 @@ impl TransportStore {
     /// reads them, so the user's erase reaches them too. They go first:
     /// deleting needs no space and frees some for the rewrite.
     pub fn scrub(&mut self) -> Result<()> {
+        self.scrub_owed = true;
         self.messages.remove_asides()?;
         self.conversations.remove_asides()?;
-        self.compact()
+        self.compact()?;
+        self.scrub_owed = false;
+        Ok(())
+    }
+
+    /// **Finish what an erase left undone** (PRE3-LOG, F30): a scrub that
+    /// failed is retried whole, copies included; otherwise a removal no erase
+    /// lane compacted is compacted. A no-op when neither is owed. The load runs
+    /// it, and so does every transport start, because the store now lives for
+    /// the process and a re-unlock no longer reloads it (`ffi-leak-auditor`).
+    pub fn finish_removals(&mut self) -> Result<()> {
+        if self.scrub_owed {
+            return self.scrub();
+        }
+        if self.messages.holds_removed() || self.conversations.holds_removed() {
+            return self.compact();
+        }
+        Ok(())
     }
 
     /// What [`Self::wipe`] WOULD destroy, without destroying it.
@@ -3242,6 +3266,42 @@ mod tests {
             .collect();
         assert!(!names.iter().any(|n| n.contains("unreadable")), "{names:?}");
         assert!(store.message("tx1").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A scrub that failed is finished by the next start** (`ffi-leak-auditor`,
+    /// PRE3-LOG): the store lives for the process, so a re-unlock does not
+    /// reload it; the transport start calls [`TransportStore::finish_removals`],
+    /// which retries the WHOLE scrub, copies included, not only the compaction
+    /// a reload would have done. The copy here cannot be deleted at first (a
+    /// directory sits on its name), then holds the words when the start comes.
+    #[test]
+    fn a_failed_scrub_is_finished_by_the_next_start() {
+        let dir = test_dir("scrub-retry");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        let marker: Vec<u8> = (0..61u8).map(|i| i.wrapping_mul(71) ^ 0x5A).collect();
+        let mut row = message("tx-gone", "c1", 100, 1);
+        row.envelope = marker.clone();
+        store.record_message(row).unwrap();
+        store.remove_message("tx-gone").unwrap();
+        let aside = dir.join("messages.kvlog.unreadable-8-61-00000000");
+        std::fs::create_dir_all(aside.join("undeletable")).unwrap();
+        assert!(store.scrub().is_err(), "the copy could not be deleted");
+
+        std::fs::remove_dir_all(&aside).unwrap();
+        std::fs::write(&aside, &marker).unwrap();
+        store.finish_removals().unwrap();
+        let holding: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| {
+                std::fs::read(p)
+                    .map(|b| b.windows(marker.len()).any(|w| w == marker.as_slice()))
+                    .unwrap_or(false)
+            })
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(holding.is_empty(), "no file holds the words: {holding:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

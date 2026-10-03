@@ -2047,6 +2047,12 @@ pub async fn transport_start() -> Result<(), AppError> {
             .collect();
         let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
         sweep_blocked_rows(&mut store, &addresses);
+        // And whatever an erase left undone (PRE3-LOG, F30): the store lives
+        // for the process now, so this start is where a failed scrub or an
+        // uncompacted removal is finished, not a reload that no longer comes.
+        if let Err(e) = store.finish_removals() {
+            log::warn!("transport-store: finishing removals at start failed: {e}");
+        }
     }
 
     // **A request whose sender never resolved gets another go.** In the
@@ -8212,19 +8218,28 @@ fn hide_conversation_rows(
     store: &mut TransportStore,
     conversation_id: &str,
 ) -> Result<(), AppError> {
-    // Content goes. Identity stays.
+    // Content goes. Identity stays. A removal that fails is still answered
+    // with the tombstone and the scrub, and then reported: hide promises the
+    // words leave the file, and a scrub after a failed remove would rewrite
+    // the unremoved row into the clean file and call it done
+    // (`ffi-leak-auditor`, PRE3-LOG; clear's honest-count rule).
     let txids: Vec<String> = store
         .messages_for(conversation_id)
         .into_iter()
         .map(|m| m.txid)
         .collect();
+    let mut unremoved = None;
     for txid in txids {
-        warn_store(store.remove_message(&txid));
+        if let Err(e) = store.remove_message(&txid) {
+            log::warn!("transport-hub: store remove failed: {e}");
+            unremoved.get_or_insert(e);
+        }
     }
     store
         .tombstone_conversation(conversation_id)
         .map_err(AppError::chain)?;
-    store.scrub().map_err(AppError::chain)
+    store.scrub().map_err(AppError::chain)?;
+    unremoved.map_or(Ok(()), |e| Err(AppError::chain(e)))
 }
 
 /// Forget what was SAID in one conversation, keeping the conversation itself.
@@ -8343,8 +8358,9 @@ fn clear_conversation_rows(
     // behind its `Remove` until a compaction that never came (PRE3-LOG,
     // F30), and a copy kept aside held all of them. A failure is the error,
     // like a failed remove above, because the count returned would
-    // otherwise promise something the disk lacks; the next start's load
-    // finishes the rewrite whether or not the user retries.
+    // otherwise promise something the disk lacks; the next transport start
+    // finishes the rewrite whether or not the user retries
+    // ([`TransportStore::finish_removals`]).
     store.scrub().map_err(AppError::chain)?;
     Ok(cleared)
 }
@@ -8683,9 +8699,17 @@ pub fn transport_block_conversation(conversation_id: String) -> Result<(), AppEr
     for id in &ids {
         ping(id);
     }
-    // Last: the block is complete by now, and only the words' removal from
-    // the file failed, which the next start finishes.
-    scrubbed.map_err(AppError::chain)
+    // **Not an error.** The block is complete by now: the refusal is saved,
+    // the rows are gone, the claims are dropped. Only the words' removal from
+    // the file failed, which the next transport start finishes. Reporting it
+    // as a failed block would tell the user something false, and a retry
+    // would find no conversation to block (`ffi-leak-auditor`, PRE3-LOG).
+    if let Err(e) = scrubbed {
+        log::warn!(
+            "transport-block: the scrub after a block failed ({e}); the next start finishes it"
+        );
+    }
+    Ok(())
 }
 
 /// Move a present-but-unreadable `block.list` aside as `block.list.corrupt`,
@@ -8743,7 +8767,8 @@ fn sweep_blocked_rows(store: &mut TransportStore, addresses: &[String]) -> (usiz
 /// F30). The scrub's outcome is returned beside the counts, not raised: by
 /// then the rows are gone for good, and the block's claims and pings must
 /// still run (`ffi-leak-auditor` + `consensus-auditor`); a scrub that failed
-/// is finished by the next start's load. Pure over the store, so it is
+/// is finished by the next transport start
+/// ([`TransportStore::finish_removals`]). Pure over the store, so it is
 /// tested without a hub.
 fn block_purge(
     store: &mut TransportStore,
@@ -13024,6 +13049,30 @@ mod tests {
         let reloaded = TransportStore::load(dir.clone()).unwrap();
         assert!(reloaded.conversation("live").is_some());
         assert!(reloaded.conversation("stale").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Hide reports a removal it could not make** (`ffi-leak-auditor`,
+    /// PRE3-LOG). The log file is made read-only, so the row's `Remove` cannot
+    /// be appended while the scrub's rename still works: hide must answer
+    /// `Err`, never Ok over words that are still in the file.
+    #[test]
+    fn hide_reports_a_removal_it_could_not_make() {
+        use std::os::unix::fs::PermissionsExt;
+        let (mut store, dir) = stash_store("hide-unremoved");
+        store
+            .upsert_conversation(row_for("thread", PARTNER_A, ConversationStatus::Active))
+            .unwrap();
+        message_in(&mut store, "m1", "thread", StoredKind::Comm);
+        let log = dir.join("messages.kvlog");
+        std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        assert!(hide_conversation_rows(&mut store, "thread").is_err());
+        assert!(
+            store.message("m1").is_some(),
+            "the row was not removed, and hide says so"
+        );
+        let _ = std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

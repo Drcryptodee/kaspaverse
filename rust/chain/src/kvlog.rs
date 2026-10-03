@@ -20,13 +20,17 @@
 //! landed behind the torn bytes and every later start lost it (F3).
 //!
 //! It is cut without a copy only when it provably holds no frame: shorter
-//! than a frame header, all zeros, or (v2) bytes in which no checksum-valid
-//! frame starts anywhere. Anything else is a bad frame with data behind it,
-//! which in v2 only corruption can produce, and in v1 also a torn frame the
-//! old writer appended past. That file is copied aside first
-//! (`<file>.unreadable-<unix ms>`, the block list's quarantine posture), so a
-//! repair never destroys bytes it could not read. [`Log::wipe`] removes the
-//! copies with the log.
+//! than a frame header, all zeros, or (v2) a single torn frame — no
+//! checksum-valid frame starts anywhere in it, and its first header's
+//! declared extent reaches the end of the file, because one append is in
+//! flight when a process dies. Anything else is a bad frame with data behind
+//! it, which in v2 only corruption can produce (or a checksum failing on every
+//! frame), and in v1 also a torn frame the old writer appended past. Those
+//! bytes, and only those (everything before the stop survives in the rewritten
+//! log), are copied aside first as
+//! `<file>.unreadable-<offset>-<length>-<crc32>`, the block list's quarantine
+//! posture, so a repair never destroys bytes it could not read. An erase the
+//! user asks for and [`Log::wipe`] remove the copies.
 //!
 //! **The writer always writes at the end it knows is good, and cuts only what
 //! it knows is garbage**: a write of its own that failed half-way, or a tail
@@ -471,9 +475,13 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
         }
 
         if let Tail::Unreadable(n) = found.tail {
-            // Nothing is cut until these bytes are safe somewhere else.
-            let aside = log.aside_path(&bytes);
-            if let Err(e) = atomic_write(&aside, &bytes) {
+            // Nothing is cut until these bytes are safe somewhere else. Only
+            // the cut's bytes: everything before the stop is kept by the
+            // rewrite, and copying it too would keep removed rows the user
+            // erased (`wallet-security-auditor`, PRE3-LOG).
+            let tail = &bytes[found.good_end..];
+            let aside = log.aside_path(found.good_end, tail);
+            if let Err(e) = atomic_write(&aside, tail) {
                 log.held = Some("unreadable bytes could not be copied aside");
                 log::error!(
                     "kvlog: {name}: {n} unreadable byte(s) after byte {} could not be copied \
@@ -484,7 +492,7 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
             }
             log::warn!(
                 "kvlog: {name}: {n} unreadable byte(s) after byte {} ({} frame(s) kept) — the \
-                 whole file is copied aside as {} before the cut",
+                 unreadable bytes are copied aside as {} before the cut",
                 found.good_end,
                 found.frames,
                 aside.file_name().unwrap_or_default().to_string_lossy()
@@ -570,15 +578,15 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
         format!("{}.unreadable-", self.name())
     }
 
-    /// Named by the file's length and checksum, so a load retried over the
-    /// same bytes (a migration failing on a full disk at every start) writes
-    /// the same copy again instead of another one.
-    fn aside_path(&self, bytes: &[u8]) -> PathBuf {
+    /// Named by where the cut bytes started, their length and checksum, so a
+    /// load retried over the same file (a migration failing on a full disk at
+    /// every start) writes the same copy again instead of another one.
+    fn aside_path(&self, offset: usize, tail: &[u8]) -> PathBuf {
         self.path.with_file_name(format!(
-            "{}{}-{:08x}",
+            "{}{offset}-{}-{:08x}",
             self.aside_prefix(),
-            bytes.len(),
-            crc32fast::hash(bytes)
+            tail.len(),
+            crc32fast::hash(tail)
         ))
     }
 
@@ -1181,6 +1189,7 @@ mod tests {
         let path = test_path("v1-unreadable");
         let mut bytes =
             testing::v1_frame_bytes(&borsh::to_vec(&Frame::Upsert(row("a", 1))).unwrap());
+        let good_end = bytes.len();
         bytes.extend_from_slice(&[40, 0, 0, 0, 9, 9, 9]);
         bytes.extend_from_slice(&testing::v1_frame_bytes(
             &borsh::to_vec(&Frame::Upsert(row("b", 2))).unwrap(),
@@ -1199,8 +1208,8 @@ mod tests {
         let aside = path.with_file_name(aside_in(&names));
         assert_eq!(
             std::fs::read(&aside).unwrap(),
-            bytes,
-            "the copy is the file as found"
+            &bytes[good_end..],
+            "the copy is the bytes the cut removed, and only those"
         );
 
         let leftover = path.with_file_name(".test.kvlog.unreadable-7-00000000.tmp");
@@ -1237,7 +1246,8 @@ mod tests {
         assert_eq!(names.len(), 2, "the log and its copy: {names:?}");
         assert_eq!(
             std::fs::read(path.with_file_name(aside_in(&names))).unwrap(),
-            bytes
+            &bytes[after_a..],
+            "the bad frame and everything behind it"
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -1486,8 +1496,8 @@ mod tests {
         let names = files_in(&path);
         assert_eq!(
             std::fs::read(path.with_file_name(aside_in(&names))).unwrap(),
-            bytes,
-            "every byte is kept aside"
+            &bytes[FILE_HEADER_LEN..],
+            "every frame is kept aside"
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -1545,10 +1555,11 @@ mod tests {
         let mut bytes = std::fs::read(&path).unwrap();
         bytes[after_a + FRAME_HEADER_LEN + 6] ^= 0x01; // inside b's body: c stays behind it
         std::fs::write(&path, &bytes).unwrap();
+        let tail = &bytes[after_a..];
         let temp = path.with_file_name(format!(
-            ".test.kvlog.unreadable-{}-{:08x}.tmp",
-            bytes.len(),
-            crc32fast::hash(&bytes)
+            ".test.kvlog.unreadable-{after_a}-{}-{:08x}.tmp",
+            tail.len(),
+            crc32fast::hash(tail)
         ));
         std::fs::create_dir_all(&temp).unwrap();
 

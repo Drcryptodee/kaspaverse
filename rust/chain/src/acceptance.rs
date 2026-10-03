@@ -271,6 +271,18 @@ impl TrackerState {
         // fixed 256 KiB threshold this log carried never fired on the phone,
         // whose watch log sat 97 % dead at 48 KB.
         let log = Log::load(path, |r: &WatchRecord| r.txid.clone())?;
+        // **Refuse a log that cannot be written** (`wallet-security-auditor`,
+        // PRE3-LOG). The fold warns past a failed write and advances
+        // `vcc.cursor` regardless, so a read-only watch log would freeze
+        // every status while the cursor moved past the facts that should have
+        // changed them, for good, with the timers still firing off the frozen
+        // ones. Failing the load keeps the documented soft fallback: no
+        // overlay, the cursor untouched, the catch-up at the next start.
+        if let Some(why) = log.hold() {
+            return Err(crate::error::ChainError::Message(format!(
+                "the acceptance log cannot be written ({why}); acceptance tracking stays off"
+            )));
+        }
         let mut by_accepting_block: HashMap<String, Vec<String>> = HashMap::new();
         for record in log.records.values() {
             if let PersistedStatus::Accepted {
@@ -2587,6 +2599,39 @@ mod tests {
             state.is_watched(&txid(2)),
             "the watch added after the tear survives"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The tracker refuses a watch log it cannot write**
+    /// (`wallet-security-auditor`, PRE3-LOG): its fold warns past failed
+    /// writes and advances `vcc.cursor` anyway, so it must not run on a
+    /// read-only log. The load fails, the documented soft fallback takes over,
+    /// and the cursor is never touched.
+    #[test]
+    fn the_tracker_refuses_a_watch_log_it_cannot_write() {
+        let dir = test_dir("held");
+        std::fs::create_dir_all(&dir).unwrap();
+        let bytes = crate::kvlog::testing::v1_frame_bytes(
+            &borsh::to_vec(&crate::kvlog::Frame::Upsert(WatchRecord {
+                txid: txid(1),
+                source: WatchSource::Send,
+                watched_unix_ms: 1_000,
+                status: PersistedStatus::Submitted {
+                    submit_ok_unix_ms: 1_000,
+                },
+            }))
+            .unwrap(),
+        );
+        std::fs::write(dir.join("acceptance.kvlog"), &bytes).unwrap();
+        // The migration cannot be written: a directory sits on its temp name.
+        std::fs::create_dir_all(dir.join(".acceptance.kvlog.tmp")).unwrap();
+
+        assert!(AcceptanceTracker::load(dir.clone()).is_err());
+        assert!(
+            !dir.join("vcc.cursor").exists(),
+            "the cursor is never touched"
+        );
+        assert_eq!(std::fs::read(dir.join("acceptance.kvlog")).unwrap(), bytes);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
