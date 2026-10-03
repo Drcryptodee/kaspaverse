@@ -8238,9 +8238,14 @@ fn hide_conversation_rows(
         }
         return Err(AppError::chain(e));
     }
-    store
-        .tombstone_conversation(conversation_id)
-        .map_err(AppError::chain)?;
+    if let Err(e) = store.tombstone_conversation(conversation_id) {
+        // Not hidden, so still listed for a retry; what was removed is
+        // scrubbed now rather than left to wait for it (`wallet-security-auditor`).
+        if let Err(scrub) = store.scrub() {
+            log::warn!("transport-hub: scrub after a failed hide failed: {scrub}");
+        }
+        return Err(AppError::chain(e));
+    }
     // **Done once the tombstone lands.** A scrub that fails after it leaves
     // the bytes owed to the next start (`finish_removals`), and the row is off
     // the list, so an error here would report a hide that happened and offer
@@ -8368,7 +8373,8 @@ fn clear_conversation_rows(
     // "I do not want these words on my phone" has to reach the file, not
     // only the screen: each removed row's frame, envelope included, stayed
     // behind its `Remove` until a compaction that never came (PRE3-LOG,
-    // F30), and a copy kept aside held all of them. A failure is the error,
+    // F30), and a copy kept aside may hold some of them (the cut bytes). A
+    // failure is the error,
     // like a failed remove above, because the count returned would
     // otherwise promise something the disk lacks; the next transport start
     // finishes the rewrite whether or not the user retries

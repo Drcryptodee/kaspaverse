@@ -611,8 +611,8 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
         ))
     }
 
-    /// The copies a load kept of files it could not read whole, and the temp
-    /// file a crash can leave mid-copy (`.<name>.unreadable-….tmp`).
+    /// The copies of the unreadable tails loads cut, and the temp file a crash
+    /// can leave mid-copy (`.<name>.unreadable-….tmp`).
     fn asides(&self) -> Result<Vec<PathBuf>> {
         let Some(dir) = self.path.parent() else {
             return Ok(Vec::new());
@@ -1278,8 +1278,8 @@ mod tests {
 
     /// **A bad frame with a good one behind it is corruption, not a tear.**
     /// Point in time: the record before it loads, the ones from it on do not,
-    /// and the file is copied aside before the cut, so the good frame's bytes
-    /// still exist.
+    /// and the bad frame and everything behind it are copied aside before the
+    /// cut, so the good frame's bytes still exist.
     #[test]
     fn a_v2_frame_failing_with_data_behind_it_is_copied_aside() {
         let path = test_path("v2-unreadable");
