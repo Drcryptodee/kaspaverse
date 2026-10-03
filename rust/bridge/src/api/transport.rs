@@ -8212,11 +8212,12 @@ fn hide_conversation_rows(
     store: &mut TransportStore,
     conversation_id: &str,
 ) -> Result<(), AppError> {
-    // Content goes. Identity stays. A removal that fails is still answered
-    // with the tombstone and the scrub, and then reported: hide promises the
-    // words leave the file, and a scrub after a failed remove would rewrite
-    // the unremoved row into the clean file and call it done
-    // (`ffi-leak-auditor`, PRE3-LOG; clear's honest-count rule).
+    // Content goes. Identity stays. A removal that fails is reported, and the
+    // row is NOT hidden: a hidden row's unremoved words could be retried by
+    // nothing and would come back with the contact's next message. Listed,
+    // the user's retry reaches them (`ffi-leak-auditor` +
+    // `wallet-security-auditor`, PRE3-LOG). What was removed is scrubbed
+    // either way.
     let txids: Vec<String> = store
         .messages_for(conversation_id)
         .into_iter()
@@ -8229,11 +8230,16 @@ fn hide_conversation_rows(
             unremoved.get_or_insert(e);
         }
     }
+    if let Some(e) = unremoved {
+        if let Err(scrub) = store.scrub() {
+            log::warn!("transport-hub: scrub after a partial hide failed: {scrub}");
+        }
+        return Err(AppError::chain(e));
+    }
     store
         .tombstone_conversation(conversation_id)
         .map_err(AppError::chain)?;
-    store.scrub().map_err(AppError::chain)?;
-    unremoved.map_or(Ok(()), |e| Err(AppError::chain(e)))
+    store.scrub().map_err(AppError::chain)
 }
 
 /// Forget what was SAID in one conversation, keeping the conversation itself.
@@ -8694,7 +8700,9 @@ pub fn transport_block_conversation(conversation_id: String) -> Result<(), AppEr
     }
     // **Not an error.** The block is complete by now: the refusal is saved,
     // the rows are gone, the claims are dropped. Only the words' removal from
-    // the file failed, which the next transport start finishes. Reporting it
+    // the file failed, which the next transport start in this process finishes
+    // (after a relaunch, the load compacts the removed rows and a copy that
+    // could not be deleted waits for the next erase or wipe). Reporting it
     // as a failed block would tell the user something false, and a retry
     // would find no conversation to block (`ffi-leak-auditor`, PRE3-LOG).
     if let Err(e) = scrubbed {
@@ -8746,8 +8754,9 @@ fn sweep_blocked_rows(store: &mut TransportStore, addresses: &[String]) -> (usiz
             swept.0,
             swept.1
         );
-        // A compaction, not a scrub: a copy the load kept aside moments ago,
-        // at this very start, is not this sweep's to delete.
+        // A compaction, not a scrub: copies kept aside are deleted by an erase
+        // the user asks for or by a wipe, never by the start's housekeeping
+        // (the first start's load may have made one moments ago).
         if let Err(e) = store.compact() {
             log::warn!("transport-block: compaction after the start sweep failed: {e}");
         }
@@ -13058,35 +13067,32 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// **Hide reports a removal it could not make** (`ffi-leak-auditor`,
-    /// PRE3-LOG). The log file is made read-only, so the row's `Remove` cannot
-    /// be appended while the scrub's rename still works: hide must answer
-    /// `Err`, never Ok over words that are still in the file.
+    /// **Hide reports a removal it could not make, and does not hide**
+    /// (`ffi-leak-auditor` + `wallet-security-auditor`, PRE3-LOG): never Ok
+    /// over words still in the file, and never a hidden row no retry reaches.
     #[test]
     fn hide_reports_a_removal_it_could_not_make() {
-        use std::os::unix::fs::PermissionsExt;
         let (mut store, dir) = stash_store("hide-unremoved");
         store
             .upsert_conversation(row_for("thread", PARTNER_A, ConversationStatus::Active))
             .unwrap();
         message_in(&mut store, "m1", "thread", StoredKind::Comm);
+        // One byte appended behind the store: the log refuses to write over
+        // bytes it does not own, so the removal fails, whoever runs the test.
         let log = dir.join("messages.kvlog");
-        std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o444)).unwrap();
-        // The precondition, checked rather than assumed: a privileged runner
-        // can write a read-only file, and then this test cannot make the
-        // removal fail.
-        if std::fs::OpenOptions::new().write(true).open(&log).is_ok() {
-            eprintln!("skipped: this runner can write a read-only file");
-            let _ = std::fs::remove_dir_all(&dir);
-            return;
-        }
+        let mut bytes = std::fs::read(&log).unwrap();
+        bytes.push(0x5A);
+        std::fs::write(&log, &bytes).unwrap();
 
         assert!(hide_conversation_rows(&mut store, "thread").is_err());
         assert!(
             store.message("m1").is_some(),
             "the row was not removed, and hide says so"
         );
-        let _ = std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644));
+        assert!(
+            !store.is_conversation_tombstoned("thread"),
+            "and the thread stays listed, so a retry can reach the row"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

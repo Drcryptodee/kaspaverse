@@ -213,7 +213,7 @@ enum Tail {
     Clean,
     /// Bytes that provably hold no frame: cut them.
     Torn(usize),
-    /// Bytes that may hold frames: copy the file aside, then cut them.
+    /// Bytes that may hold frames: copy them aside, then cut them.
     Unreadable(usize),
 }
 
@@ -516,6 +516,9 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
             (_, Tail::Clean, true) => Some("compacted"),
             _ => None,
         };
+        // A tail the load classified is this log's own to cut, by the rewrite
+        // below or, if that fails, by the next write.
+        log.cut_owed = found.tail != Tail::Clean;
         if let Some(why) = why {
             match log.compact() {
                 // Counts only: what the rewrite kept, for a reader with the
@@ -625,13 +628,21 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
 
     /// Delete every copy a load kept aside, and say how many. An erase the
     /// user asked for reaches them too: no product surface reads them, and
-    /// they hold everything the log held, the erased words included.
+    /// the cut bytes they hold may include words the user has since erased.
+    /// Every copy is tried and the first failure reported, so one that
+    /// cannot be deleted does not shield the rest (`wallet-security-auditor`).
     pub(crate) fn remove_asides(&self) -> Result<usize> {
         let asides = self.asides()?;
+        let mut first = None;
         for aside in &asides {
-            std::fs::remove_file(aside)?;
+            if let Err(e) = std::fs::remove_file(aside) {
+                first.get_or_insert(e);
+            }
         }
-        Ok(asides.len())
+        match first {
+            Some(e) => Err(e.into()),
+            None => Ok(asides.len()),
+        }
     }
 
     /// Write one frame at [`Self::end`], cutting first only bytes this log
@@ -787,8 +798,11 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
     /// would extend, so a restart resurrects everything the user asked to
     /// destroy. Emptying the file first means a failure returns `Err` with
     /// both halves still intact and consistent — the caller retries, and
-    /// nothing is half-deleted. The aside copies go first of all, because
-    /// they hold everything the log held.
+    /// nothing is half-deleted. The aside copies are tried first, because the
+    /// cut bytes they hold may include the user's words; a copy that cannot be
+    /// deleted does not stop the wipe of the log itself, and its failure is
+    /// what the wipe reports (`wallet-security-auditor`), so a retry reaches
+    /// it.
     ///
     /// Atomic and durable through [`atomic_write`]: a crash mid-wipe leaves
     /// either the whole old log or an empty one, never a torn frame, and a
@@ -800,14 +814,14 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
     /// diagnose than an empty file.
     pub(crate) fn wipe(&mut self) -> Result<()> {
         self.refuse_if_held()?;
-        self.remove_asides()?;
+        let copies = self.remove_asides();
         atomic_write(&self.path, &[])?;
         self.records.clear();
         self.tombstoned.clear();
         self.end = 0;
         self.cut_owed = false;
         self.removed = false;
-        Ok(())
+        copies.map(drop)
     }
 
     /// The file this state rewrites to: one `Upsert` per live record and one
@@ -835,6 +849,22 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
     /// otherwise be lost by the very rewrite meant to keep it.
     pub(crate) fn compact(&mut self) -> Result<()> {
         self.refuse_if_held()?;
+        // [`Self::append`]'s rule, for the rewrite too: a file that grew
+        // behind this log holds another writer's frames, and a rewrite from
+        // this log's state would drop them (`ffi-leak-auditor`, PRE3-LOG).
+        let on_disk = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
+        if on_disk > self.end && !self.cut_owed {
+            log::error!(
+                "kvlog: {} is {on_disk} bytes but this log wrote {} — another writer; refusing \
+                 to rewrite over it",
+                self.name(),
+                self.end
+            );
+            return Err(ChainError::Message(format!(
+                "kvlog: {} grew behind this log — refusing to rewrite over another writer",
+                self.name()
+            )));
+        }
         let image = self.image()?;
         let check = replay(&image, self.key_of, v1_frame::<T>, true)?;
         let same = check.format == Format::V2
@@ -1191,8 +1221,8 @@ mod tests {
 
     /// **A v1 file with bytes after its last good frame keeps a copy.** The
     /// v1 writer appended past tears (F3), so those bytes may be frames; the
-    /// migration keeps what it read and copies the whole file aside before
-    /// the cut. A wipe takes the copy with the log.
+    /// migration keeps what it read and copies the cut bytes aside before the
+    /// cut. A wipe takes the copy with the log.
     #[test]
     fn a_v1_log_with_an_unreadable_tail_is_copied_aside_before_the_cut() {
         let path = test_path("v1-unreadable");
@@ -1810,6 +1840,57 @@ mod tests {
             std::fs::read(&path).unwrap(),
             before,
             "and nothing was replaced"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// **A rewrite keeps the writer's rule**: a file that grew behind this log
+    /// holds another writer's frames, and compacting from this log's state
+    /// would drop them, so the compaction refuses as the append does.
+    #[test]
+    fn another_writer_s_frames_survive_this_log_s_compaction() {
+        let path = test_path("two-writers-compact");
+        let mut first = Log::load(path.clone(), key_of).unwrap();
+        first.upsert("a".into(), row("a", 1)).unwrap();
+        let mut second = Log::load(path.clone(), key_of).unwrap();
+        second.upsert("b".into(), row("b", 2)).unwrap();
+
+        assert!(first.compact().is_err(), "refused, as the append is");
+        let reloaded = Log::load(path.clone(), key_of).unwrap();
+        assert_eq!(sorted_keys(&reloaded), ["a", "b"]);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// **A copy that cannot be deleted does not stop a wipe**: the log is
+    /// emptied, the other copies go, and the failure is what the wipe reports.
+    #[test]
+    fn an_undeletable_copy_does_not_stop_a_wipe() {
+        let path = test_path("wipe-undeletable");
+        let mut log = Log::load(path.clone(), key_of).unwrap();
+        log.upsert("a".into(), row("a", 1)).unwrap();
+        std::fs::create_dir_all(
+            path.with_file_name("test.kvlog.unreadable-1-1-00000001")
+                .join("x"),
+        )
+        .unwrap();
+        std::fs::write(
+            path.with_file_name("test.kvlog.unreadable-2-1-00000002"),
+            b"w",
+        )
+        .unwrap();
+
+        assert!(log.wipe().is_err(), "the undeletable copy is reported");
+        assert!(log.records.is_empty());
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            0,
+            "the log itself is wiped"
+        );
+        assert!(
+            !path
+                .with_file_name("test.kvlog.unreadable-2-1-00000002")
+                .exists(),
+            "and the deletable copy is gone"
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

@@ -571,15 +571,17 @@ impl TransportStore {
     /// The copies a load kept aside are [`Self::scrub`]'s, not this one's: a
     /// load compacts too, and must not delete the copy it just made.
     pub fn compact(&mut self) -> Result<()> {
-        self.messages.compact()?;
-        self.conversations.compact()
+        // Both logs are tried, the first failure reported.
+        let messages = self.messages.compact();
+        let conversations = self.conversations.compact();
+        messages.and(conversations)
     }
 
     /// **An erase's rewrite: every copy first, then both logs** (PRE3-LOG,
-    /// F30). The copies a load kept aside of a file it could not read whole
-    /// hold everything that file held, erased words included, and nothing
-    /// reads them, so the user's erase reaches them too. They go first:
-    /// deleting needs no space and frees some for the rewrite.
+    /// F30). The copies a load kept aside hold the bytes it cut from a file it
+    /// could not read whole, which may include words the user has since
+    /// erased, and nothing reads them, so the user's erase reaches them too.
+    /// They go first: deleting needs no space and frees some for the rewrite.
     pub fn scrub(&mut self) -> Result<()> {
         self.scrub_owed = true;
         // Every step is tried whatever an earlier one did, and the first
