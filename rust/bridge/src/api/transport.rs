@@ -8217,9 +8217,9 @@ fn hide_conversation_rows(
     // row is NOT hidden: a hidden row's unremoved words could be retried by
     // nothing and would come back with the contact's next message. Listed,
     // the user's retry reaches them (`ffi-leak-auditor` +
-    // `wallet-security-auditor`, PRE3-LOG). What was removed is scrubbed; if
-    // the tombstone or the scrub fails, the next start's `finish_removals`
-    // compacts the removed rows.
+    // `wallet-security-auditor`, PRE3-LOG). What was removed is scrubbed on
+    // every path; a scrub that fails is retried whole by the next start's
+    // `finish_removals`.
     let txids: Vec<String> = store
         .messages_for(conversation_id)
         .into_iter()
@@ -8374,10 +8374,9 @@ fn clear_conversation_rows(
     // only the screen: each removed row's frame, envelope included, stayed
     // behind its `Remove` until a compaction that never came (PRE3-LOG,
     // F30), and a copy kept aside may hold some of them (the cut bytes). A
-    // failure is the error,
-    // like a failed remove above, because the count returned would
-    // otherwise promise something the disk lacks; the next transport start
-    // finishes the rewrite whether or not the user retries
+    // failure is the error, like a failed remove above, because the count
+    // returned would otherwise promise something the disk lacks; the next
+    // transport start finishes the rewrite whether or not the user retries
     // ([`TransportStore::finish_removals`]).
     store.scrub().map_err(AppError::chain)?;
     Ok(cleared)
@@ -13167,6 +13166,47 @@ mod tests {
         std::fs::write(&aside, b"the words").unwrap();
         start_store_step(&mut store, &[]);
         assert!(!aside.exists(), "and the next start finished the scrub");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A hide whose tombstone fails scrubs what it removed** (`consensus-auditor`
+    /// fixture, PRE3-LOG): the row stays listed for a retry, the message is
+    /// gone, and its envelope is out of the file now rather than waiting.
+    #[test]
+    fn a_hide_whose_tombstone_fails_scrubs_what_it_removed() {
+        let (mut store, dir) = stash_store("hide-tombstone-fails");
+        store
+            .upsert_conversation(row_for("thread", PARTNER_A, ConversationStatus::Active))
+            .unwrap();
+        let words: Vec<u8> = (0..61u8).map(|i| i.wrapping_mul(17) ^ 0x3D).collect();
+        store
+            .record_message(MessageRecord {
+                txid: "m1".into(),
+                conversation_id: "thread".into(),
+                direction: MessageDirection::Inbound,
+                kind: StoredKind::Comm,
+                envelope: words.clone(),
+                unix_ms: 1,
+                alias_on_wire: None,
+                sealed_to: None,
+                provenance: RowSource::NodeScanned,
+                wire: WireNamespace::CiphMsg,
+            })
+            .unwrap();
+        // One byte behind the conversations log: the tombstone is refused.
+        let conversations = dir.join("conversations.kvlog");
+        let mut bytes = std::fs::read(&conversations).unwrap();
+        bytes.push(0x5A);
+        std::fs::write(&conversations, &bytes).unwrap();
+
+        assert!(hide_conversation_rows(&mut store, "thread").is_err());
+        assert!(!store.is_conversation_tombstoned("thread"), "still listed");
+        assert!(store.message("m1").is_none(), "the message went");
+        let log = std::fs::read(dir.join("messages.kvlog")).unwrap();
+        assert!(
+            !log.windows(words.len()).any(|w| w == words.as_slice()),
+            "and its envelope is out of the file now"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

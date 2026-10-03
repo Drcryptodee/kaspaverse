@@ -129,8 +129,9 @@ const FRAME_ABC_CRC: u32 = 0x66E1_5D33;
 /// `frame_crc` of the 4 KiB pattern as a body: a carried state reaching the
 /// accelerated path in the second update (zlib; `dependency-steward`).
 const FRAME_LONG_CRC: u32 = 0x6F23_BA11;
-/// `frame_crc` of bytes 1..4094 of that pattern (4093 bytes): unaligned start,
-/// leftover words and trailing bytes on every path (zlib; `dependency-steward`).
+/// `frame_crc` of bytes 1..4094 of that pattern (4093 bytes): the unaligned
+/// start, leftover words and trailing bytes on the paths that have them (zlib;
+/// `dependency-steward`).
 const FRAME_UNALIGNED_CRC: u32 = 0x3EE0_5566;
 
 fn long_pattern() -> Vec<u8> {
