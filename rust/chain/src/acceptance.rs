@@ -2509,4 +2509,33 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// **PB-023: the old bytes are the contract.** Written by the v1 writer
+    /// (`[u32 LE len][borsh Frame]`) through this tracker at `d76ab91`, before
+    /// the v2 format existed, and never regenerated. Literal expectations from
+    /// the calls that wrote it: two watches, one accepted, a third dropped.
+    #[test]
+    fn the_v1_fixture_written_by_the_v1_writer_loads_whole() {
+        let dir = test_dir("v1-fixture");
+        std::fs::create_dir_all(&dir).unwrap();
+        let bytes: &[u8] = include_bytes!("../tests/fixtures/kvlog_v1/acceptance.kvlog");
+        assert_eq!(bytes.len(), 513, "the committed v1 bytes, unchanged");
+        let path = dir.join("acceptance.kvlog");
+        std::fs::write(&path, bytes).unwrap();
+
+        let state = TrackerState::load(path).unwrap();
+        assert_eq!(state.log.records.len(), 2);
+        assert_eq!(
+            state.status(&txid(1), 2_000),
+            Some(TxStatus::Accepted {
+                blue_depth: 0,
+                accepted_unix_ms: 2_000
+            })
+        );
+        assert_eq!(state.status(&txid(2), 1_100), Some(TxStatus::Submitted));
+        assert!(!state.is_watched(&txid(3)), "the dropped watch stays dropped");
+        assert_eq!(state.by_accepting_block.get(&block(1)), Some(&vec![txid(1)]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

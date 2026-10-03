@@ -2718,4 +2718,45 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
     }
+
+    /// **PB-023: the old bytes are the contract.** Written by the v1 writer —
+    /// `[u32 LE len][borsh StoreFrame]`, a tombstone carrying the raw 32-byte
+    /// txid — through this store at `d76ab91`, before the activity log moved
+    /// onto `kvlog`, and never regenerated. Literal expectations from the calls
+    /// that wrote it: a deposit (written twice), a send, a reorged deposit.
+    #[test]
+    fn the_v1_fixture_written_by_the_v1_writer_loads_whole() {
+        let dir = std::env::temp_dir().join(format!("kv-wsync-v1-fixture-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bytes: &[u8] = include_bytes!("../tests/fixtures/kvlog_v1/activity.kvlog");
+        assert_eq!(bytes.len(), 730, "the committed v1 bytes, unchanged");
+        let path = dir.join("activity.kvlog");
+        std::fs::write(&path, bytes).unwrap();
+
+        let store = ActivityStore::load(path).unwrap();
+        let rows = store.list(Some(1_000_000), &HashSet::new(), &HashSet::new());
+        assert_eq!(rows.len(), 2, "the reorged deposit stays removed");
+        let deposit = rows
+            .iter()
+            .find(|r| r.txid == "11".repeat(32))
+            .expect("the deposit");
+        assert_eq!(deposit.direction, ActivityDirection::Incoming);
+        assert_eq!(deposit.value_sompi, 500_000);
+        assert_eq!(deposit.block_daa_score, 1_000);
+        assert_eq!(deposit.unixtime_msec, Some(1_700_000_001_000));
+        let send = rows
+            .iter()
+            .find(|r| r.txid == "22".repeat(32))
+            .expect("the send");
+        assert_eq!(send.direction, ActivityDirection::Outgoing);
+        assert_eq!(send.fee_sompi, Some(1234));
+        assert_eq!(
+            send.counterparty_address,
+            Some(mainnet_address(1).to_string())
+        );
+        assert!(!rows.iter().any(|r| r.txid == "33".repeat(32)));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

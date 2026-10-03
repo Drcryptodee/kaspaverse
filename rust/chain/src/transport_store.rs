@@ -2932,4 +2932,65 @@ mod tests {
         assert!(!rendered.contains("kaspa:"));
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// **PB-023: the old bytes are the contract.** Both files were written by
+    /// the v1 writer — `[u32 LE len][borsh Frame]`, no header, no checksum —
+    /// through this store's own API at `d76ab91`, before the v2 format
+    /// existed, and committed before any decoder changed. They are never
+    /// regenerated: a fixture written through the new code cannot see the old
+    /// format. Every expectation below is a literal from the calls that wrote
+    /// them (an overwrite, a remove, a tombstone flipped three times, an
+    /// indexer row overridden by node truth, a reorg ghost).
+    #[test]
+    fn the_v1_fixture_written_by_the_v1_writer_loads_whole() {
+        let dir = test_dir("v1-fixture");
+        std::fs::create_dir_all(&dir).unwrap();
+        let conversations: &[u8] =
+            include_bytes!("../tests/fixtures/kvlog_v1/conversations.kvlog");
+        let messages: &[u8] = include_bytes!("../tests/fixtures/kvlog_v1/messages.kvlog");
+        assert_eq!(
+            (conversations.len(), messages.len()),
+            (541, 710),
+            "the committed v1 bytes, unchanged"
+        );
+        std::fs::write(dir.join("conversations.kvlog"), conversations).unwrap();
+        std::fs::write(dir.join("messages.kvlog"), messages).unwrap();
+
+        let store = TransportStore::load(dir.clone()).unwrap();
+
+        let c1 = store.conversation("c1").expect("c1 survives");
+        assert_eq!(c1.status, ConversationStatus::Active, "the later frame won");
+        assert_eq!(c1.their_alias.as_deref(), Some("a1e1b60b5fca"));
+        assert_eq!(c1.last_activity_unix_ms, 30);
+        assert_eq!(c1.my_alias, "0000000000c1");
+        let c2 = store.conversation("c2").expect("c2 survives");
+        assert_eq!(c2.status, ConversationStatus::PendingInbound);
+        assert_eq!(c2.bound_index, 4);
+        assert!(c2.contact_address.is_empty());
+        assert!(store.is_conversation_tombstoned("c2"), "hidden, then shown, then hidden");
+        assert!(!store.is_conversation_tombstoned("c1"));
+        assert!(store.conversation("c3").is_none(), "the removed row stays removed");
+
+        let m_in = store.message("m-in").expect("m-in");
+        assert_eq!(m_in.direction, MessageDirection::Inbound);
+        assert_eq!(m_in.provenance, RowSource::NodeScanned);
+        assert_eq!(m_in.wire, WireNamespace::CiphMsg);
+        assert_eq!(m_in.envelope[60], 1);
+        let m_out = store.message("m-out").expect("the outbound row");
+        assert_eq!(m_out.direction, MessageDirection::Outbound);
+        assert_eq!(m_out.provenance, RowSource::Own);
+        assert_eq!(m_out.sealed_to, Some((KeyBranch::Receive, 7)));
+        assert_eq!(m_out.wire, WireNamespace::KChat);
+        assert_eq!(m_out.alias_on_wire, None);
+        assert_eq!(m_out.envelope[60], 2);
+        let m_hs = store.message("m-hs").expect("m-hs");
+        assert_eq!(m_hs.kind, StoredKind::Handshake);
+        assert_eq!(m_hs.provenance, RowSource::NodeScanned, "the override frame won");
+        assert!(store.message("m-gone").is_none(), "the removed row stays removed");
+        assert!(store.is_message_tombstoned("m-ghost"));
+        assert_eq!(store.messages_for("c1").len(), 3);
+        assert_eq!(store.messages_for("c2").len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
