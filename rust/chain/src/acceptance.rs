@@ -48,6 +48,7 @@ use kaspa_consensus_core::Hash;
 use kaspa_wallet_core::rpc::Rpc;
 use tokio::sync::{broadcast, mpsc};
 
+use crate::durable::atomic_write;
 use crate::error::Result;
 use crate::kvlog::Log;
 use crate::spans;
@@ -85,9 +86,6 @@ const TERMINAL_DEPTH_BLUE: u64 = 2_000;
 
 /// Watch-set cap. Eviction (oldest first) is LOGGED, never silent.
 const WATCH_CAP: usize = 512;
-
-/// Load-time compaction threshold for the churn-heavy watch log.
-const COMPACT_THRESHOLD_BYTES: u64 = 256 * 1024;
 
 /// Window/stall tick cadence.
 const TICK: Duration = Duration::from_secs(10);
@@ -269,8 +267,10 @@ struct TrackerState {
 
 impl TrackerState {
     fn load(path: PathBuf) -> Result<Self> {
-        let mut log = Log::load(path, |r: &WatchRecord| r.txid.clone())?;
-        log.compact_if_larger_than(COMPACT_THRESHOLD_BYTES)?;
+        // Repaired, migrated and compacted by the load itself (PRE3-LOG): the
+        // fixed 256 KiB threshold this log carried never fired on the phone,
+        // whose watch log sat 97 % dead at 48 KB.
+        let log = Log::load(path, |r: &WatchRecord| r.txid.clone())?;
         let mut by_accepting_block: HashMap<String, Vec<String>> = HashMap::new();
         for record in log.records.values() {
             if let PersistedStatus::Accepted {
@@ -327,7 +327,8 @@ impl TrackerState {
                     submit_ok_unix_ms: now_ms,
                 },
             },
-        )
+        )?;
+        Ok(())
     }
 
     /// The live stream put these chain blocks (back) on the chain.
@@ -619,7 +620,8 @@ impl TrackerState {
             accepting_blue_score,
             accepted_unix_ms,
         };
-        self.log.upsert(txid.to_string(), updated)
+        self.log.upsert(txid.to_string(), updated)?;
+        Ok(())
     }
 
     /// Drop watches older than the pruning horizon — past it no node can
@@ -1172,10 +1174,10 @@ impl AcceptanceTracker {
             }
         }
         self.cursor_written.store(now, Ordering::Relaxed);
-        if let Some(parent) = self.cursor_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Err(e) = std::fs::write(&self.cursor_path, hash.to_string()) {
+        // Durable and atomic (PRE3-LOG, F47's twin): a bare write truncates
+        // first, so a crash inside it left an empty cursor that reads as a
+        // first run.
+        if let Err(e) = atomic_write(&self.cursor_path, hash.to_string().as_bytes()) {
             log::warn!("acceptance: cursor write failed: {e}");
         }
     }
@@ -2533,9 +2535,39 @@ mod tests {
             })
         );
         assert_eq!(state.status(&txid(2), 1_100), Some(TxStatus::Submitted));
-        assert!(!state.is_watched(&txid(3)), "the dropped watch stays dropped");
-        assert_eq!(state.by_accepting_block.get(&block(1)), Some(&vec![txid(1)]));
+        assert!(
+            !state.is_watched(&txid(3)),
+            "the dropped watch stays dropped"
+        );
+        assert_eq!(
+            state.by_accepting_block.get(&block(1)),
+            Some(&vec![txid(1)])
+        );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **F3 on the acceptance log, red at `d76ab91`.** A watch added after a
+    /// torn frame survives the next start.
+    #[test]
+    fn a_watch_added_after_a_torn_tail_survives_reload() {
+        let dir = test_dir("torn-then-append");
+        let path = dir.join("acceptance.kvlog");
+        let mut state = TrackerState::load(path.clone()).unwrap();
+        state.watch(&txid(1), WatchSource::Send, 1_000).unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend_from_slice(&[40, 0, 0, 0, 9, 9, 9]);
+        std::fs::write(&path, &bytes).unwrap();
+
+        let mut state = TrackerState::load(path.clone()).unwrap();
+        state.watch(&txid(2), WatchSource::Send, 2_000).unwrap();
+
+        let state = TrackerState::load(path).unwrap();
+        assert!(state.is_watched(&txid(1)));
+        assert!(
+            state.is_watched(&txid(2)),
+            "the watch added after the tear survives"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

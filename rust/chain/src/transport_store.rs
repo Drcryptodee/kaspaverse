@@ -294,7 +294,8 @@ impl TransportStore {
     /// Insert or update a conversation (keyed by `conversation_id`).
     pub fn upsert_conversation(&mut self, record: ConversationRecord) -> Result<()> {
         self.conversations
-            .upsert(record.conversation_id.clone(), record)
+            .upsert(record.conversation_id.clone(), record)?;
+        Ok(())
     }
 
     pub fn conversation(&self, conversation_id: &str) -> Option<&ConversationRecord> {
@@ -522,6 +523,22 @@ impl TransportStore {
         self.messages.wipe()?;
         self.conversations.wipe()?;
         Ok(report)
+    }
+
+    /// **Rewrite both logs as their live rows, now** (PRE3-LOG, F30).
+    ///
+    /// A removed row's frame stays in the file behind its `Remove` until a
+    /// compaction drops it, and the frame carries the sealed envelope. So
+    /// clear, hide and block call this when their removals are done: "I do
+    /// not want these words on my phone" has to reach the file, not only the
+    /// screen. Messages first, the log that holds the words.
+    ///
+    /// What it cannot reach, stated rather than implied: the blocks the old
+    /// file occupied are freed to the file system, not overwritten, and on the
+    /// phone they sit under the platform's file-based encryption until reused.
+    pub fn compact(&mut self) -> Result<()> {
+        self.messages.compact()?;
+        self.conversations.compact()
     }
 
     /// What [`Self::wipe`] WOULD destroy, without destroying it.
@@ -1877,11 +1894,12 @@ mod tests {
             .unwrap();
         store.record_message(message("tx-bad", "c1", 2, 2)).unwrap();
 
-        // Corrupt the LAST frame's final byte (its provenance tag) in place.
+        // Corrupt the LAST frame's final byte (its provenance tag) in place,
+        // re-sealing the frame's checksum: otherwise v2's checksum refuses the
+        // frame first and the record decoder this test is about never runs.
         let path = dir.join("messages.kvlog");
         let mut bytes = std::fs::read(&path).unwrap();
-        let last = bytes.len() - 1;
-        bytes[last] = 0xFF;
+        crate::kvlog::testing::corrupt_last_byte_resealed(&mut bytes, 0xFF);
         std::fs::write(&path, &bytes).unwrap();
 
         let reloaded = TransportStore::load(dir.clone()).unwrap();
@@ -2067,11 +2085,11 @@ mod tests {
             .unwrap();
         store.record_message(message("tx-bad", "c1", 2, 2)).unwrap();
 
-        // The last byte of the last frame is now the wire tag.
+        // The last byte of the last frame is now the wire tag; the checksum
+        // is re-sealed so the decoder, not the checksum, is what refuses it.
         let path = dir.join("messages.kvlog");
         let mut bytes = std::fs::read(&path).unwrap();
-        let last = bytes.len() - 1;
-        bytes[last] = 0xFF;
+        crate::kvlog::testing::corrupt_last_byte_resealed(&mut bytes, 0xFF);
         std::fs::write(&path, &bytes).unwrap();
 
         let reloaded = TransportStore::load(dir.clone()).unwrap();
@@ -2945,8 +2963,7 @@ mod tests {
     fn the_v1_fixture_written_by_the_v1_writer_loads_whole() {
         let dir = test_dir("v1-fixture");
         std::fs::create_dir_all(&dir).unwrap();
-        let conversations: &[u8] =
-            include_bytes!("../tests/fixtures/kvlog_v1/conversations.kvlog");
+        let conversations: &[u8] = include_bytes!("../tests/fixtures/kvlog_v1/conversations.kvlog");
         let messages: &[u8] = include_bytes!("../tests/fixtures/kvlog_v1/messages.kvlog");
         assert_eq!(
             (conversations.len(), messages.len()),
@@ -2967,9 +2984,15 @@ mod tests {
         assert_eq!(c2.status, ConversationStatus::PendingInbound);
         assert_eq!(c2.bound_index, 4);
         assert!(c2.contact_address.is_empty());
-        assert!(store.is_conversation_tombstoned("c2"), "hidden, then shown, then hidden");
+        assert!(
+            store.is_conversation_tombstoned("c2"),
+            "hidden, then shown, then hidden"
+        );
         assert!(!store.is_conversation_tombstoned("c1"));
-        assert!(store.conversation("c3").is_none(), "the removed row stays removed");
+        assert!(
+            store.conversation("c3").is_none(),
+            "the removed row stays removed"
+        );
 
         let m_in = store.message("m-in").expect("m-in");
         assert_eq!(m_in.direction, MessageDirection::Inbound);
@@ -2985,12 +3008,99 @@ mod tests {
         assert_eq!(m_out.envelope[60], 2);
         let m_hs = store.message("m-hs").expect("m-hs");
         assert_eq!(m_hs.kind, StoredKind::Handshake);
-        assert_eq!(m_hs.provenance, RowSource::NodeScanned, "the override frame won");
-        assert!(store.message("m-gone").is_none(), "the removed row stays removed");
+        assert_eq!(
+            m_hs.provenance,
+            RowSource::NodeScanned,
+            "the override frame won"
+        );
+        assert!(
+            store.message("m-gone").is_none(),
+            "the removed row stays removed"
+        );
         assert!(store.is_message_tombstoned("m-ghost"));
         assert_eq!(store.messages_for("c1").len(), 3);
         assert_eq!(store.messages_for("c2").len(), 1);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **F3 on the store that matters most, red at `d76ab91`.** A row written
+    /// after a torn frame — here our own outbound message, which no chain read
+    /// gives back (the re-seal to self exists only on this phone) — survives
+    /// the next start, in both logs.
+    #[test]
+    fn rows_written_after_a_torn_tail_survive_reload() {
+        let dir = test_dir("torn-then-append");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        store.upsert_conversation(conversation("c1", 10)).unwrap();
+        store.record_message(message("tx1", "c1", 100, 1)).unwrap();
+        for name in ["messages.kvlog", "conversations.kvlog"] {
+            let path = dir.join(name);
+            let mut bytes = std::fs::read(&path).unwrap();
+            bytes.extend_from_slice(&[40, 0, 0, 0, 9, 9, 9]);
+            std::fs::write(&path, &bytes).unwrap();
+        }
+
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        store.upsert_conversation(conversation("c2", 20)).unwrap();
+        let mut outbound = message_from("tx2", "c1", 200, 2, RowSource::Own);
+        outbound.direction = MessageDirection::Outbound;
+        outbound.sealed_to = Some((KeyBranch::Receive, 0));
+        store.record_message(outbound).unwrap();
+
+        let reloaded = TransportStore::load(dir.clone()).unwrap();
+        assert!(reloaded.message("tx1").is_some());
+        assert!(
+            reloaded.message("tx2").is_some(),
+            "the outbound row written after the tear survives"
+        );
+        assert!(reloaded.conversation("c1").is_some());
+        assert!(
+            reloaded.conversation("c2").is_some(),
+            "the conversation saved after the tear survives"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **F30: a removed message's sealed bytes leave the file.** Before the
+    /// compaction the search finds them, which proves it can look; after it,
+    /// neither the envelope nor the txid is anywhere in the file, and the kept
+    /// row still loads.
+    #[test]
+    fn a_removed_message_s_envelope_is_gone_from_the_compacted_file() {
+        let dir = test_dir("f30");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        store.upsert_conversation(conversation("c1", 10)).unwrap();
+        let marker: Vec<u8> = (0..61u8).map(|i| i.wrapping_mul(37) ^ 0xA5).collect();
+        let mut cleared = message("tx-cleared", "c1", 100, 1);
+        cleared.envelope = marker.clone();
+        store.record_message(cleared).unwrap();
+        store
+            .record_message(message("tx-kept", "c1", 200, 2))
+            .unwrap();
+        let path = dir.join("messages.kvlog");
+        let holds = |needle: &[u8]| {
+            std::fs::read(&path)
+                .unwrap()
+                .windows(needle.len())
+                .any(|w| w == needle)
+        };
+
+        store.remove_message("tx-cleared").unwrap();
+        assert!(
+            holds(&marker),
+            "before: the removed row's envelope is still in the file"
+        );
+        store.compact().unwrap();
+        assert!(
+            !holds(&marker),
+            "after: the envelope's bytes are gone from the file"
+        );
+        assert!(!holds(b"tx-cleared"), "and so is its txid");
+
+        let reloaded = TransportStore::load(dir.clone()).unwrap();
+        assert!(reloaded.message("tx-kept").is_some());
+        assert!(reloaded.message("tx-cleared").is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

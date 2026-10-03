@@ -19,7 +19,7 @@
 //! module (it never sees a seed or keychain — the bridge hands it public
 //! [`Address`]es only).
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
-use borsh::{BorshDeserialize, BorshSerialize};
+use borsh::BorshDeserialize;
 use kaspa_addresses::{Address, Prefix};
 use kaspa_txscript::extract_script_pub_key_address;
 use kaspa_wallet_core::events::Events;
@@ -42,6 +42,7 @@ use crate::dag_monitor::{LaneRecovery, WalletLaneHooks};
 use crate::wallet_lane::{Lane, Transition, LANE_HOLD_WITHIN, LANE_STEP_WITHIN};
 
 use crate::error::{ChainError, Result};
+use crate::kvlog::{Frame, Log};
 
 /// **The maturity thresholds this wallet actually applies**, read from the
 /// pinned wallet framework's own `NetworkParams` for the network in hand.
@@ -473,75 +474,109 @@ fn map_record(
     }
 }
 
-/// One persisted frame in the append-only activity log. `Upsert` carries a full
-/// wallet-core record (its own borsh codec, with a storage magic/version);
-/// `Remove` is a reorg tombstone keyed by txid (so replay reconstructs a
-/// removal without rewriting the file).
-#[derive(BorshSerialize, BorshDeserialize)]
-enum StoreFrame {
-    // Boxed: borsh serializes `Box<T>` byte-identically to `T` (no on-disk
-    // change), and it keeps the enum small (clippy::large_enum_variant — the
-    // record is ~400 bytes, the tombstone 32).
+/// The activity log's v1 frame (P1.5 until PRE3-LOG), kept only to read a v1
+/// file once and migrate it. Its `Upsert` bytes are exactly [`Frame::Upsert`]'s
+/// (borsh writes a `Box<T>` as the `T`); its tombstone carried the raw 32-byte
+/// txid where [`Frame::Remove`] carries the hex string, which is the one reason
+/// this log could not share the decoder until now.
+#[derive(BorshDeserialize)]
+#[cfg_attr(test, derive(borsh::BorshSerialize))]
+enum V1Frame {
     Upsert(Box<TransactionRecord>),
     Remove(TransactionId),
 }
 
-/// Length-prefix a frame for the append-only log: `[u32 LE len][borsh body]`.
-fn frame_bytes(frame: &StoreFrame) -> Result<Vec<u8>> {
-    let body = borsh::to_vec(frame)
-        .map_err(|e| crate::error::ChainError::Message(format!("activity encode: {e}")))?;
-    let mut out = Vec::with_capacity(4 + body.len());
-    out.extend_from_slice(&(body.len() as u32).to_le_bytes());
-    out.extend_from_slice(&body);
-    Ok(out)
-}
-
-/// Replay an append-only log into the live record set (last-write-wins per txid;
-/// tombstones remove). Tolerates a torn final frame (a crash mid-append loses at
-/// most the last record, which the next live event re-emits) and a corrupt body
-/// (stops, keeping everything decoded so far).
-fn replay(bytes: &[u8]) -> HashMap<TransactionId, TransactionRecord> {
-    let mut records = HashMap::new();
-    let mut cursor = bytes;
-    while cursor.len() >= 4 {
-        let len = u32::from_le_bytes([cursor[0], cursor[1], cursor[2], cursor[3]]) as usize;
-        cursor = &cursor[4..];
-        if cursor.len() < len {
-            break; // torn tail — stop
-        }
-        let (body, rest) = cursor.split_at(len);
-        cursor = rest;
-        match StoreFrame::try_from_slice(body) {
-            Ok(StoreFrame::Upsert(record)) => {
-                let id = *record.id();
-                records.insert(id, *record);
-            }
-            Ok(StoreFrame::Remove(id)) => {
-                records.remove(&id);
-            }
-            Err(_) => break, // corrupt frame — keep what we have
-        }
+fn v1_activity_frame(body: &[u8]) -> Option<Frame<TransactionRecord>> {
+    match V1Frame::try_from_slice(body).ok()? {
+        V1Frame::Upsert(record) => Some(Frame::Upsert(*record)),
+        V1Frame::Remove(id) => Some(Frame::Remove(id.to_string())),
     }
-    records
 }
 
-/// Append-only activity store in an app-private file (§0.10). Public chain data
-/// only (INV-3). The in-memory map is the source of truth for the feed; the
-/// file is its durable replay log.
+/// A record's key in the log: its txid as the pin prints it. Lookups parse a
+/// txid and print it back through the same `Display`, so a key never depends
+/// on how a caller spelled the hex.
+fn activity_key(record: &TransactionRecord) -> String {
+    record.id().to_string()
+}
+
+/// What [`ActivityStore::upsert`] did with a record. The record lane logs it
+/// so a missing row can be traced to the guard that refused it (finding 8),
+/// and, since PRE3-LOG (F61), never names a guard for a disk failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Upserted {
+    Recorded,
+    /// Nothing new about the transaction (F62): the held row stays and
+    /// nothing is appended.
+    Unchanged,
+    /// The provenance guard: an incoming re-report of a txid held as our own
+    /// send.
+    ProvenanceRefused,
+    /// The fee guard: a `Change` never overwrites the richer record it follows.
+    FeeRefused,
+}
+
+/// The `verdict=` word for an upsert's outcome. A failed write is its own
+/// word: it used to print as `provenance-refused` (F61), so a grep for the
+/// guard's refusals counted disk failures among them, and the fee guard's
+/// refusals too.
+fn upsert_verdict(outcome: &Result<Upserted>) -> &'static str {
+    match outcome {
+        Ok(Upserted::Recorded) => "recorded",
+        Ok(Upserted::Unchanged) => "unchanged",
+        Ok(Upserted::ProvenanceRefused) => "provenance-refused",
+        Ok(Upserted::FeeRefused) => "fee-refused",
+        Err(_) => "io-failed",
+    }
+}
+
+/// **The same transaction, re-stamped.** wallet-core stamps a record when it
+/// builds it, not when the transaction happened: the wallet's clock for a live
+/// record (`record.rs:531` at the pin), the node's
+/// `get_daa_score_timestamp_estimate` for a discovered one
+/// (`processor.rs:369-373`), and every start re-discovers every unspent
+/// receive. A record equal to the held one in every byte but that stamp is no
+/// new fact, so the held row keeps its first stamp and nothing is appended.
+///
+/// Measured on the funded phone (2026-10-03, frames compared field by field,
+/// nothing printed): 107 of its 947 activity frames were exactly this
+/// re-stamp, all `External` re-reports of an `External`. They moved a row's
+/// time by a median 9 s and once by 9.2 days, and the first stamp sat closer to
+/// the DAA line than the re-stamp (a median 13.9 s off against 16.4 s; the
+/// 9-day error was the re-stamp's). Every other field still decides, through
+/// the pin's own codec.
+fn restamped_only(held: &TransactionRecord, record: &TransactionRecord) -> bool {
+    if held.unixtime_msec.is_none() {
+        return false; // a row without a stamp takes one
+    }
+    let mut restamped = record.clone();
+    restamped.unixtime_msec = held.unixtime_msec;
+    match (borsh::to_vec(&restamped), borsh::to_vec(held)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// The wallet's activity log in an app-private file (§0.10): public chain
+/// data only (INV-3). On the shared [`Log`] since PRE3-LOG, which repairs a
+/// torn tail, checksums every frame and compacts; its own copy of the replay
+/// did none of that. The in-memory map is the source of truth for the feed;
+/// the file is its durable replay.
 struct ActivityStore {
-    path: PathBuf,
-    records: HashMap<TransactionId, TransactionRecord>,
+    log: Log<TransactionRecord>,
 }
 
 impl ActivityStore {
-    /// Load by replaying the log; a missing file is an empty store.
+    /// Load by replaying the log; a missing file is an empty store. The load
+    /// migrates a v1 file, cuts a torn tail and compacts a grown log.
     fn load(path: PathBuf) -> Result<Self> {
-        let records = match std::fs::read(&path) {
-            Ok(bytes) => replay(&bytes),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
-            Err(e) => return Err(e.into()),
-        };
-        Ok(Self { path, records })
+        Ok(Self {
+            log: Log::load_with_v1(path, activity_key, v1_activity_frame)?,
+        })
+    }
+
+    fn get(&self, id: &TransactionId) -> Option<&TransactionRecord> {
+        self.log.records.get(&id.to_string())
     }
 
     /// **Has this wallet ever paid `address`?** — some spend of our own whose
@@ -549,81 +584,70 @@ impl ActivityStore {
     /// recipient ([`counterparty_of`]). Chain-witnessed by our own signature
     /// and held outside the transport store, so it survives a message wipe.
     fn has_paid(&self, address: &str, ours: &HashSet<Address>) -> bool {
-        self.records
+        self.log
+            .records
             .values()
             .any(|record| counterparty_of(record, ours).as_deref() == Some(address))
     }
 
-    fn append(&self, frame: &StoreFrame) -> Result<()> {
-        use std::io::Write;
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
-        file.write_all(&frame_bytes(frame)?)?;
-        file.sync_all()?;
-        Ok(())
-    }
-
-    /// Returns whether the record was written (`false` = refused by the
-    /// provenance guard below) so the caller's log line can say which — the
-    /// finding-8 discriminating lane (V2).
-    fn upsert(&mut self, record: TransactionRecord) -> Result<bool> {
-        // Provenance guard (D2/P4): once we hold a txid as a SEND we originated
-        // (Outgoing / Change / Batch / TransferOutgoing), a later re-scan that
-        // re-reports the SAME txid as an Incoming/External deposit is the
-        // lost-outgoing-context phenomenon (context.rs handle_utxo_added, restart
-        // re-scan), NOT a new receive — refuse the downgrade. Without this,
-        // conversation change returning to the bound RECEIVE address (source
-        // discipline routes it there, so the address stays funded for the next
-        // input[0]) would surface as a phantom "received" row after a restart.
-        // The address-set heuristic ([`is_own_change`]) can't catch it — the
-        // bound address is a receive address, and marking receive addresses
-        // internal would hide REAL deposits to them. Txid provenance is exact:
-        // a genuine deposit or a counterpart's bond refund carries THEIR txid,
-        // never one we already filed as outgoing.
-        if is_incoming_data(&record) {
-            if let Some(existing) = self.records.get(record.id()) {
-                if is_outgoing_data(existing) {
-                    return Ok(false);
-                }
+    /// Record an event's record unless a guard refuses it or it says nothing
+    /// new, and say which (the finding-8 discriminating lane, V2).
+    fn upsert(&mut self, record: TransactionRecord) -> Result<Upserted> {
+        if let Some(existing) = self.get(record.id()) {
+            // Provenance guard (D2/P4): once we hold a txid as a SEND we
+            // originated (Outgoing / Change / Batch / TransferOutgoing), a later
+            // re-scan that re-reports the SAME txid as an Incoming/External
+            // deposit is the lost-outgoing-context phenomenon (context.rs
+            // handle_utxo_added, restart re-scan), NOT a new receive — refuse
+            // the downgrade. Without this, conversation change returning to the
+            // bound RECEIVE address (source discipline routes it there, so the
+            // address stays funded for the next input[0]) would surface as a
+            // phantom "received" row after a restart. The address-set heuristic
+            // ([`is_own_change`]) can't catch it — the bound address is a
+            // receive address, and marking receive addresses internal would
+            // hide REAL deposits to them. Txid provenance is exact: a genuine
+            // deposit or a counterpart's bond refund carries THEIR txid, never
+            // one we already filed as outgoing.
+            if is_incoming_data(&record) && is_outgoing_data(existing) {
+                return Ok(Upserted::ProvenanceRefused);
+            }
+            // **Fee guard (UX-R3, `consensus-auditor`): a `Change` never
+            // overwrites a richer shape for the same txid.**
+            //
+            // `Change` carries the same `transaction`, `payment_value`,
+            // `change_value` and `accepted_daa_score` as the `Outgoing` it
+            // follows, and one field less — `fees`. Both arrive from a single
+            // `handle_utxo_changed` at acceptance, removed-then-added, so the
+            // held record is already the accepted one and is strictly the
+            // better of the two. Refusing the downgrade keeps the fee without
+            // recomputing it, which is what INV-9 asks for: an
+            // inputs-minus-outputs subtraction here would be a second
+            // implementation of a number the library holds.
+            //
+            // A send discovered only by a cold re-scan still arrives as a bare
+            // `Change` with nothing held, is stored normally, and honestly has
+            // no fee to state — the row says nothing rather than zero.
+            if matches!(record.transaction_data(), TransactionData::Change { .. })
+                && carries_fee(existing)
+            {
+                return Ok(Upserted::FeeRefused);
+            }
+            if restamped_only(existing, &record) {
+                return Ok(Upserted::Unchanged);
             }
         }
-        // **Fee guard (UX-R3, `consensus-auditor`): a `Change` never overwrites
-        // a richer shape for the same txid.**
-        //
-        // `Change` carries the same `transaction`, `payment_value`,
-        // `change_value` and `accepted_daa_score` as the `Outgoing` it follows,
-        // and one field less — `fees`. Both arrive from a single
-        // `handle_utxo_changed` at acceptance, removed-then-added, so the held
-        // record is already the accepted one and is strictly the better of the
-        // two. Refusing the downgrade keeps the fee without recomputing it,
-        // which is what INV-9 asks for: an inputs-minus-outputs subtraction here
-        // would be a second implementation of a number the library holds.
-        //
-        // A send discovered only by a cold re-scan still arrives as a bare
-        // `Change` with nothing held, is stored normally, and honestly has no
-        // fee to state — the row says nothing rather than zero.
-        if matches!(record.transaction_data(), TransactionData::Change { .. }) {
-            if let Some(existing) = self.records.get(record.id()) {
-                if carries_fee(existing) {
-                    return Ok(false);
-                }
-            }
-        }
-        self.append(&StoreFrame::Upsert(Box::new(record.clone())))?;
-        self.records.insert(*record.id(), record);
-        Ok(true)
+        Ok(if self.log.upsert(activity_key(&record), record)? {
+            Upserted::Recorded
+        } else {
+            Upserted::Unchanged
+        })
     }
 
+    /// A reorg tombstone. The shared log appends before it forgets; this
+    /// store's own copy forgot first, so a failed write dropped the row from
+    /// the feed while the file kept it, and the next start brought it back.
     fn remove(&mut self, id: &TransactionId) -> Result<()> {
-        if self.records.remove(id).is_some() {
-            self.append(&StoreFrame::Remove(*id))?;
-        }
-        Ok(())
+        self.log.remove(&id.to_string())
     }
 
     /// Newest-first rows, capped, with maturity resolved at `current_daa_score`
@@ -642,6 +666,7 @@ impl ActivityStore {
         ours: &HashSet<Address>,
     ) -> Vec<WalletActivityRecord> {
         let mut records: Vec<&TransactionRecord> = self
+            .log
             .records
             .values()
             .filter(|record| !is_own_change(record, change_set))
@@ -979,7 +1004,6 @@ impl WalletEngine {
             .store
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .records
             .get(&id)
             .map(|record| record.block_daa_score())
     }
@@ -1004,7 +1028,6 @@ impl WalletEngine {
             .store
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .records
             .get(&id)
             .filter(|record| is_incoming_data(record))
             .map(|record| record.value())
@@ -1910,27 +1933,18 @@ impl WalletEngine {
                     );
                     return;
                 }
-                let written = {
-                    let mut store = self
-                        .inner
-                        .store
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner);
-                    match store.upsert(record) {
-                        Ok(written) => written,
-                        Err(e) => {
-                            log::warn!("wallet-sync: activity append failed: {e}");
-                            false
-                        }
-                    }
-                };
+                let outcome = self
+                    .inner
+                    .store
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .upsert(record);
+                if let Err(e) = &outcome {
+                    log::warn!("wallet-sync: activity append failed: {e}");
+                }
                 log::info!(
                     "wallet-sync: record txid={txid} verdict={}",
-                    if written {
-                        "recorded"
-                    } else {
-                        "provenance-refused"
-                    }
+                    upsert_verdict(&outcome)
                 );
                 self.emit_activity(change_set);
             }
@@ -2184,16 +2198,14 @@ mod tests {
         let change = mainnet_address(2);
         let stranger = mainnet_address(3);
         let ours: HashSet<Address> = [change.clone()].into_iter().collect();
-        let mut store = ActivityStore {
-            path: std::env::temp_dir().join("kv-has-paid-never-written"),
-            records: HashMap::new(),
-        };
+        let mut store =
+            ActivityStore::load(std::env::temp_dir().join("kv-has-paid-never-written")).unwrap();
         assert!(
             !store.has_paid(&payee.to_string(), &ours),
             "nothing paid yet"
         );
         let rec = outgoing_paying(9, &[(&payee, 1_000), (&change, 8_000)]);
-        store.records.insert(*rec.id(), rec);
+        store.log.records.insert(activity_key(&rec), rec);
         assert!(store.has_paid(&payee.to_string(), &ours));
         assert!(!store.has_paid(&stranger.to_string(), &ours));
         assert!(
@@ -2340,12 +2352,16 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let mut store = ActivityStore::load(path.clone()).unwrap();
 
-        assert!(store
-            .upsert(outgoing_paying(0xF1, &[(&payee, 1_000)]))
-            .unwrap());
-        assert!(
-            !store.upsert(change_leg(0xF1, &[(&payee, 1_000)])).unwrap(),
-            "the poorer terminal shape is refused, not written"
+        assert_eq!(
+            store
+                .upsert(outgoing_paying(0xF1, &[(&payee, 1_000)]))
+                .unwrap(),
+            Upserted::Recorded
+        );
+        assert_eq!(
+            store.upsert(change_leg(0xF1, &[(&payee, 1_000)])).unwrap(),
+            Upserted::FeeRefused,
+            "the poorer terminal shape is refused, not written, and says by which guard"
         );
 
         let rows = store.list(Some(50), &HashSet::new(), &HashSet::new());
@@ -2361,7 +2377,10 @@ mod tests {
         // with nothing held: it is stored normally and honestly has no fee.
         let _ = std::fs::remove_file(&path);
         let mut cold = ActivityStore::load(path).unwrap();
-        assert!(cold.upsert(change_leg(0xF2, &[(&payee, 1_000)])).unwrap());
+        assert_eq!(
+            cold.upsert(change_leg(0xF2, &[(&payee, 1_000)])).unwrap(),
+            Upserted::Recorded
+        );
         let rows = cold.list(Some(50), &HashSet::new(), &HashSet::new());
         assert_eq!(
             rows[0].fee_sompi, None,
@@ -2390,43 +2409,94 @@ mod tests {
         );
     }
 
+    /// v1 bytes hand-written with the old frame's own layout (PB-023): an
+    /// upsert, another, and a reorg tombstone carrying the raw 32-byte txid.
+    /// The load migrates them and the tombstone still removes its row.
+    fn v1_log(frames: &[V1Frame]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for frame in frames {
+            out.extend(crate::kvlog::testing::v1_frame_bytes(
+                &borsh::to_vec(frame).unwrap(),
+            ));
+        }
+        out
+    }
+
+    fn load_v1(tag: &str, bytes: &[u8]) -> (ActivityStore, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("kv-wsync-v1-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("activity.kvlog");
+        std::fs::write(&path, bytes).unwrap();
+        (ActivityStore::load(path.clone()).unwrap(), dir)
+    }
+
     #[test]
-    fn replay_applies_upserts_and_tombstones() {
+    fn a_v1_log_applies_upserts_and_tombstones() {
         let a = incoming(1, 100, 10);
         let b = incoming(2, 200, 20);
-        let mut log = Vec::new();
-        log.extend(frame_bytes(&StoreFrame::Upsert(Box::new(a.clone()))).unwrap());
-        log.extend(frame_bytes(&StoreFrame::Upsert(Box::new(b.clone()))).unwrap());
-        log.extend(frame_bytes(&StoreFrame::Remove(*a.id())).unwrap());
-
-        let records = replay(&log);
-        assert_eq!(records.len(), 1, "the tombstoned record is gone");
-        assert!(records.contains_key(b.id()));
-        assert!(!records.contains_key(a.id()));
+        let bytes = v1_log(&[
+            V1Frame::Upsert(Box::new(a.clone())),
+            V1Frame::Upsert(Box::new(b.clone())),
+            V1Frame::Remove(*a.id()),
+        ]);
+        let (store, dir) = load_v1("tomb", &bytes);
+        assert_eq!(store.log.records.len(), 1, "the tombstoned record is gone");
+        assert!(store.get(b.id()).is_some());
+        assert!(store.get(a.id()).is_none());
+        assert_eq!(
+            &std::fs::read(dir.join("activity.kvlog")).unwrap()[..4],
+            b"KVLG",
+            "migrated by the load"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn replay_overwrites_in_place_on_reupsert() {
+    fn a_v1_log_overwrites_in_place_on_reupsert() {
         // A Pending then a Maturity for the same txid: last write wins, one row.
-        let pending = incoming(7, 500, 100);
-        let matured = incoming(7, 500, 100);
-        let mut log = Vec::new();
-        log.extend(frame_bytes(&StoreFrame::Upsert(Box::new(pending))).unwrap());
-        log.extend(frame_bytes(&StoreFrame::Upsert(Box::new(matured))).unwrap());
-        assert_eq!(replay(&log).len(), 1);
+        let bytes = v1_log(&[
+            V1Frame::Upsert(Box::new(incoming(7, 500, 100))),
+            V1Frame::Upsert(Box::new(incoming(7, 600, 100))),
+        ]);
+        let (store, dir) = load_v1("reupsert", &bytes);
+        assert_eq!(store.log.records.len(), 1);
+        assert_eq!(
+            store
+                .get(&TransactionId::from_bytes([7; 32]))
+                .unwrap()
+                .value(),
+            600
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The old doc said "a crash mid-append loses at most the last record";
+    /// the record before the tear survives, and (the half that was false) so
+    /// does the one recorded after it.
     #[test]
-    fn replay_tolerates_a_torn_tail() {
+    fn a_v1_log_with_a_torn_tail_keeps_the_frame_before_it() {
         let a = incoming(1, 100, 10);
-        let mut log = frame_bytes(&StoreFrame::Upsert(Box::new(a.clone()))).unwrap();
+        let mut bytes = v1_log(&[V1Frame::Upsert(Box::new(a.clone()))]);
         // A second frame that claims 40 bytes but only 3 follow (crash mid-append).
-        log.extend_from_slice(&40u32.to_le_bytes());
-        log.extend_from_slice(&[9, 9, 9]);
+        bytes.extend_from_slice(&40u32.to_le_bytes());
+        bytes.extend_from_slice(&[9, 9, 9]);
+        let (mut store, dir) = load_v1("torn", &bytes);
+        assert_eq!(
+            store.log.records.len(),
+            1,
+            "the intact first frame survives"
+        );
+        assert!(store.get(a.id()).is_some());
 
-        let records = replay(&log);
-        assert_eq!(records.len(), 1, "the intact first frame survives");
-        assert!(records.contains_key(a.id()));
+        store.upsert(incoming(2, 200, 20)).unwrap();
+        let reloaded = ActivityStore::load(dir.join("activity.kvlog")).unwrap();
+        assert_eq!(
+            reloaded.log.records.len(),
+            2,
+            "and so does the one after the tear"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2587,8 +2657,9 @@ mod tests {
         let path = dir.join("activity.kvlog");
         let _ = std::fs::remove_file(&path);
         let mut store = ActivityStore::load(path.clone()).unwrap();
-        assert!(
+        assert_eq!(
             store.upsert(deposit).unwrap(),
+            Upserted::Recorded,
             "a fresh external txid is written, never provenance-refused"
         );
 
@@ -2622,7 +2693,7 @@ mod tests {
 
         // Reload from disk → the same three survive (replay round-trip).
         let reloaded = ActivityStore::load(path.clone()).unwrap();
-        assert_eq!(reloaded.records.len(), 3);
+        assert_eq!(reloaded.log.records.len(), 3);
 
         let _ = std::fs::remove_file(&path);
     }
@@ -2656,7 +2727,7 @@ mod tests {
                 .unwrap();
         }
         assert_eq!(
-            store.records.len(),
+            store.log.records.len(),
             over,
             "the STORE keeps everything — only the feed is bounded"
         );
@@ -2710,10 +2781,7 @@ mod tests {
         // The guard survives a reload (the rejected incoming was never appended).
         let reloaded = ActivityStore::load(path.clone()).unwrap();
         assert!(is_outgoing_data(
-            reloaded
-                .records
-                .get(&TransactionId::from_bytes([7; 32]))
-                .unwrap()
+            reloaded.get(&TransactionId::from_bytes([7; 32])).unwrap()
         ));
 
         let _ = std::fs::remove_file(&path);
@@ -2758,5 +2826,123 @@ mod tests {
         assert!(!rows.iter().any(|r| r.txid == "33".repeat(32)));
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **F3 on the activity log, red at `d76ab91`.** Its own copy of the replay
+    /// claimed "a crash mid-append loses at most the last record"; it lost
+    /// every record after it. A send recorded after a torn frame survives the
+    /// next start.
+    #[test]
+    fn an_activity_row_recorded_after_a_torn_tail_survives_reload() {
+        let dir = std::env::temp_dir().join(format!("kv-wsync-torn-append-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("activity.kvlog");
+        let mut store = ActivityStore::load(path.clone()).unwrap();
+        store.upsert(incoming(1, 100, 10)).unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.extend_from_slice(&[40, 0, 0, 0, 9, 9, 9]);
+        std::fs::write(&path, &bytes).unwrap();
+
+        let mut store = ActivityStore::load(path.clone()).unwrap();
+        store.upsert(outgoing(2, 5_000, 20)).unwrap();
+
+        let reloaded = ActivityStore::load(path).unwrap();
+        let rows = reloaded.list(Some(1_000_000), &HashSet::new(), &HashSet::new());
+        assert_eq!(rows.len(), 2, "the send recorded after the tear survives");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn fresh_store(tag: &str) -> (ActivityStore, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("kv-wsync-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        (
+            ActivityStore::load(dir.join("activity.kvlog")).unwrap(),
+            dir,
+        )
+    }
+
+    /// **F62 on the activity log: a re-stamped re-report appends nothing.**
+    /// The same record discovered again with the node's new estimate of its
+    /// time keeps the held row and its first stamp; a byte-identical one is
+    /// nothing either; a re-report that changes anything else is written.
+    #[test]
+    fn a_re_report_differing_only_in_its_stamp_appends_nothing() {
+        let (mut store, dir) = fresh_store("restamp");
+        let path = dir.join("activity.kvlog");
+        let first = incoming(5, 100, 10);
+        assert_eq!(store.upsert(first.clone()).unwrap(), Upserted::Recorded);
+        let len = std::fs::metadata(&path).unwrap().len();
+
+        let mut restamped = first.clone();
+        restamped.unixtime_msec = Some(first.unixtime_msec.unwrap() + 9_048);
+        assert_eq!(store.upsert(restamped).unwrap(), Upserted::Unchanged);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            len,
+            "nothing appended"
+        );
+        assert_eq!(
+            store.get(first.id()).unwrap().unixtime_msec,
+            first.unixtime_msec,
+            "the first stamp stays"
+        );
+        assert_eq!(store.upsert(first.clone()).unwrap(), Upserted::Unchanged);
+
+        let mut more = first.clone();
+        more.value = 150;
+        assert_eq!(
+            store.upsert(more).unwrap(),
+            Upserted::Recorded,
+            "a new fact is still a write"
+        );
+        assert!(std::fs::metadata(&path).unwrap().len() > len);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **F61: every outcome prints its own verdict**, and a write the disk
+    /// refuses is `io-failed`, never a guard's refusal.
+    #[test]
+    fn each_upsert_outcome_prints_its_own_verdict() {
+        let (mut store, dir) = fresh_store("verdicts");
+        let payee = mainnet_address(1);
+        let id = TransactionId::from_bytes([0xA1; 32]);
+        let recorded = store.upsert(outgoing_paying(0xA1, &[(&payee, 1_000)]));
+        assert_eq!(upsert_verdict(&recorded), "recorded");
+        let fee = store.upsert(change_leg(0xA1, &[(&payee, 1_000)]));
+        assert_eq!(upsert_verdict(&fee), "fee-refused");
+        let provenance = store.upsert(incoming(0xA1, 500, 10));
+        assert_eq!(upsert_verdict(&provenance), "provenance-refused");
+        let held = store.get(&id).unwrap().clone();
+        assert_eq!(upsert_verdict(&store.upsert(held)), "unchanged");
+
+        // The disk refuses: a file where the log's directory has to be.
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::write(&dir, b"not a directory").unwrap();
+        let failed = store.upsert(incoming(0xB2, 700, 20));
+        assert!(failed.is_err());
+        assert_eq!(
+            upsert_verdict(&failed),
+            "io-failed",
+            "a failed write is not a refusal"
+        );
+        assert!(store.get(&TransactionId::from_bytes([0xB2; 32])).is_none());
+        let _ = std::fs::remove_file(&dir);
+    }
+
+    /// The shared log's order: a reorg tombstone that cannot be written
+    /// removes nothing, so the feed and the file keep agreeing.
+    #[test]
+    fn a_reorg_tombstone_that_cannot_be_written_removes_nothing() {
+        let (mut store, dir) = fresh_store("reorg-fail");
+        let deposit = incoming(0xC3, 900, 30);
+        store.upsert(deposit.clone()).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::write(&dir, b"not a directory").unwrap();
+        assert!(store.remove(deposit.id()).is_err());
+        assert!(
+            store.get(deposit.id()).is_some(),
+            "still there, as the file still has it"
+        );
+        let _ = std::fs::remove_file(&dir);
     }
 }

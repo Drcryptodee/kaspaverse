@@ -421,11 +421,12 @@ pub(crate) fn read_cursor(path: &Path) -> Option<Hash> {
     text.trim().parse::<Hash>().ok()
 }
 
+/// **Atomic and durable (PRE3-LOG, F47).** A bare `std::fs::write` truncates
+/// before it writes, so a crash inside it left an empty or partial cursor,
+/// which [`read_cursor`] reads as none: the walk seeded at the sink, no gap
+/// age was ever computed, and the whole absence passed with no notice.
 fn write_cursor(path: &Path, hash: &Hash) {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Err(e) = std::fs::write(path, hash.to_string()) {
+    if let Err(e) = crate::durable::atomic_write(path, hash.to_string().as_bytes()) {
         log::warn!("walk: cursor write failed: {e}");
     }
 }
@@ -1840,6 +1841,28 @@ pub(crate) mod tests {
             recorder.gaps.lock().unwrap().is_empty(),
             "a first seed skips nothing"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **F47: the cursor is replaced, never rewritten in place.** A bare
+    /// write truncates the file and then fills it, and a crash between the two
+    /// left an empty cursor that read as a first run. The durable write
+    /// renames a finished file over the old one, which a test can see: the
+    /// file is a new inode after every commit, holding the whole hash.
+    #[test]
+    fn the_cursor_is_replaced_whole_by_a_rename() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = test_dir("cursor-rename");
+        let path = dir.join("scan.cursor");
+        write_cursor(&path, &h(1));
+        let first = std::fs::metadata(&path).unwrap().ino();
+        write_cursor(&path, &h(2));
+        assert_ne!(
+            std::fs::metadata(&path).unwrap().ino(),
+            first,
+            "a new file renamed over the old, not the old one truncated and refilled"
+        );
+        assert_eq!(read_cursor(&path), Some(h(2)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

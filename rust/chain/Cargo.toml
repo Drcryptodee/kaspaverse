@@ -25,6 +25,11 @@ kaspa-wallet-core.workspace = true
 # Activity store: persist wallet-core TransactionRecords with the pin's own
 # borsh codec (derive for our framing enum). Already in the lock (1.6.1).
 borsh = { version = "1", features = ["derive"] }
+# PRE3-LOG: the per-frame checksum of the v2 log format. Already in the lock
+# at 1.5.0 as a transitive of the pin (kaspa-core -> log4rs -> flate2), and
+# compiled into the shipped Android binary through that path today; this line
+# makes it direct. Zero new packages, zero version changes (D-065's shape).
+crc32fast = "1.5.0"
 tokio.workspace = true
 async-channel.workspace = true
 log.workspace = true

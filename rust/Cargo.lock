@@ -3103,6 +3103,7 @@ dependencies = [
  "async-channel 2.5.0",
  "async-trait",
  "borsh",
+ "crc32fast",
  "kaspa-addresses",
  "kaspa-consensus-core",
  "kaspa-notify",

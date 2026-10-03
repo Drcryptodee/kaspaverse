@@ -515,29 +515,8 @@ pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 pub(crate) fn write_json_durable<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec(value)
         .map_err(|e| ChainError::Message(format!("fill state encode failed: {e}")))?;
-    let parent = path.parent();
-    if let Some(parent) = parent {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| ChainError::Message(format!("fill state dir failed: {e}")))?;
-    }
-    let tmp = path.with_extension("tmp");
-    let write = || -> std::io::Result<()> {
-        use std::io::Write;
-        let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        std::fs::rename(&tmp, path)?;
-        // The rename is metadata; without this the directory entry can still
-        // be the old one after a crash. Best-effort — the data above is
-        // already durable, and some platforms refuse a directory fsync.
-        if let Some(parent) = parent {
-            if let Ok(dir) = std::fs::File::open(parent) {
-                let _ = dir.sync_all();
-            }
-        }
-        Ok(())
-    };
-    write().map_err(|e| ChainError::Message(format!("fill state write failed: {e}")))
+    crate::durable::atomic_write(path, &bytes)
+        .map_err(|e| ChainError::Message(format!("fill state write failed: {e}")))
 }
 
 impl FillConfig {

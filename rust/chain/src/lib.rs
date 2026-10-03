@@ -15,6 +15,7 @@ pub mod contact_names;
 mod dag_monitor;
 pub mod devab;
 pub mod discovery;
+mod durable;
 mod error;
 pub mod history_fill;
 mod kvlog;

@@ -91,6 +91,25 @@ impl BlockList {
         write_json_durable(&dir.join(BLOCK_LIST_FILE), self)
     }
 
+    /// **Change the list on disk first, in memory second** (PRE3-LOG, F46).
+    ///
+    /// `change` runs on a copy; the copy is saved; only a saved copy becomes
+    /// this list. Mutating first and saving second (how block, unblock and
+    /// the accept-lifts-a-block path all worked) left a failed save with a
+    /// refusal live for the session and gone at the next start, or the
+    /// mirror: lifted now, back after a restart. Memory and disk now always
+    /// agree, and the `Err` says the change did not happen. Returns whether
+    /// anything changed; an unchanged list writes nothing.
+    pub fn commit(&mut self, dir: &Path, change: impl FnOnce(&mut Self) -> bool) -> Result<bool> {
+        let mut next = self.clone();
+        if !change(&mut next) {
+            return Ok(false);
+        }
+        next.save(dir)?;
+        *self = next;
+        Ok(true)
+    }
+
     pub fn path(dir: &Path) -> PathBuf {
         dir.join(BLOCK_LIST_FILE)
     }
@@ -211,7 +230,39 @@ mod tests {
         assert_eq!(BlockList::load(&d), list);
         assert_eq!(BlockList::read(&d), Some(list));
         // The durable write leaves no temp file behind.
-        assert!(!BlockList::path(&d).with_extension("tmp").exists());
+        let names: Vec<String> = std::fs::read_dir(&d)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, [BLOCK_LIST_FILE]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **F46: a failed save changes nothing.** The save is made to fail by
+    /// putting a file where the directory must be; the block, then the
+    /// unblock, each return `Err` and leave memory as the disk has it.
+    #[test]
+    fn a_change_whose_save_fails_is_not_made_in_memory_either() {
+        let d = dir("commit-fail");
+        let mut list = BlockList::default();
+        assert!(list.commit(&d, |l| l.block("kaspa:a", 1)).unwrap());
+        assert!(BlockList::load(&d).is_blocked("kaspa:a"));
+        assert!(
+            !list.commit(&d, |l| l.block("kaspa:a", 2)).unwrap(),
+            "an unchanged list writes nothing"
+        );
+
+        let blocked_dir = d.join("not-a-dir");
+        std::fs::write(&blocked_dir, b"file").unwrap();
+        assert!(list
+            .commit(&blocked_dir, |l| l.block("kaspa:b", 3))
+            .is_err());
+        assert!(!list.is_blocked("kaspa:b"), "not on disk, so not in memory");
+        assert!(list.commit(&blocked_dir, |l| l.unblock("kaspa:a")).is_err());
+        assert!(
+            list.is_blocked("kaspa:a"),
+            "still blocked on disk, so still blocked here"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 

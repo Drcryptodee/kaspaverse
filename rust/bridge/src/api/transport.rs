@@ -2010,23 +2010,7 @@ pub async fn transport_start() -> Result<(), AppError> {
             .cloned()
             .collect();
         let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut swept = (0usize, 0usize);
-        for address in &addresses {
-            match purge_contact_rows(&mut store, address, true) {
-                Ok((rows, messages)) => {
-                    swept.0 += rows;
-                    swept.1 += messages;
-                }
-                Err(e) => log::warn!("transport-block: start sweep failed: {}", e.message),
-            }
-        }
-        if swept.0 > 0 {
-            log::info!(
-                "transport-block: {} row(s) and {} message(s) for blocked addresses removed at start",
-                swept.0,
-                swept.1
-            );
-        }
+        sweep_blocked_rows(&mut store, &addresses);
     }
 
     // **A request whose sender never resolved gets another go.** In the
@@ -8174,9 +8158,25 @@ pub fn transport_conversations() -> Result<Vec<ConversationDto>, AppError> {
 pub fn transport_hide_conversation(conversation_id: String) -> Result<(), AppError> {
     let hub = hub()?;
     let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+    hide_conversation_rows(&mut store, &conversation_id)?;
+    drop(store);
+    // Nudge any open list to re-pull. The thread does NOT 404 — the row
+    // survives by design; it simply stops being listed.
+    ping(&conversation_id);
+    Ok(())
+}
+
+/// Hide's store half: content goes, identity stays, and the content's sealed
+/// bytes leave the file now rather than at some later compaction, because
+/// hide promises to forget what was said (PRE3-LOG, F30). Pure over the
+/// store, so it is tested without a hub.
+fn hide_conversation_rows(
+    store: &mut TransportStore,
+    conversation_id: &str,
+) -> Result<(), AppError> {
     // Content goes. Identity stays.
     let txids: Vec<String> = store
-        .messages_for(&conversation_id)
+        .messages_for(conversation_id)
         .into_iter()
         .map(|m| m.txid)
         .collect();
@@ -8184,13 +8184,9 @@ pub fn transport_hide_conversation(conversation_id: String) -> Result<(), AppErr
         warn_store(store.remove_message(&txid));
     }
     store
-        .tombstone_conversation(&conversation_id)
+        .tombstone_conversation(conversation_id)
         .map_err(AppError::chain)?;
-    drop(store);
-    // Nudge any open list to re-pull. The thread does NOT 404 — the row
-    // survives by design; it simply stops being listed.
-    ping(&conversation_id);
-    Ok(())
+    store.compact().map_err(AppError::chain)
 }
 
 /// Forget what was SAID in one conversation, keeping the conversation itself.
@@ -8235,43 +8231,7 @@ pub fn transport_clear_messages(conversation_id: String) -> Result<WipeReportDto
     });
     let cleared = {
         let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
-        // THE ESTABLISHING HANDSHAKE ROW IS NOT "A MESSAGE" AND IS NOT CLEARED.
-        //
-        // It is evidence a money gate depends on. `transport_prepare_accept`
-        // refuses to refund a bond whose handshake row is `FillSourced` (an
-        // indexer claim, D-070) — and that check reads the row through
-        // `handshake_txid`. Delete it and the check evaluates
-        // `matches!(None, Some(FillSourced))` → false, so a fail-CLOSED guard
-        // on a 0.2 KAS spend silently becomes fail-open
-        // (`wallet-security-auditor`, 2026-08-17). The gesture is also offered
-        // on an invitation card, which is exactly where that matters.
-        //
-        // Nothing is lost by keeping it: a handshake row carries no body to
-        // the thread view — it renders as a system line, not as words anyone
-        // said.
-        let keep = store
-            .conversation(&conversation_id)
-            .and_then(|c| c.handshake_txid.clone());
-        let txids: Vec<String> = store
-            .messages_for(&conversation_id)
-            .into_iter()
-            .map(|m| m.txid)
-            .filter(|txid| Some(txid) != keep.as_ref())
-            .collect();
-        // COUNT WHAT WENT, NOT WHAT WAS ASKED FOR, and surface a failure
-        // instead of warning past it (`ffi-leak-auditor`, 2026-08-17). The
-        // sibling purge inside `transport_hide_conversation` uses
-        // `warn_store`, which is survivable there because it reports no
-        // number; here the count reaches the user as "N messages cleared", and
-        // a swallowed write error would make that a promise the disk never
-        // kept. Partial progress is reported honestly by the error, not
-        // rolled back — the rows that did go are gone.
-        let mut cleared = 0usize;
-        for txid in txids {
-            store.remove_message(&txid).map_err(AppError::chain)?;
-            cleared += 1;
-        }
-        cleared
+        clear_conversation_rows(&mut store, &conversation_id)?
     };
 
     log::info!(
@@ -8287,6 +8247,58 @@ pub fn transport_clear_messages(conversation_id: String) -> Result<WipeReportDto
         pending_bonds: 0,
         floor_persisted,
     })
+}
+
+/// Clear's store half: every message row of one conversation but its
+/// establishing handshake, then the words out of the file. Counts what went.
+/// Pure over the store, so it is tested without a hub.
+fn clear_conversation_rows(
+    store: &mut TransportStore,
+    conversation_id: &str,
+) -> Result<usize, AppError> {
+    // THE ESTABLISHING HANDSHAKE ROW IS NOT "A MESSAGE" AND IS NOT CLEARED.
+    //
+    // It is evidence a money gate depends on. `transport_prepare_accept`
+    // refuses to refund a bond whose handshake row is `FillSourced` (an
+    // indexer claim, D-070) — and that check reads the row through
+    // `handshake_txid`. Delete it and the check evaluates
+    // `matches!(None, Some(FillSourced))` → false, so a fail-CLOSED guard
+    // on a 0.2 KAS spend silently becomes fail-open
+    // (`wallet-security-auditor`, 2026-08-17). The gesture is also offered
+    // on an invitation card, which is exactly where that matters.
+    //
+    // Nothing is lost by keeping it: a handshake row carries no body to
+    // the thread view — it renders as a system line, not as words anyone
+    // said.
+    let keep = store
+        .conversation(conversation_id)
+        .and_then(|c| c.handshake_txid.clone());
+    let txids: Vec<String> = store
+        .messages_for(conversation_id)
+        .into_iter()
+        .map(|m| m.txid)
+        .filter(|txid| Some(txid) != keep.as_ref())
+        .collect();
+    // COUNT WHAT WENT, NOT WHAT WAS ASKED FOR, and surface a failure
+    // instead of warning past it (`ffi-leak-auditor`, 2026-08-17). The
+    // sibling purge inside `hide_conversation_rows` uses
+    // `warn_store`, which is survivable there because it reports no
+    // number; here the count reaches the user as "N messages cleared", and
+    // a swallowed write error would make that a promise the disk never
+    // kept. Partial progress is reported honestly by the error, not
+    // rolled back — the rows that did go are gone.
+    let mut cleared = 0usize;
+    for txid in txids {
+        store.remove_message(&txid).map_err(AppError::chain)?;
+        cleared += 1;
+    }
+    // "I do not want these words on my phone" has to reach the file, not
+    // only the screen: each removed row's frame, envelope included, stayed
+    // behind its `Remove` until a compaction that never came (PRE3-LOG,
+    // F30). A failure is the error, like a failed remove above, because
+    // the count returned would otherwise promise something the disk lacks.
+    store.compact().map_err(AppError::chain)?;
+    Ok(cleared)
 }
 
 /// What a wipe destroyed. Counts and shapes only — a report about erasing
@@ -8575,14 +8587,15 @@ pub fn transport_block_conversation(conversation_id: String) -> Result<(), AppEr
             conversation.their_alias.clone(),
         )
     };
-    // 1. The refusal, first and durably.
+    // 1. The refusal, first and durably — and in memory only once it is on
+    // disk (PRE3-LOG, F46), so a failed save leaves no session-only refusal.
     {
         let mut list = hub
             .block_list
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        list.block(&address, now_unix_ms());
-        list.save(&dir).map_err(AppError::chain)?;
+        list.commit(&dir, |list| list.block(&address, now_unix_ms()))
+            .map_err(AppError::chain)?;
     }
     // 2. The rows. Sealed before they are destroyed, like every erase in this
     // lane: a fill walk in flight holds a pre-block copy of the cursors and
@@ -8602,7 +8615,7 @@ pub fn transport_block_conversation(conversation_id: String) -> Result<(), AppEr
     });
     let (rows, messages) = {
         let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
-        purge_contact_rows(&mut store, &address, false)?
+        block_purge(&mut store, &address)?
     };
     // 3. The claims.
     if let Some(alias) = alias.as_deref() {
@@ -8642,6 +8655,44 @@ fn quarantine_unreadable_block_list(dir: &Path) {
         ),
         Err(e) => log::warn!("block-list: unreadable and could not be moved aside: {e}"),
     }
+}
+
+/// The start sweep's store half (D-308): every row for each blocked address
+/// but a live request, then their sealed bytes out of the file when anything
+/// went (PRE3-LOG, F30). Best-effort, as the sweep always was: a failure is
+/// warned and the next start sweeps again. Pure over the store, so it is
+/// tested without a hub.
+fn sweep_blocked_rows(store: &mut TransportStore, addresses: &[String]) -> (usize, usize) {
+    let mut swept = (0usize, 0usize);
+    for address in addresses {
+        match purge_contact_rows(store, address, true) {
+            Ok((rows, messages)) => {
+                swept.0 += rows;
+                swept.1 += messages;
+            }
+            Err(e) => log::warn!("transport-block: start sweep failed: {}", e.message),
+        }
+    }
+    if swept.0 > 0 {
+        log::info!(
+            "transport-block: {} row(s) and {} message(s) for blocked addresses removed at start",
+            swept.0,
+            swept.1
+        );
+        if let Err(e) = store.compact() {
+            log::warn!("transport-block: compaction after the start sweep failed: {e}");
+        }
+    }
+    swept
+}
+
+/// The block's store half: every row for the address, then their sealed
+/// bytes out of the file, not only off the screen (PRE3-LOG, F30). Pure over
+/// the store, so it is tested without a hub.
+fn block_purge(store: &mut TransportStore, address: &str) -> Result<(usize, usize), AppError> {
+    let purged = purge_contact_rows(store, address, false)?;
+    store.compact().map_err(AppError::chain)?;
+    Ok(purged)
 }
 
 /// Destroy every conversation row for an address and every message in them.
@@ -8691,9 +8742,12 @@ pub fn transport_unblock_contact(address: String) -> Result<bool, AppError> {
         .block_list
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    let lifted = list.unblock(&address);
+    // On disk first, then in memory (PRE3-LOG, F46): a failed save used to
+    // lift the block for the session and leave it in force after a restart.
+    let lifted = list
+        .commit(&dir, |list| list.unblock(&address))
+        .map_err(AppError::chain)?;
     if lifted {
-        list.save(&dir).map_err(AppError::chain)?;
         log::info!("transport-block: 1 address unblocked");
     }
     Ok(lifted)
@@ -8709,13 +8763,18 @@ fn lift_block_on_contact(hub: &TransportHub, address: &str, why: &str) {
         .block_list
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
-    if !list.unblock(address) {
+    if !list.is_blocked(address) {
         return;
     }
-    match vault::transport_store_dir().and_then(|dir| list.save(&dir).map_err(AppError::chain)) {
-        Ok(()) => log::info!("transport-block: {why} lifted a block"),
+    // On disk first, then in memory (PRE3-LOG, F46). A lift whose save fails
+    // is not made at all, so memory and disk agree that the block stands.
+    match vault::transport_store_dir().and_then(|dir| {
+        list.commit(&dir, |list| list.unblock(address))
+            .map_err(AppError::chain)
+    }) {
+        Ok(_) => log::info!("transport-block: {why} lifted a block"),
         Err(e) => log::warn!(
-            "transport-block: a lifted block did not persist: {}",
+            "transport-block: a lift did not persist, so the block stands: {}",
             e.message
         ),
     }
@@ -12800,5 +12859,65 @@ mod tests {
         assert!(!set.contains("first"), "the oldest went first");
         assert!(set.contains(&format!("{:064x}", REFUTED_CAPACITY - 1)));
         assert!(set.contains(&format!("{:064x}", 0)));
+    }
+
+    /// **F30 through every erase lane.** Clear, hide, block and the start
+    /// sweep each leave the removed message's sealed bytes out of
+    /// `messages.kvlog`: the search finds them before (it can look) and not
+    /// after. Each lane's store half is the code the public call runs.
+    #[test]
+    fn every_erase_lane_takes_the_words_out_of_the_file() {
+        let on_disk = |dir: &std::path::Path, needle: &[u8]| {
+            std::fs::read(dir.join("messages.kvlog"))
+                .unwrap()
+                .windows(needle.len())
+                .any(|w| w == needle)
+        };
+        for (n, lane) in ["clear", "hide", "block", "sweep"].into_iter().enumerate() {
+            let (mut store, dir) = stash_store(&format!("f30-{lane}"));
+            store
+                .upsert_conversation(row_for("thread", PARTNER_A, ConversationStatus::Active))
+                .unwrap();
+            let words: Vec<u8> = (0..61u8)
+                .map(|i| i.wrapping_mul(29) ^ (0x40 + n as u8))
+                .collect();
+            store
+                .record_message(MessageRecord {
+                    txid: format!("said-{lane}"),
+                    conversation_id: "thread".into(),
+                    direction: MessageDirection::Inbound,
+                    kind: StoredKind::Comm,
+                    envelope: words.clone(),
+                    unix_ms: 1,
+                    alias_on_wire: None,
+                    sealed_to: None,
+                    provenance: RowSource::NodeScanned,
+                    wire: WireNamespace::CiphMsg,
+                })
+                .unwrap();
+            assert!(
+                on_disk(&dir, &words),
+                "{lane}: before, the search finds the words"
+            );
+
+            match lane {
+                "clear" => assert_eq!(clear_conversation_rows(&mut store, "thread").unwrap(), 1),
+                "hide" => hide_conversation_rows(&mut store, "thread").unwrap(),
+                "block" => assert_eq!(block_purge(&mut store, PARTNER_A).unwrap(), (1, 1)),
+                _ => assert_eq!(
+                    sweep_blocked_rows(&mut store, &[PARTNER_A.to_string()]),
+                    (1, 1)
+                ),
+            }
+            assert!(
+                !on_disk(&dir, &words),
+                "{lane}: after, the words are gone from the file"
+            );
+            assert!(TransportStore::load(dir.clone())
+                .unwrap()
+                .message(&format!("said-{lane}"))
+                .is_none());
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }
