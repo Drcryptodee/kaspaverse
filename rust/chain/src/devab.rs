@@ -1028,6 +1028,7 @@ lanefault=1
             addresses: Vec::new(),
             block_time_ms: None,
             block_hash: None,
+            sender: None,
         };
         state.on_walk_matches(std::slice::from_ref(&walked));
         assert!(

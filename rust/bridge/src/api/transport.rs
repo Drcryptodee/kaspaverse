@@ -1353,6 +1353,10 @@ async fn fill_walks(
                 block_time_ms: Some(row.block_time),
                 // An indexer row has no carrying block we trust (D-139).
                 block_hash: None,
+                // The handshake lane takes no identity from an archive row
+                // (D-139): a fill invitation stays address-less until our own
+                // node reaches its txid.
+                sender: None,
             };
             if erase_epoch() != epoch {
                 return abandon_wiped_walk(report);
@@ -1451,6 +1455,15 @@ async fn fill_walks(
                 block_time_ms: Some(row.block_time),
                 // An indexer row has no carrying block we trust (D-139).
                 block_hash: None,
+                // The archive's CLAIM about who sent it, parsed and ignored
+                // until PRE3-SENDER. The comm lane folds the row only when the
+                // claim names this conversation's contact (§0.10), and never for
+                // a txid our own walk refused this session; the row keeps its
+                // `archive` provenance on the glass. When our walk reaches the
+                // txid after the fill, it replaces the row, or removes it when it
+                // names another sender. An invented txid our walk never reaches
+                // stays an archive row (the declared residual).
+                sender: Some(row.sender.clone()),
             };
             if erase_epoch() != epoch {
                 return abandon_wiped_walk(report);
@@ -1612,7 +1625,14 @@ fn restored_conversation(
 ) -> Option<ConversationRecord> {
     // The counterparty address decides where every future message is sealed, so
     // it has to be an address on OUR network — not merely a non-empty string.
-    validate_mainnet_address(&payload.partner_address).ok()?;
+    // Stored in the pin's canonical form, never as the archive spelled it: the
+    // decoder drops non-zero padding bits (`bech32.rs` `conv5to8`), so a string
+    // can validate and still differ from its address's own form, and the comm
+    // lane compares senders as canonical strings (PRE3-SENDER,
+    // `consensus-auditor`).
+    let partner_address = validate_mainnet_address(&payload.partner_address)
+        .ok()?
+        .to_string();
 
     // The bound slot, clamped to the window we actually derive keys for. An
     // out-of-window index is not a reason to refuse the conversation; it is a
@@ -1636,7 +1656,7 @@ fn restored_conversation(
             .conversation_id
             .clone()
             .unwrap_or_else(fresh_conversation_id),
-        contact_address: payload.partner_address.clone(),
+        contact_address: partner_address,
         my_alias: payload.alias.clone(),
         their_alias: payload.their_alias.clone(),
         // Never `PendingInbound`. That is the ONE status carrying an Accept
@@ -2562,15 +2582,35 @@ enum DropReason {
     /// the node's own sender resolution — never on an alias.
     BlockedContact,
     /// An unroutable comm that sealed to us and is parked until the chain
-    /// names its sender — held, not lost (D-142; widened at D-307 to mint the
-    /// conversation when none exists). Settled for the cursor: the node lane
-    /// owns it and a fill row never parks.
+    /// names its sender (D-142; widened at D-307 to mint the conversation when
+    /// none exists). **Held in memory for this run only**: the parked set is
+    /// bounded (256 entries, 1 MiB) and not durable, so an eviction or a
+    /// restart loses it, and the walk has committed past it (a register row,
+    /// PRE3-SENDER). Settled for the cursor: the node lane
+    /// owns it and a fill row never parks. Since PRE3-SENDER also a ROUTED
+    /// comm whose page named no sender, parked the same way; over an archive
+    /// row the node could neither confirm nor refute, nothing is parked and
+    /// the archive row stays as it stands.
     SenderPending,
     /// The revival lane's per-minute decrypt budget is spent
     /// ([`REVIVAL_ATTEMPTS_PER_MINUTE`]). Every stranger's comm on a public
     /// chain reaches the unroutable branch, so the full-window decrypt behind
     /// it is bounded; a real contact's next message tries again.
     RevivalBudgetSpent,
+    /// A comm under an alias one of our conversations answers to, whose sender
+    /// is not that conversation's contact (F2, PRE3-SENDER, §0.10): a stranger
+    /// posting as the contact, the contact's own old envelope replayed from
+    /// another address, our own alias used by anyone, or an archive row whose
+    /// claimed sender disagrees. Also a row with no contact address to compare
+    /// (an invitation whose sender has not resolved): an unprovable sender is
+    /// refused, never assumed (the rule `acceptance_verdict` keeps).
+    ///
+    /// Settled: the cursor passes it. It names the attempt, never the address
+    /// (INV-3): the txid is the forensic handle, and the chain holds the rest.
+    /// Logged at `info` on both lanes, like `NoKeyOpensIt`: it takes a known
+    /// alias to raise it, so it is a targeted event, not the chain's
+    /// background noise.
+    SenderNotContact,
 }
 
 /// What one fold attempt did.
@@ -2622,9 +2662,11 @@ impl DropReason {
     /// denial of service on our own history: one unopenable envelope sent to
     /// a published receive address would pin the walk at that block time
     /// forever, and every later message would stop arriving. So a row no key
-    /// opens is passed over, loudly logged, and left to the node lane — the
-    /// decrypt IS the verification step, and a row that fails it is not ours
-    /// by the only test we trust (D-074: omission is possible, forgery is not).
+    /// opens is passed over, loudly logged, and left to the node lane — a row
+    /// no key of ours opens was not sealed to us, so it is not ours (D-074).
+    /// The converse proves less than D-074 first wrote: an archive can seal a
+    /// row to our published key too (F68), which is why an archive comm must
+    /// also name the contact as its sender (`comm_sender_verdict`).
     fn outcome(self) -> FoldOutcome {
         match self {
             DropReason::VaultLocked => FoldOutcome::Locked,
@@ -2822,6 +2864,11 @@ struct ParkedComm {
     envelope: Vec<u8>,
     block_time_ms: Option<u64>,
     wire: WireNamespace,
+    /// The sender the walk's page named, when it named one (PRE3-SENDER). The
+    /// row's own completion still asks the return-address lookup (the revival
+    /// lane keeps its path); this is what lets a SIBLING folded on the alias be
+    /// judged by its own sender rather than by the alias it shares.
+    sender: Option<String>,
 }
 
 /// The parked comms, keyed by txid, oldest first.
@@ -2881,17 +2928,48 @@ impl ParkedComms {
         Some(self.entries.remove(pos).1)
     }
 
-    /// Every entry parked under `alias` — the siblings that arrived in the
-    /// same catch-up as the one whose sender just resolved. They are folded
-    /// into that row on the alias, which is exactly the rule an alias-routed
-    /// comm into an existing row already lives under (a comm proves the
-    /// envelope opened under our key, never who sealed it — backlog #5).
-    fn take_by_alias(&mut self, alias: &str) -> Vec<(String, ParkedComm)> {
-        let (mine, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.entries)
+    /// Every entry parked under `alias` that the page says `sender` sent — the
+    /// siblings that arrived in the same catch-up as the one whose sender just
+    /// resolved, folded into that row with it.
+    ///
+    /// **The alias alone never folds a sibling** (PRE3-SENDER). It used to: the
+    /// routed lane took any comm whose envelope opened under our key, so this
+    /// took any comm parked under the alias, and a stranger's comm parked
+    /// beside the contact's rode the contact's proof into the thread. A
+    /// sibling whose page named someone else is a stranger's and is dropped
+    /// here; one whose page named no sender stays parked, for its own
+    /// resolution. Returns `(folded, refused txids)`.
+    fn take_siblings(
+        &mut self,
+        alias: &str,
+        sender: &str,
+    ) -> (Vec<(String, ParkedComm)>, Vec<String>) {
+        let mut refused = Vec::new();
+        let mut folded = Vec::new();
+        let mut kept = Vec::new();
+        for (txid, parked) in std::mem::take(&mut self.entries) {
+            if parked.alias != alias {
+                kept.push((txid, parked));
+                continue;
+            }
+            match parked.sender.as_deref() {
+                Some(named) if named == sender => folded.push((txid, parked)),
+                Some(_) => refused.push(txid),
+                None => kept.push((txid, parked)),
+            }
+        }
+        self.entries = kept;
+        (folded, refused)
+    }
+
+    /// Forget what `sender`'s page put under `alias`, and nothing else.
+    /// Returns the txids that went.
+    fn forget_from(&mut self, alias: &str, sender: &str) -> Vec<String> {
+        let (gone, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.entries)
             .into_iter()
-            .partition(|(_, p)| p.alias == alias);
-        self.entries = rest;
-        mine
+            .partition(|(_, p)| p.alias == alias && p.sender.as_deref() == Some(sender));
+        self.entries = kept;
+        gone.into_iter().map(|(txid, _)| txid).collect()
     }
 
     /// Forget everything parked under `alias` — a block's in-memory half.
@@ -2933,11 +3011,144 @@ fn take_parked_comm(txid: &str) -> Option<ParkedComm> {
         .take(txid)
 }
 
-fn take_parked_siblings(alias: &str) -> Vec<(String, ParkedComm)> {
+/// Drop what `sender` left parked under `alias` (and nothing else), returning
+/// the txids — for a refusal of that sender, which refuses its siblings too.
+fn forget_parked_from(alias: &str, sender: &str) -> Vec<String> {
     PENDING_COMMS
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .take_by_alias(alias)
+        .forget_from(alias, sender)
+}
+
+fn take_parked_siblings(alias: &str, sender: &str) -> (Vec<(String, ParkedComm)>, Vec<String>) {
+    PENDING_COMMS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take_siblings(alias, sender)
+}
+
+/// **Release what an invitation held while it did not know its sender**
+/// (PRE3-SENDER, `wallet-security-auditor`). A comm that routes to a row with
+/// no contact address is parked with its page's sender instead of refused (a
+/// settled refusal could never be judged again once the address lands). Every
+/// writer of an invitation's address calls this after the write and after any
+/// merge, with the store lock released, naming the row that now holds the
+/// sender: a merge can keep the other row's alias, and the held alias would
+/// then route nowhere. The comms `sender` wrote under `alias` land in that row
+/// when its contact is `sender`; the rest under the alias are refused and
+/// remembered against the archive.
+fn release_held_comms(hub: &TransportHub, conversation_id: &str, alias: &str, sender: &str) {
+    let (rows, refused) = take_parked_siblings(alias, sender);
+    for txid in &refused {
+        note_refuted(txid);
+    }
+    if !refused.is_empty() {
+        log::info!(
+            "transport-intake: {} held comm(s) under a named invitation's alias came from another \
+             sender — refused (PRE3-SENDER)",
+            refused.len()
+        );
+    }
+    if rows.is_empty() {
+        return;
+    }
+    let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(row) = store.conversation(conversation_id).cloned() else {
+        drop(store);
+        log::info!(
+            "transport-intake: {} held comm(s) had no row left to land in — dropped",
+            rows.len()
+        );
+        return;
+    };
+    let blocked = hub
+        .block_list
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .is_blocked(sender);
+    if blocked
+        || comm_sender_verdict(EventOrigin::Node, Some(sender), &row.contact_address)
+            != CommSenderVerdict::Contact
+        || comm_is_dismissed(
+            row.status,
+            store.is_conversation_tombstoned(conversation_id),
+        )
+    {
+        drop(store);
+        log::info!(
+            "transport-intake: {} held comm(s) refused at release (blocked, dismissed, or not \
+             this row's contact)",
+            rows.len()
+        );
+        return;
+    }
+    unhide_on_inbound(&mut store, conversation_id);
+    let n = rows.len();
+    record_parked_rows(
+        &mut store,
+        conversation_id,
+        (row.bound_branch, row.bound_index),
+        rows,
+        now_unix_ms(),
+    );
+    drop(store);
+    log::info!("transport-intake: {n} held comm(s) released into the named conversation");
+    ping(conversation_id);
+}
+
+/// Txids our own walk refused as not the contact's, and those whose archive
+/// row it disproved (PRE3-SENDER, `wallet-security-auditor`). The fill runs
+/// after the walk settles, so in the ordinary order the walk refuses a
+/// stranger's comm first and writes nothing; without a trace, the fill would
+/// then file a hostile archive's "the contact sent it" for the same txid, and
+/// nothing would revisit it. Bounded and in memory, like the parked set: a
+/// refusal is attacker-mintable, so an evicted entry costs only what an
+/// archive's invented txid already could (the declared residual, bounded by
+/// the `archive` label).
+struct RefutedTxids {
+    order: std::collections::VecDeque<String>,
+}
+
+/// Cap on remembered refutations: four walk catch-ups' worth of comms at
+/// today's measured rate is well under it.
+const REFUTED_CAPACITY: usize = 1024;
+
+impl RefutedTxids {
+    const fn new() -> Self {
+        Self {
+            order: std::collections::VecDeque::new(),
+        }
+    }
+
+    fn note(&mut self, txid: &str) {
+        if self.order.iter().any(|t| t == txid) {
+            return;
+        }
+        if self.order.len() >= REFUTED_CAPACITY {
+            self.order.pop_front();
+        }
+        self.order.push_back(txid.to_string());
+    }
+
+    fn contains(&self, txid: &str) -> bool {
+        self.order.iter().any(|t| t == txid)
+    }
+}
+
+static REFUTED: Mutex<RefutedTxids> = Mutex::new(RefutedTxids::new());
+
+fn note_refuted(txid: &str) {
+    REFUTED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .note(txid);
+}
+
+fn is_refuted(txid: &str) -> bool {
+    REFUTED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(txid)
 }
 
 /// A fixed-window rate limit: at most `limit` takes per `window_ms`. Pure over
@@ -3043,6 +3254,7 @@ fn revive_or_drop(
     sealed: &[u8],
     block_time_ms: Option<u64>,
     block_hash: Option<&str>,
+    sender: Option<&str>,
     origin: EventOrigin,
     wire: WireNamespace,
 ) -> FoldOutcome {
@@ -3079,12 +3291,19 @@ fn revive_or_drop(
             envelope: envelope_bytes,
             block_time_ms,
             wire,
+            sender: sender.map(str::to_string),
         },
     );
     if let Some(tracker) = dag::tracker_handle() {
         tracker.note_sender_interest(txid);
     }
-    schedule_sender_locate(txid.to_string(), alias, block_hash.map(str::to_string));
+    // One locate per alias AND page sender: the siblings it folds are exactly
+    // those (`take_siblings`). A comm whose page named no one takes its own.
+    let seat = match sender {
+        Some(sender) => format!("{alias}|{sender}"),
+        None => txid.to_string(),
+    };
+    schedule_sender_locate(txid.to_string(), seat, block_hash.map(str::to_string));
     // Once, here — the re-deliveries the DAG will send next are refused
     // before the decrypt and stay quiet.
     log::info!("transport-intake: unroutable comm tx={txid} sealed to us — parked, awaiting sender (D-307)");
@@ -3107,8 +3326,15 @@ fn revive_or_drop(
 /// virtual-chain page from its carrying block
 /// (`AcceptanceTracker::locate_accepting_daa_score`) and complete through the
 /// same [`adopt_alias_from_sender`] the live lane uses, on the same sender
-/// proof. One in flight per alias; [`LOCATE_PAGES_PER_MINUTE`] overall.
-fn schedule_sender_locate(txid: String, alias: String, block_hash: Option<String>) {
+/// proof. One in flight per `seat`; [`LOCATE_PAGES_PER_MINUTE`] overall.
+///
+/// **The seat is what one locate can fold** (PRE3-SENDER,
+/// `wallet-security-auditor`): the alias and the page's sender on the revival
+/// lane, because the holder folds exactly the siblings that sender wrote under
+/// the alias; the txid for a comm whose page named no sender (the routed
+/// fallback, or a revival off the pin), because no other row's proof ever
+/// folds it. A shared seat would skip a comm's own locate and lose it.
+fn schedule_sender_locate(txid: String, seat: String, block_hash: Option<String>) {
     let Some(block_hash) = block_hash else {
         return; // no carrying block — the live lane is the only path
     };
@@ -3117,8 +3343,8 @@ fn schedule_sender_locate(txid: String, alias: String, block_hash: Option<String
         if !comm_already_parked(&txid) {
             return; // resolved (or evicted) while we waited
         }
-        let Some(_guard) = LocatingGuard::take(alias) else {
-            return; // a sibling's locate will fold this one on the alias
+        let Some(_guard) = LocatingGuard::take(seat) else {
+            return; // the seat's holder folds this one with its siblings
         };
         locate_and_adopt(&txid, &block_hash).await;
     });
@@ -3347,6 +3573,9 @@ fn acceptance_verdict(
 /// opened the conversation — so only the real counterparty can bind an alias,
 /// and a stranger sealing a comm to our published key matches nothing.
 ///
+/// It is also PRE3-SENDER's fallback: a routed comm whose page named no sender
+/// is parked here, and [`fold_parked_comm`] holds it to the routed lane's rule.
+///
 /// Node lane only, by construction: the DAA score comes from the VCC stream
 /// our own node emits, never from a fill row.
 async fn adopt_alias_from_sender(txid: &str, accepting_daa_score: u64) {
@@ -3381,9 +3610,25 @@ async fn adopt_alias_from_sender(txid: &str, accepting_daa_score: u64) {
             return;
         }
     };
+    fold_parked_comm(&hub, txid, parked, &sender);
+}
+
+/// Fold a parked comm once the chain has named its `sender`: the decision half
+/// of [`adopt_alias_from_sender`], kept apart from the lookup so it is driven
+/// without a node.
+///
+/// **An alias a conversation answers to is that conversation's, and only its
+/// contact writes under it** (PRE3-SENDER): the routed lane's rule,
+/// [`comm_sender_verdict`], applied to the address the chain named. This is
+/// what the routed lane's fallback parks for, and it holds a comm the revival
+/// lane parked whose alias a row has learned since: such a comm is recorded
+/// into that row only when its sender is the row's contact, and it never
+/// teaches another row the alias. Only an alias NO row answers to reaches the
+/// re-learn and revival branch (D-142, D-307), unchanged.
+fn fold_parked_comm(hub: &TransportHub, txid: &str, parked: ParkedComm, sender: &str) {
     // An address we cannot seal to is worse than none: a row built on it
     // would answer address lookups while unable to hold a conversation.
-    if validate_mainnet_address(&sender).is_err() {
+    if validate_mainnet_address(sender).is_err() {
         log::info!("transport-intake: tx={txid} resolved to an address we cannot seal to");
         return;
     }
@@ -3399,89 +3644,194 @@ async fn adopt_alias_from_sender(txid: &str, accepting_daa_score: u64) {
         .block_list
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .is_blocked(&sender)
+        .is_blocked(sender)
     {
         drop(store);
+        // Everything else THAT ADDRESS left parked under this alias goes too: a
+        // blocked knock keeps its handshake row and nothing else, so its held
+        // comms must not wait for a later accept to fold them
+        // (`wallet-security-auditor`). Only its own: a blocked address owns no
+        // alias, and a contact's comm parked beside it under that public alias
+        // keeps its own lookup (`consensus-auditor`).
+        let dropped_too = forget_parked_from(&alias, sender);
+        // Remembered against the archive, like every node-lane refusal.
+        note_refuted(txid);
+        for gone in &dropped_too {
+            note_refuted(gone);
+        }
         log::info!(
             "transport-intake: a message from a blocked address was refused before it could \
-             revive anything (tx={txid})"
+             revive anything (tx={txid}; {} more from it under the alias dropped)",
+            dropped_too.len()
         );
         return;
     }
-    let (conversation_id, bound) = match store.conversation_by_contact_address(&sender) {
-        Some(existing) => {
-            // Never overwrite an alias we already hold: this path exists to
-            // fill a gap, not to let the newest message redefine who a
-            // contact is. (A dismissed invitation lands here too — it holds
-            // their alias — and stays dismissed.)
-            if existing
-                .their_alias
-                .as_deref()
-                .is_some_and(|held| held != alias)
-            {
+    let routed = store.conversation_by_alias(&alias).map(|c| {
+        (
+            c.conversation_id.clone(),
+            c.contact_address.clone(),
+            c.status,
+            (c.bound_branch, c.bound_index),
+        )
+    });
+    let (conversation_id, bound) = match routed {
+        // The routed lane's rule, on the chain's answer. No identity is
+        // rewritten here: the row already answers to this alias.
+        Some((conversation_id, contact_address, status, bound)) => {
+            match comm_sender_verdict(EventOrigin::Node, Some(sender), &contact_address) {
+                CommSenderVerdict::Contact => {}
+                // The row does not know its sender yet: hold the comm under
+                // the address the chain just named, for the writer of the
+                // row's address to release (`release_held_comms`).
+                // Parked BEFORE the store lock is released: a writer that names
+                // the row takes that lock first, so it cannot release between
+                // this verdict and the park (`consensus-auditor`, L73).
+                CommSenderVerdict::AwaitContact => {
+                    park_comm(
+                        txid,
+                        ParkedComm {
+                            sender: Some(sender.to_string()),
+                            ..parked
+                        },
+                    );
+                    drop(store);
+                    log::info!(
+                        "transport-intake: comm tx={txid} held until its invitation names a \
+                         sender (PRE3-SENDER)"
+                    );
+                    return;
+                }
+                CommSenderVerdict::NotContact | CommSenderVerdict::AwaitSender => {
+                    drop(store);
+                    note_refuted(txid);
+                    // The siblings that sender left under the alias fall with
+                    // it, remembered against the archive; other senders' keep
+                    // their own lookups.
+                    for sibling in forget_parked_from(&alias, sender) {
+                        note_refuted(&sibling);
+                    }
+                    dropped(COMM, txid, DropReason::SenderNotContact, EventOrigin::Node);
+                    return;
+                }
+            }
+            if comm_is_dismissed(status, store.is_conversation_tombstoned(&conversation_id)) {
                 drop(store);
-                log::info!(
-                    "transport-intake: tx={txid} sender matches a conversation that already \
-                     holds a different alias for them — not adopting"
+                note_refuted(txid);
+                for sibling in forget_parked_from(&alias, sender) {
+                    note_refuted(&sibling);
+                }
+                dropped(
+                    COMM,
+                    txid,
+                    DropReason::DismissedInvitation,
+                    EventOrigin::Node,
                 );
                 return;
             }
-            let mut conversation = existing.clone();
-            let conversation_id = conversation.conversation_id.clone();
-            conversation.their_alias = Some(alias.clone());
-            // Their message proves the handshake completed on their side,
-            // whatever our own side was still waiting for.
-            if conversation.status == ConversationStatus::PendingOutbound {
-                conversation.status = ConversationStatus::Active;
-            }
-            let bound = (conversation.bound_branch, conversation.bound_index);
             unhide_on_inbound(&mut store, &conversation_id);
-            warn_store(store.upsert_conversation(conversation));
-            log::info!(
-                "transport-intake: learned a contact's alias from their message (tx={txid}) — \
-                 conversation active"
-            );
             (conversation_id, bound)
         }
-        None => {
-            // D-307: no row holds them, the message opened under our key and
-            // came from an address our own node named. **And this wallet has
-            // paid that address before** — a handshake bond, an acceptance
-            // refund or a payment, witnessed by our own signature in the
-            // wallet's activity record, which a message wipe does not touch.
-            // That is the founder's condition (*as long as there is already
-            // a handshake*) made checkable after the rows are gone, and it is
-            // what keeps this door from being a bond-free way into Chats: a
-            // comm is a self-send costing a fee, and without this fence any
-            // stranger could seal one to our published key and appear as an
-            // Active thread (`consensus-auditor`, MSG-BLOCK). A stranger's
-            // door is still the handshake, at the bond.
-            let paid = wallet::engine_handle().is_some_and(|engine| engine.has_paid(&sender));
-            if !paid {
-                drop(store);
+        None => match store.conversation_by_contact_address(sender) {
+            Some(existing) => {
+                // Never overwrite an alias we already hold: this path exists to
+                // fill a gap, not to let the newest message redefine who a
+                // contact is. (A dismissed invitation lands here too — it holds
+                // their alias — and stays dismissed.)
+                if existing
+                    .their_alias
+                    .as_deref()
+                    .is_some_and(|held| held != alias)
+                {
+                    drop(store);
+                    log::info!(
+                        "transport-intake: tx={txid} sender matches a conversation that already \
+                         holds a different alias for them — not adopting"
+                    );
+                    return;
+                }
+                let mut conversation = existing.clone();
+                let conversation_id = conversation.conversation_id.clone();
+                conversation.their_alias = Some(alias.clone());
+                // Their message proves the handshake completed on their side,
+                // whatever our own side was still waiting for.
+                if conversation.status == ConversationStatus::PendingOutbound {
+                    conversation.status = ConversationStatus::Active;
+                }
+                let bound = (conversation.bound_branch, conversation.bound_index);
+                unhide_on_inbound(&mut store, &conversation_id);
+                warn_store(store.upsert_conversation(conversation));
                 log::info!(
-                    "transport-intake: tx={txid} sealed to us from an address this wallet never \
-                     paid — not a contact, not revived (a handshake is the door)"
+                    "transport-intake: learned a contact's alias from their message (tx={txid}) — \
+                     conversation active"
                 );
-                return;
+                (conversation_id, bound)
             }
-            let conversation = revived_conversation(&sender, &alias, parked.slot, now);
-            let conversation_id = conversation.conversation_id.clone();
-            let bound = (conversation.bound_branch, conversation.bound_index);
-            warn_store(store.upsert_conversation(conversation));
-            log::info!(
-                "transport-intake: a message from a contact this device no longer held revived \
-                 their conversation (tx={txid}, D-307)"
-            );
-            (conversation_id, bound)
-        }
+            None => {
+                // D-307: no row holds them, the message opened under our key and
+                // came from an address our own node named. **And this wallet has
+                // paid that address before** — a handshake bond, an acceptance
+                // refund or a payment, witnessed by our own signature in the
+                // wallet's activity record, which a message wipe does not touch.
+                // That is the founder's condition (*as long as there is already
+                // a handshake*) made checkable after the rows are gone, and it is
+                // what keeps this door from being a bond-free way into Chats: a
+                // comm is a self-send costing a fee, and without this fence any
+                // stranger could seal one to our published key and appear as an
+                // Active thread (`consensus-auditor`, MSG-BLOCK). A stranger's
+                // door is still the handshake, at the bond.
+                let paid = wallet::engine_handle().is_some_and(|engine| engine.has_paid(sender));
+                if !paid {
+                    drop(store);
+                    log::info!(
+                        "transport-intake: tx={txid} sealed to us from an address this wallet \
+                         never paid — not a contact, not revived (a handshake is the door)"
+                    );
+                    return;
+                }
+                let conversation = revived_conversation(sender, &alias, parked.slot, now);
+                let conversation_id = conversation.conversation_id.clone();
+                let bound = (conversation.bound_branch, conversation.bound_index);
+                warn_store(store.upsert_conversation(conversation));
+                log::info!(
+                    "transport-intake: a message from a contact this device no longer held \
+                     revived their conversation (tx={txid}, D-307)"
+                );
+                (conversation_id, bound)
+            }
+        },
     };
     // The message that revealed them is the thread's first row, and every
-    // sibling parked under the same alias follows it — a catch-up folds a
-    // contact's whole backlog in one second, and only one of those rows
-    // needed to name the sender.
+    // sibling parked under the same alias BY THE SAME SENDER follows it — a
+    // catch-up folds a contact's whole backlog in one second, and only one of
+    // those rows needed the lookup. A sibling the page says someone else sent
+    // is refused, never carried in on this row's proof.
+    let (siblings, refused) = take_parked_siblings(&alias, sender);
+    if !refused.is_empty() {
+        log::info!(
+            "transport-intake: {} comm(s) parked beside tx={txid} under its alias named another \
+             sender — refused (PRE3-SENDER)",
+            refused.len()
+        );
+    }
+    for refused in &refused {
+        note_refuted(refused);
+    }
     let mut rows = vec![(txid.to_string(), parked)];
-    rows.extend(take_parked_siblings(&alias));
+    rows.extend(siblings);
+    record_parked_rows(&mut store, &conversation_id, bound, rows, now);
+    drop(store);
+    ping(&conversation_id);
+}
+
+/// Record parked comms the chain has proven into `conversation_id`, as node
+/// rows, and lift its activity clock. Store lock held by the caller.
+fn record_parked_rows(
+    store: &mut TransportStore,
+    conversation_id: &str,
+    bound: (KeyBranch, u32),
+    rows: Vec<(String, ParkedComm)>,
+    now: u64,
+) {
     let mut newest = 0u64;
     for (row_txid, row) in rows {
         let opened_at = (to_key_branch(row.slot.0), row.slot.1);
@@ -3489,7 +3839,7 @@ async fn adopt_alias_from_sender(txid: &str, accepting_daa_score: u64) {
         newest = newest.max(unix_ms);
         warn_store(store.record_message(MessageRecord {
             txid: row_txid.clone(),
-            conversation_id: conversation_id.clone(),
+            conversation_id: conversation_id.to_string(),
             direction: MessageDirection::Inbound,
             kind: StoredKind::Comm,
             envelope: row.envelope,
@@ -3501,15 +3851,13 @@ async fn adopt_alias_from_sender(txid: &str, accepting_daa_score: u64) {
         }));
         watch_acceptance(&row_txid, row.block_time_ms);
     }
-    if let Some(existing) = store.conversation(&conversation_id) {
+    if let Some(existing) = store.conversation(conversation_id) {
         let mut conversation = existing.clone();
         // Max, never assignment: a filled old row must not re-sort the
         // conversation above genuinely newer traffic.
         conversation.last_activity_unix_ms = conversation.last_activity_unix_ms.max(newest);
         warn_store(store.upsert_conversation(conversation));
     }
-    drop(store);
-    ping(&conversation_id);
 }
 
 /// Complete a handshake acceptance once the chain names its sender (F5).
@@ -3744,9 +4092,7 @@ async fn resweep_invitation_senders() {
         store
             .list_conversations()
             .into_iter()
-            .filter(|c| {
-                c.status == ConversationStatus::PendingInbound && c.contact_address.is_empty()
-            })
+            .filter(|c| nameable_invitation(&store, c))
             .filter_map(|c| c.handshake_txid.map(|txid| (c.conversation_id, txid)))
             .collect()
     };
@@ -3762,7 +4108,7 @@ async fn resweep_invitation_senders() {
         let Some(sender) = resolve_handshake_sender(&txid).await else {
             continue;
         };
-        {
+        let held_under = {
             let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
             let Some(mut row) = store.conversation(&conversation_id).cloned() else {
                 continue;
@@ -3771,10 +4117,24 @@ async fn resweep_invitation_senders() {
             if !row.contact_address.is_empty() {
                 continue;
             }
+            let held_under = row.their_alias.clone();
             row.contact_address = sender.clone();
             warn_store(store.upsert_conversation(row));
             refuse_blocked_knock_comms(&hub, &mut store, &conversation_id, &sender);
-            warn_store(store.merge_contact(&sender).map(|_| ()));
+            let host = match store.merge_contact(&sender) {
+                Ok(Some((host, _))) => host,
+                Ok(None) => conversation_id.clone(),
+                Err(e) => {
+                    log::warn!("transport-hub: contact merge failed: {e}");
+                    conversation_id.clone()
+                }
+            };
+            held_under.map(|alias| (host, alias))
+        };
+        // Every writer of an invitation's address releases what it held, into
+        // the row that holds the sender after the merge.
+        if let Some((host, alias)) = held_under {
+            release_held_comms(&hub, &host, &alias, &sender);
         }
         healed += 1;
         ping(&conversation_id);
@@ -3784,16 +4144,38 @@ async fn resweep_invitation_senders() {
     }
 }
 
+/// **An invitation the sender lookup may name**: still waiting for its sender,
+/// and its handshake row is our node's own (`accept_provenance_ok`). An
+/// archive's invitation carries the archive's txid label, and the lookup
+/// answers for any txid in our wallet's activity record, so naming it from
+/// that label would let an archive pair its own handshake with a real
+/// payment's txid and steer a real contact's alias and key slot through the
+/// merge (D-139, `wallet-security-auditor`). An archive's invitation is named
+/// only when our node folds the handshake itself (the override branch of
+/// `handle_inbound_handshake`).
+fn nameable_invitation(store: &TransportStore, c: &ConversationRecord) -> bool {
+    c.status == ConversationStatus::PendingInbound
+        && c.contact_address.is_empty()
+        && c.handshake_txid.as_deref().is_some_and(|txid| {
+            // A HANDSHAKE row our node scanned: the provenance gate alone does
+            // not look at the kind, and a node comm row under the label's txid
+            // would otherwise pass for the invitation's handshake.
+            accept_provenance_ok(store, txid)
+                && store
+                    .message(txid)
+                    .is_some_and(|m| m.kind == StoredKind::Handshake)
+        })
+}
+
 async fn backfill_invitation_sender(txid: &str, accepting_daa_score: u64) {
     let Ok(hub) = hub() else { return };
     // Cheap first: is there even an address-less invitation for this txid?
     let needs_backfill = {
         let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
-        store.list_conversations().into_iter().any(|c| {
-            c.status == ConversationStatus::PendingInbound
-                && c.contact_address.is_empty()
-                && c.handshake_txid.as_deref() == Some(txid)
-        })
+        store
+            .list_conversations()
+            .into_iter()
+            .any(|c| nameable_invitation(&store, &c) && c.handshake_txid.as_deref() == Some(txid))
     };
     if !needs_backfill {
         return;
@@ -3832,14 +4214,15 @@ async fn backfill_invitation_sender(txid: &str, accepting_daa_score: u64) {
     }
 
     let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
-    let Some(existing) = store.list_conversations().into_iter().find(|c| {
-        c.status == ConversationStatus::PendingInbound
-            && c.contact_address.is_empty()
-            && c.handshake_txid.as_deref() == Some(txid)
-    }) else {
+    let Some(existing) = store
+        .list_conversations()
+        .into_iter()
+        .find(|c| nameable_invitation(&store, c) && c.handshake_txid.as_deref() == Some(txid))
+    else {
         return; // accepted or changed while we were on the network
     };
     let conversation_id = existing.conversation_id.clone();
+    let held_under = existing.their_alias.clone();
     let conversation = ConversationRecord {
         contact_address: sender.clone(),
         ..existing
@@ -3849,9 +4232,10 @@ async fn backfill_invitation_sender(txid: &str, accepting_daa_score: u64) {
     // ONE ROW PER CONTACT (D-141), on the lane the rule was missing from.
     //
     // The fold applies the address-keyed rule only when the node can name the
-    // sender AT fold time, and on the live lane it never can — the return-
-    // address lookup needs the bond's own activity record, which lands later.
-    // So a handshake from a contact we already hold minted a second row beside
+    // sender AT fold time. Until PRE3-SENDER the live lane almost never could —
+    // the return-address lookup needs the bond's own activity record, which
+    // lands later; the walk's page now names it, so this lane is for a page
+    // that named no sender. So a handshake from a contact we already hold minted a second row beside
     // the first, and that pair is what the derived `superseded_by` rule and
     // the "Start over" gesture were built to paper over — both since removed,
     // because this merge is what makes them unnecessary (D-305). Measured on the founder's device 2026-09-07: our
@@ -3869,6 +4253,14 @@ async fn backfill_invitation_sender(txid: &str, accepting_daa_score: u64) {
     };
     drop(store);
     log::info!("transport-intake: recorded the sender of an invitation (tx={txid})");
+    // Every writer of an invitation's address releases what it held, into the
+    // row that holds the sender after the merge.
+    if let Some(alias) = held_under {
+        let host = folded
+            .as_ref()
+            .map_or(conversation_id.as_str(), |(h, _)| h.as_str());
+        release_held_comms(&hub, host, &alias, &sender);
+    }
     match folded {
         Some((host, report)) => {
             log::info!(
@@ -3887,10 +4279,13 @@ async fn backfill_invitation_sender(txid: &str, accepting_daa_score: u64) {
 }
 
 /// **A blocked address's knock keeps its handshake row and nothing else**
-/// (`wallet-security-auditor`, MSG-BLOCK). On the live lane a request is
-/// minted address-less and named later by the sender lookup, and until then
-/// every comm they send under the new alias routes to it and is stored — the
-/// routed-branch refusal keys on an address the row does not have yet. So the
+/// (`wallet-security-auditor`, MSG-BLOCK). A request minted address-less is
+/// named later: one our node folded without a page sender by the sender
+/// lookup, an archive's only when our node folds its handshake (the override;
+/// never from the archive's txid label, `nameable_invitation`). Since
+/// PRE3-SENDER the comms its sender writes meanwhile are HELD,
+/// not stored, and released only after this purge runs; what it still removes
+/// is any comm row an older build stored before the name landed. So the
 /// moment the name lands, if it is blocked, the comms go: the handshake row
 /// stays because the accept gate reads it, and the card stays Accept-able,
 /// which is the door D-308 keeps open. Store lock held by the caller; the
@@ -3964,13 +4359,15 @@ fn comm_is_dismissed(status: ConversationStatus, tombstoned: bool) -> bool {
 ///
 /// Un-hiding needs inbound traffic on a row that is already a **contact**.
 ///
-/// "Traffic", not "the contact": a comm proves only that the envelope opened
-/// under one of our keys, and both our receive addresses and our alias are
-/// public, so any wire observer can mint one. Hiding a CONTACT is therefore
-/// revocable by a stranger for the price of a dust transaction. That is an
-/// accepted residual — no money rides on a contact row — and it closes when
-/// comms carry sender authentication (backlog #5). It is exactly why the
-/// invitation case is NOT treated the same way.
+/// Since PRE3-SENDER that traffic is the contact's: a comm reaches here only
+/// when its sender is the row's contact (`comm_sender_verdict`) — chain truth
+/// on the node lane, the archive's claim on the fill lane. Before it, a comm
+/// proved only that the envelope opened under one of our keys, so any wire
+/// observer could undo the hide of a contact for one dust transaction (the
+/// residual backlog #5 named). The fill cannot reach a hidden contact at all:
+/// its comm sweep skips hidden rows, so a hostile archive's claim does not
+/// reopen one (`wallet-security-auditor`). The invitation case is still NOT
+/// treated the same way.
 ///
 /// A dismissed `PendingInbound` invitation is never resurrected: the guard at
 /// the top of this function refuses it under the write lock,
@@ -4002,9 +4399,8 @@ fn unhide_on_inbound(store: &mut TransportStore, conversation_id: &str) {
     }
     {
         match store.untombstone_conversation(conversation_id) {
-            // "someone wrote", not "the contact wrote": a comm proves only
-            // that the envelope opened under one of our keys, never who sent
-            // it. Sender authentication is still owed (backlog #5).
+            // "the contact wrote" by chain truth on the node lane, by the
+            // archive's claim on the fill lane (PRE3-SENDER).
             Ok(true) => {
                 log::info!("transport-intake: hidden conversation reopened by inbound traffic")
             }
@@ -4041,6 +4437,7 @@ async fn handle_inbound(
                 &event.body,
                 &event.addresses,
                 event.block_time_ms,
+                event.sender.as_deref(),
                 origin,
                 event.namespace,
             )
@@ -4052,6 +4449,7 @@ async fn handle_inbound(
             &event.body,
             event.block_time_ms,
             event.block_hash.as_deref(),
+            event.sender.as_deref(),
             origin,
             event.namespace,
         ),
@@ -4081,12 +4479,14 @@ async fn handle_inbound(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_inbound_handshake(
     hub: &TransportHub,
     txid: &str,
     body: &[u8],
     addresses: &[String],
     block_time_ms: Option<u64>,
+    page_sender: Option<&str>,
     origin: EventOrigin,
     wire: WireNamespace,
 ) -> FoldOutcome {
@@ -4127,9 +4527,11 @@ async fn handle_inbound_handshake(
     // Establishment scan: whichever watched key opens it becomes the §0.7
     // binding. Not ours ⇒ skip. Vault locked ⇒ `Locked`: on the node lane the
     // walk holds the page and replays it at the unlock (LINK-Q3, deliverable
-    // 4); it used to be missed, like one seen while offline. This
-    // decrypt is ALSO the fill's verify step: an indexer row no watched key
-    // opens is dropped here — omission is possible, forgery is not (D-074).
+    // 4); it used to be missed, like one seen while offline. This decrypt
+    // also filters the fill: an indexer row no watched key opens is dropped
+    // here. One that opens is still only a claim, since anyone can seal to our
+    // published key (F68): a fill handshake sets no identity (below), and it
+    // folds as an invitation with its `archive` provenance.
     let (slot, plaintext) = match hub
         .decryptor
         .decrypt_scanning(keys.handshake_slots().iter().copied(), &envelope)
@@ -4201,6 +4603,8 @@ async fn handle_inbound_handshake(
                     return dropped(HANDSHAKE, txid, DropReason::StoreFailed, origin);
                 }
             }
+            let mut named: Option<String> = None;
+            let mut release: Option<(String, String)> = None;
             if let Some(existing) = store.conversation(&old.conversation_id) {
                 if existing.status == ConversationStatus::PendingInbound {
                     let mut conversation = existing.clone();
@@ -4214,10 +4618,53 @@ async fn handle_inbound_handshake(
                     // nothing was accepted against the stale binding.
                     conversation.bound_branch = to_key_branch(slot.0);
                     conversation.bound_index = slot.1;
+                    // NAME IT FROM THE PAGE (PRE3-SENDER, `wallet-security-
+                    // auditor`). A fill invitation is minted address-less (an
+                    // archive sets no identity, D-139). Our node has now folded
+                    // the handshake itself, and its page names the sender: node
+                    // truth for this very transaction. Unnamed, the row would
+                    // hold every comm its sender writes until the next start.
+                    // Only the invitation whose own handshake this is: the row
+                    // was found by where the archive filed the txid, and an
+                    // older store can hold an archive comm inside another
+                    // invitation (`consensus-auditor`).
+                    if conversation.contact_address.is_empty()
+                        && conversation.handshake_txid.as_deref() == Some(txid)
+                    {
+                        if let Some(sender) =
+                            page_sender.filter(|s| validate_mainnet_address(s).is_ok())
+                        {
+                            conversation.contact_address = sender.to_string();
+                            named = Some(sender.to_string());
+                        }
+                    }
                     warn_store(store.upsert_conversation(conversation));
+                    // The rules keyed on a resolved sender run with it (L186),
+                    // as in `backfill_invitation_sender`.
+                    if let Some(sender) = named.take() {
+                        refuse_blocked_knock_comms(hub, &mut store, &old.conversation_id, &sender);
+                        let host = match store.merge_contact(&sender) {
+                            Ok(Some((host, _))) => host,
+                            Ok(None) => old.conversation_id.clone(),
+                            Err(e) => {
+                                log::warn!("transport-hub: contact merge failed: {e}");
+                                old.conversation_id.clone()
+                            }
+                        };
+                        release = Some((host, sender));
+                    }
                 }
             }
             drop(store);
+            if let Some((host, sender)) = release {
+                log::info!("transport-intake: an archive invitation named by our node (tx={txid})");
+                release_held_comms(hub, &host, &payload.alias, &sender);
+                // The merge may have folded this row away: the host is the
+                // thread that changed.
+                if host != old.conversation_id {
+                    ping(&host);
+                }
+            }
             watch_acceptance(txid, block_time_ms);
             ping(&old.conversation_id);
             return FoldOutcome::Recorded;
@@ -4245,10 +4692,10 @@ async fn handle_inbound_handshake(
     // address that had handshaked him five weeks earlier, and that address
     // has no reply on chain at all, because their client correctly sent none.
     //
-    // So we match their semantics. The sender comes from the node's own
-    // return-address lookup — consensus data, never payload content (§0.3) —
-    // and it is available here precisely because a handshake PAYS us the
-    // bond, which is what puts it in the P1.5 activity record.
+    // So we match their semantics. The sender is the node's own answer —
+    // consensus data, never payload content (§0.3): the walk's page names it
+    // (input 0's previous output, PRE3-SENDER), and the return-address lookup,
+    // which needs the bond's P1.5 activity record, is the fallback.
     //
     // **No response is emitted and no accept card is armed**, which is also
     // what keeps the bond arithmetic honest: a re-handshake carries a fresh
@@ -4271,7 +4718,8 @@ async fn handle_inbound_handshake(
     // inside a thread the user trusts. There is no way to bind an
     // indexer-supplied payload to an indexer-supplied txid without our own node
     // seeing the transaction, so the rule is simply that identity comes from
-    // the node (D-074: omission is acceptable, forgery is not — the same reason
+    // the node (D-074, as F68 corrected it: an archive can omit a row and can
+    // forge one, so nothing it serves may set identity — the same reason
     // `transport_prepare_accept` refuses a `FillSourced` invitation).
     //
     // Cost, stated plainly: a handshake recoverable only from the archive can
@@ -4288,8 +4736,21 @@ async fn handle_inbound_handshake(
     //
     // The cheap pre-check still guards the MATCH, which is all it was ever
     // reasoning about.
+    //
+    // **The page names it first (PRE3-SENDER, `consensus-auditor`).** The walk's
+    // page carries input 0's previous-output address, the very definition
+    // `get_utxo_return_address` answers with, from the same node: so the sender
+    // is known at fold time, with no call and no wait for the bond's activity
+    // record. Without it an invitation was minted address-less on the live lane
+    // and named seconds later, and the comm its sender wrote in the same page
+    // met a row with no contact to compare: since the comm lane admits only the
+    // contact, that message would have been refused for good. The lookup stays
+    // as the fallback for a page that named no sender (a node off the pin).
     let resolved_sender = if origin == EventOrigin::Node {
-        resolve_handshake_sender(txid).await
+        match page_sender {
+            Some(sender) => Some(sender.to_string()),
+            None => resolve_handshake_sender(txid).await,
+        }
     } else {
         // A fill row's sender is an indexer claim; identity never comes from
         // one (D-139/D-074). Such a row stays address-less until our own node
@@ -4569,15 +5030,124 @@ async fn handle_inbound_handshake(
     FoldOutcome::Recorded
 }
 
+/// Who may write in a conversation's thread (F2, PRE3-SENDER, §0.10).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommSenderVerdict {
+    /// The sender is the conversation's contact: fold it.
+    Contact,
+    /// Someone else sent it: refuse it (`SenderNotContact`). So is an archive
+    /// row naming no one, or anyone for a row with no contact address.
+    NotContact,
+    /// Our node's page named no sender: ask the return-address lane, which
+    /// applies this same rule once the chain names one.
+    AwaitSender,
+    /// Our node named a sender, but the row does not know its contact yet (an
+    /// invitation whose sender has not resolved): HOLD the comm with its
+    /// sender until the row's address is written, then judge it
+    /// (`release_held_comms`). A settled refusal could not be judged again
+    /// when the address lands (`wallet-security-auditor`).
+    AwaitContact,
+}
+
+/// **A comm enters a contact's thread only when the transaction's sender is
+/// that contact** — the F2 gate as a pure decision, so it is driven
+/// exhaustively without a hub.
+///
+/// The alias routes, it never authenticates: it rides the wire in cleartext,
+/// and the envelope seals to our published key, so both halves of the old
+/// gate ("the alias matches and the envelope opens") are open to any observer
+/// for one fee. The sender is input 0's previous-output address, the pin's
+/// definition (`TransportEvent::sender`), compared with the contact address
+/// we chose or our own node resolved. One rule for every alias the row
+/// answers to, ours included.
+///
+/// On the fill lane `sender` is the archive's claim. It must name the contact
+/// too, and the row keeps its `archive` provenance: the claim narrows what an
+/// archive can file, it does not make the archive our node. An archive row
+/// with no claim is refused; it never waits on a lookup, because its txid is a
+/// label (D-139). An address-less row matches no sender, as in
+/// [`acceptance_verdict`]: on the node lane the comm is held until the row
+/// learns its contact, and an archive row is refused. Both sides are canonical
+/// strings: every writer of
+/// `contact_address` stores an `Address`'s own `to_string()` (the backup
+/// restore included, since PRE3-SENDER), the page's sender is decoded the same
+/// way, and the archive's claim is its indexer's `Address::to_string()`.
+fn comm_sender_verdict(
+    origin: EventOrigin,
+    sender: Option<&str>,
+    contact_address: &str,
+) -> CommSenderVerdict {
+    match sender {
+        Some(sender) if !contact_address.is_empty() && sender == contact_address => {
+            CommSenderVerdict::Contact
+        }
+        Some(_) if contact_address.is_empty() && origin == EventOrigin::Node => {
+            CommSenderVerdict::AwaitContact
+        }
+        Some(_) => CommSenderVerdict::NotContact,
+        None if origin == EventOrigin::Node => CommSenderVerdict::AwaitSender,
+        None => CommSenderVerdict::NotContact,
+    }
+}
+
+/// Node truth disproves an archive row: the archive filed it as the contact's,
+/// and our own walk names a different sender for the same txid, or carries an
+/// alias none of our rows answers to. The row leaves the thread (PRE3-SENDER).
+/// Re-checked under the lock, so a racing writer's node row is never the one
+/// removed. A hard delete, not the reorg tombstone: a ghost would still render
+/// the forged text, and the txid's real acceptance would untombstone it
+/// (`wallet-security-auditor`).
+fn remove_disproven_archive_row(hub: &TransportHub, txid: &str) {
+    // Remembered first: the fill's range start is inclusive, so it re-serves
+    // its boundary row, and a removed row must not be filed again.
+    note_refuted(txid);
+    let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+    let Some(conversation_id) = store
+        .message(txid)
+        .filter(|row| {
+            row.direction == MessageDirection::Inbound
+                && matches!(row.provenance, RowSource::FillSourced | RowSource::Unknown)
+        })
+        .map(|row| row.conversation_id.clone())
+    else {
+        return;
+    };
+    if let Err(e) = store.remove_message(txid) {
+        log::warn!("transport-hub: store remove failed: {e}");
+        return;
+    }
+    drop(store);
+    log::info!(
+        "transport-intake: archive row tx={txid} removed — our node names a sender who is not \
+         the contact (PRE3-SENDER)"
+    );
+    ping(&conversation_id);
+}
+
+#[allow(clippy::too_many_arguments)]
 fn handle_inbound_comm(
     hub: &TransportHub,
     txid: &str,
     body: &[u8],
     block_time_ms: Option<u64>,
     block_hash: Option<&str>,
+    sender: Option<&str>,
     origin: EventOrigin,
     wire: WireNamespace,
 ) -> FoldOutcome {
+    // Our own walk already refused this txid, or disproved an archive row for
+    // it, or is HOLDING it until the chain or the row can judge it: the
+    // archive's claim gets no hearing ahead of our node's (PRE3-SENDER,
+    // `wallet-security-auditor`). Filed first, it would win the txid dedup,
+    // and the comm our node proved would never be recorded.
+    if origin == EventOrigin::Fill {
+        if is_refuted(txid) {
+            return dropped(COMM, txid, DropReason::SenderNotContact, origin);
+        }
+        if comm_already_parked(txid) {
+            return dropped(COMM, txid, DropReason::SenderPending, origin);
+        }
+    }
     // DAG re-delivery / our own sent row echoing back: pre-crypto skip —
     // except a NODE event over a stored indexer claim (`FillSourced`) or
     // pre-V5 row (`Unknown`), which proceeds in OVERRIDE mode (V5,
@@ -4602,9 +5172,29 @@ fn handle_inbound_comm(
     let Some((alias, sealed)) = split_comm_body(body) else {
         return dropped(COMM, txid, DropReason::MalformedCommHead, origin);
     };
+    // Over an archive row: our node's own transaction for this txid carries a
+    // different alias from the one the archive filed it under, so the filing
+    // is disproven on the alias alone. The row goes, and the node's comm is
+    // judged on its own merits, as if the archive had never spoken. A row
+    // with no recorded alias (pre-V5) is never judged this way, and one whose
+    // alias simply stopped routing (a re-handshake, a merge) keeps its row
+    // (`wallet-security-auditor`).
+    let override_row = match override_row {
+        Some(old)
+            if old
+                .alias_on_wire
+                .as_deref()
+                .is_some_and(|filed| filed != alias) =>
+        {
+            remove_disproven_archive_row(hub, txid);
+            None
+        }
+        other => other,
+    };
     // Relevance without crypto: the alias must belong to one of our
-    // conversations (either side's — senders tag with their own).
-    let (conversation_id, bound) = {
+    // conversations (either side's — senders tag with their own). It ROUTES;
+    // the sender check below is what admits.
+    let (conversation_id, bound, verdict) = {
         let store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(conversation) = store.conversation_by_alias(&alias) else {
             // An alias we do not know — but it may be a contact whose row we
@@ -4612,7 +5202,20 @@ fn handle_inbound_comm(
             // client that already knows us never re-announces itself. Their
             // alias is right here in cleartext; what is missing is proof the
             // message is theirs. See `revive_or_drop` (D-307) for the gate.
+            //
+            // Over an archive row whose alias merely stopped routing, our node
+            // still judges its sender: a sender who is not that row's contact
+            // disproves the filing (`wallet-security-auditor`).
+            let disproven = match (&override_row, sender) {
+                (Some(old), Some(sender)) => store
+                    .conversation(&old.conversation_id)
+                    .is_some_and(|c| !c.contact_address.is_empty() && c.contact_address != sender),
+                _ => false,
+            };
             drop(store);
+            if disproven {
+                remove_disproven_archive_row(hub, txid);
+            }
             return revive_or_drop(
                 hub,
                 txid,
@@ -4620,6 +5223,7 @@ fn handle_inbound_comm(
                 sealed,
                 block_time_ms,
                 block_hash,
+                sender,
                 origin,
                 wire,
             );
@@ -4672,8 +5276,34 @@ fn handle_inbound_comm(
                 to_core_branch(conversation.bound_branch),
                 conversation.bound_index,
             ),
+            comm_sender_verdict(origin, sender, &conversation.contact_address),
         )
     };
+    // THE SENDER CHECK (F2, PRE3-SENDER, §0.10), before any decrypt, so a
+    // stranger writing under a known alias costs us no key work at all.
+    match verdict {
+        CommSenderVerdict::Contact => {}
+        CommSenderVerdict::NotContact => {
+            // Over an archive row the node has just disproved, the row goes:
+            // a thread holds only what its contact sent. And our walk's
+            // refusal is remembered, so the fill, which runs after the walk,
+            // cannot file the archive's claim for the same txid.
+            if origin == EventOrigin::Node {
+                if override_row.is_some() {
+                    remove_disproven_archive_row(hub, txid);
+                }
+                note_refuted(txid);
+            }
+            return dropped(COMM, txid, DropReason::SenderNotContact, origin);
+        }
+        CommSenderVerdict::AwaitSender | CommSenderVerdict::AwaitContact => {
+            // Nothing node-proven can replace an archive row here, so it stays
+            // as it is, with its `archive` provenance.
+            if override_row.is_some() || comm_already_parked(txid) {
+                return dropped(COMM, txid, DropReason::SenderPending, origin);
+            }
+        }
+    }
     let envelope_bytes = decode_envelope_body(sealed);
     let Ok(envelope) = Envelope::from_bytes(&envelope_bytes) else {
         return dropped(COMM, txid, DropReason::MalformedEnvelope, origin);
@@ -4681,16 +5311,19 @@ fn handle_inbound_comm(
     // Validation decrypt: bound slot first (§0.7 fast path), then the window
     // (robustness against a counterparty that re-resolved our address). The
     // plaintext is DROPPED here — decrypt-on-view happens at thread pull.
-    // This is ALSO the fill's verify step (D-074): an indexer can OMIT an
-    // envelope, never forge one past this decrypt.
-    let sealed_to = match hub.decryptor.decrypt_at(bound, &envelope) {
-        Ok(_) => None,
+    //
+    // It proves the envelope was sealed to us, and nothing about who sealed
+    // it: the seal is to our PUBLISHED key, so anyone can make one we open,
+    // an archive included, which can also pair it with any txid it likes
+    // (F68). The sender check above is what ties a row to its contact.
+    let opened: KeySlot = match hub.decryptor.decrypt_at(bound, &envelope) {
+        Ok(_) => bound,
         Err(CoreError::TransportOpen) => {
             match hub
                 .decryptor
                 .decrypt_scanning(hub.keys().slots.iter().copied(), &envelope)
             {
-                Ok((slot, _)) => Some((to_key_branch(slot.0), slot.1)),
+                Ok((slot, _)) => slot,
                 // Alias matched but no key opens it — a spoofed head, or the
                 // vault shut mid-stream. Two very different events; say which.
                 Err(e) => return dropped(COMM, txid, decrypt_drop(&e), origin),
@@ -4698,6 +5331,38 @@ fn handle_inbound_comm(
         }
         Err(e) => return dropped(COMM, txid, decrypt_drop(&e), origin),
     };
+    // THE FALLBACK (deliverable 4): the page named no sender, so the comm is
+    // parked, sealed, on the revival lane's own machinery — the interest, the
+    // locate, the return-address lookup — and `fold_parked_comm` applies this
+    // same rule to the address the chain names. Never recorded before then.
+    if verdict == CommSenderVerdict::AwaitSender {
+        park_comm(
+            txid,
+            ParkedComm {
+                alias,
+                slot: opened,
+                envelope: envelope_bytes,
+                block_time_ms,
+                wire,
+                sender: None,
+            },
+        );
+        if let Some(tracker) = dag::tracker_handle() {
+            tracker.note_sender_interest(txid);
+        }
+        // Its own seat: a sibling with no sender never folds on this proof.
+        schedule_sender_locate(
+            txid.to_string(),
+            txid.to_string(),
+            block_hash.map(str::to_string),
+        );
+        log::info!(
+            "transport-intake: comm tx={txid} named no sender on the page — parked for the \
+             return-address lookup (PRE3-SENDER)"
+        );
+        return dropped(COMM, txid, DropReason::SenderPending, origin);
+    }
+    let sealed_to = (opened != bound).then(|| (to_key_branch(opened.0), opened.1));
 
     // Row clock = block time when the source knows it (fill + scans since
     // V2b): filled history sorts into its true position, not "now".
@@ -4716,19 +5381,66 @@ fn handle_inbound_comm(
     ) {
         return dropped(COMM, txid, DropReason::DismissedInvitation, origin);
     }
-    // Same re-check for a block landing inside the unlocked decrypt window.
-    if let Some(address) = store
+    // Same re-check for a block landing inside the unlocked decrypt window,
+    // and for the sender: the row's contact is read again under this lock.
+    let address = store
         .conversation(&conversation_id)
-        .map(|c| c.contact_address.clone())
-    {
+        .map(|c| c.contact_address.clone());
+    if let Some(address) = address.as_deref() {
         if hub
             .block_list
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .is_blocked(&address)
+            .is_blocked(address)
         {
             return dropped(COMM, txid, DropReason::BlockedContact, origin);
         }
+    }
+    match address
+        .as_deref()
+        .map(|address| comm_sender_verdict(origin, sender, address))
+    {
+        Some(CommSenderVerdict::Contact) => {}
+        // THE HOLD: the sender is known and the row is not. Decided and parked
+        // under THIS lock, which every writer of a row's address takes first,
+        // so no release can fall between the verdict and the park
+        // (`consensus-auditor`, L73). Parked with its sender, sealed, and
+        // nothing asked of the chain: the lookup would name the same address
+        // and meet the same empty row. The writer releases it
+        // (`release_held_comms`); a row named during the decrypt was matched
+        // above and the comm is recorded.
+        Some(CommSenderVerdict::AwaitContact) => {
+            park_comm(
+                txid,
+                ParkedComm {
+                    alias,
+                    slot: opened,
+                    envelope: envelope_bytes,
+                    block_time_ms,
+                    wire,
+                    sender: sender.map(str::to_string),
+                },
+            );
+            drop(store);
+            log::info!(
+                "transport-intake: comm tx={txid} held until its invitation names a sender \
+                 (PRE3-SENDER)"
+            );
+            return dropped(COMM, txid, DropReason::SenderPending, origin);
+        }
+        Some(_) => {
+            if origin == EventOrigin::Node {
+                note_refuted(txid);
+            }
+            return dropped(COMM, txid, DropReason::SenderNotContact, origin);
+        }
+        // The row went inside the decrypt window (a merge folded it). A comm
+        // that was the contact's keeps the old behaviour; one that was waiting
+        // to be judged has nothing left to be judged against.
+        None if verdict != CommSenderVerdict::Contact => {
+            return dropped(COMM, txid, DropReason::StoreRace, origin);
+        }
+        None => {}
     }
     let record = MessageRecord {
         txid: txid.to_string(),
@@ -5923,6 +6635,13 @@ pub async fn transport_prepare_accept(
             };
             let still_acceptable = !accept_target_missing(&store, &conversation_id);
             drop(store);
+            // This step wrote the invitation's address, so it releases what the
+            // invitation held, into the row that now holds the sender
+            // (PRE3-SENDER, `wallet-security-auditor`).
+            let host = folded
+                .as_ref()
+                .map_or(conversation_id.as_str(), |(h, _)| h.as_str());
+            release_held_comms(&hub, host, &their_alias, &sender);
             if let Some((host, _)) = folded.as_ref() {
                 ping(host);
             }
@@ -6906,8 +7625,18 @@ fn apply_intent(intent: TransportIntent, txid: &str) {
             reseal,
             timestamp_ms,
         } => {
+            let mut held = None;
             if let Some(existing) = store.conversation(&conversation_id) {
                 let mut conversation = existing.clone();
+                // An invitation that did not know its sender held its sender's
+                // comms; accepting names it (PRE3-SENDER). Released whether or
+                // not the address was already written: `transport_prepare_accept`
+                // may have written it a step earlier (`wallet-security-auditor`),
+                // and a release with nothing held is a no-op.
+                held = conversation
+                    .their_alias
+                    .clone()
+                    .map(|alias| (alias, contact_address.clone()));
                 conversation.contact_address = contact_address;
                 conversation.my_alias = my_alias;
                 conversation.status = ConversationStatus::Active;
@@ -6996,6 +7725,9 @@ fn apply_intent(intent: TransportIntent, txid: &str) {
                 );
             }
             drop(store);
+            if let Some((alias, sender)) = held {
+                release_held_comms(&hub, &conversation_id, &alias, &sender);
+            }
             ping(&conversation_id);
         }
         TransportIntent::Comm {
@@ -7722,7 +8454,9 @@ pub fn transport_wipe_all() -> Result<WipeReportDto, AppError> {
 
     // In-memory claims about txids that no longer have a home. Left standing,
     // a parked acceptance would complete into a conversation the user deleted
-    // and mint it back from nothing.
+    // and mint it back from nothing. `REFUTED` stays: it holds our node's own
+    // verdicts on txids, which a wipe does not change, and it only ever stops
+    // an archive from filing one of them (PRE3-SENDER).
     PENDING_COMMS
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -9049,6 +9783,7 @@ mod tests {
             addresses: vec!["kaspa:qz...".into()],
             block_time_ms: None,
             block_hash: None,
+            sender: None,
         });
         assert_eq!(dto.txid.as_deref(), Some("ab".repeat(32).as_str()));
         assert_eq!(dto.kind, "bcast");
@@ -9609,6 +10344,7 @@ mod tests {
             addresses: vec![VICTIM_CONTACT.to_string()],
             block_time_ms: Some(1_727_000_000_000),
             block_hash: Some("cb".repeat(32)),
+            sender: None,
         };
         assert_eq!(
             sink.fold(vec![event("handshake", 1, envelope.clone())])
@@ -10503,12 +11239,17 @@ mod tests {
     }
 
     fn parked(alias: &str, bytes: usize) -> ParkedComm {
+        parked_from(alias, bytes, Some(VICTIM_CONTACT))
+    }
+
+    fn parked_from(alias: &str, bytes: usize, sender: Option<&str>) -> ParkedComm {
         ParkedComm {
             alias: alias.to_string(),
             slot: (Branch::Receive, 0),
             envelope: vec![0u8; bytes],
             block_time_ms: Some(1_700_000_000_000),
             wire: WireNamespace::CiphMsg,
+            sender: sender.map(str::to_string),
         }
     }
 
@@ -10551,18 +11292,33 @@ mod tests {
         assert!(one.contains("huge"));
     }
 
-    /// Siblings under one alias fold together, and a block forgets them all.
+    /// Siblings under one alias fold together ONLY when their own page named
+    /// the same sender (PRE3-SENDER): a stranger's comm parked under the
+    /// contact's alias is refused, not carried in on the contact's proof, and
+    /// one whose page named nobody waits for its own resolution. A block
+    /// forgets them all. The real path: the revival lane parks each comm with
+    /// the page's sender (`revive_or_drop`); `fold_parked_comm` folds the
+    /// siblings once one of them resolves.
     #[test]
-    fn parked_siblings_fold_on_the_alias_and_a_block_forgets_them() {
+    fn parked_siblings_fold_on_the_alias_and_the_sender_and_a_block_forgets_them() {
         let mut set = ParkedComms::new();
         set.park("tx-1", parked("aaaaaaaaaaaa", 1));
         set.park("tx-2", parked("bbbbbbbbbbbb", 1));
         set.park("tx-3", parked("aaaaaaaaaaaa", 1));
+        set.park("tx-5", parked_from("aaaaaaaaaaaa", 1, Some(ATTACKER)));
+        set.park("tx-6", parked_from("aaaaaaaaaaaa", 1, None));
         let first = set.take("tx-1").unwrap();
-        let siblings = set.take_by_alias(&first.alias);
+        let (siblings, refused) = set.take_siblings(&first.alias, VICTIM_CONTACT);
+        let refused = refused.len();
         assert_eq!(
             siblings.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>(),
             ["tx-3"]
+        );
+        assert_eq!(refused, 1, "the stranger's sibling is refused");
+        assert!(!set.contains("tx-5"), "and not kept to try again");
+        assert!(
+            set.contains("tx-6"),
+            "an unnamed sibling waits for its own sender"
         );
         assert!(set.contains("tx-2"), "another alias is untouched");
 
@@ -10921,5 +11677,1128 @@ mod tests {
             "the standing row has the alias to defend"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── PRE3-SENDER (F2): a contact's thread holds only the contact ────────
+
+    /// The one conversation these tests write into: the contact's alias and
+    /// ours, 12 lowercase hex like the population's.
+    const THEIR_ALIAS: &str = "c0ffee5e0d01";
+    const MY_ALIAS: &str = "beefca11ab1e";
+    const VICTIM_ID: &str = "c-victim";
+
+    /// A hub over a REAL unlocked vault and a real store holding one Active
+    /// conversation with `VICTIM_CONTACT`, bound to our receive slot 0: the
+    /// shape the founder's KaChat and Kasia threads have. The vault comes back
+    /// so the decryptor stays live; the key is what a stranger seals to, read
+    /// off our published address like anyone could.
+    fn sender_hub(
+        tag: &str,
+    ) -> (
+        Arc<TransportHub>,
+        std::path::PathBuf,
+        kaspaverse_core::UnlockedVault,
+        [u8; 32],
+    ) {
+        let dir = std::env::temp_dir().join(format!("kv-sender-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let keychain = || {
+            kaspaverse_core::KeyChain::from_seed(
+                kaspaverse_core::SecretSeed::from_seed_bytes(Box::new([9u8; 64])),
+                kaspaverse_core::Prefix::Mainnet,
+            )
+            .unwrap()
+        };
+        let ours = keychain().receive_address(0).unwrap();
+        let published_key = x_only_of(&ours).unwrap();
+        let vault = kaspaverse_core::UnlockedVault::new(keychain());
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        store
+            .upsert_conversation(ConversationRecord {
+                conversation_id: VICTIM_ID.into(),
+                contact_address: VICTIM_CONTACT.into(),
+                my_alias: MY_ALIAS.into(),
+                their_alias: Some(THEIR_ALIAS.into()),
+                status: ConversationStatus::Active,
+                initiated_by_me: true,
+                bound_branch: KeyBranch::Receive,
+                bound_index: 0,
+                created_unix_ms: 1_000,
+                last_activity_unix_ms: 1_000,
+                handshake_txid: None,
+            })
+            .unwrap();
+        let hub = Arc::new(TransportHub {
+            store: Mutex::new(store),
+            decryptor: vault.transport_decryptor(),
+            block_list: Mutex::new(BlockList::load(&dir)),
+            keys: Mutex::new(Arc::new(KeyWindow::build(1, 0, &[ours]))),
+        });
+        (hub, dir, vault, published_key)
+    }
+
+    /// A comm exactly as the walk's page hands it to the hub: the wire the
+    /// population writes (`kchat:1:comm:<alias>:<base64>`, composed by our own
+    /// composer and parsed back by the scan's parser), a fresh txid, and the
+    /// sender the page named. The txids are unique per test because the parked
+    /// set is process-wide.
+    fn page_comm(n: u8, alias: &str, envelope: &[u8], sender: Option<&str>) -> TransportEvent {
+        let wire = compose_comm_wire_in(WireNamespace::KChat, alias, envelope).unwrap();
+        let (namespace, kind, body) = kaspaverse_chain::parse_payload_in(&wire).unwrap();
+        TransportEvent {
+            txid: Some(format!("{n:02x}").repeat(32)),
+            kind,
+            namespace,
+            body: body.to_vec(),
+            addresses: vec![sender.unwrap_or(VICTIM_CONTACT).to_string()],
+            block_time_ms: Some(1_727_000_000_000 + u64::from(n)),
+            block_hash: Some("cb".repeat(32)),
+            sender: sender.map(str::to_string),
+        }
+    }
+
+    fn sealed(key: &[u8; 32], text: &[u8]) -> Vec<u8> {
+        encrypt(key, text).unwrap().to_bytes()
+    }
+
+    fn thread(hub: &TransportHub) -> Vec<MessageRecord> {
+        hub.store
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .messages_for(VICTIM_ID)
+    }
+
+    /// Fold through `HubSink::fold`, the walk's own consumer (LINK-Q3): the
+    /// real path from a page to the store, minus the RPC.
+    async fn walk_folds(hub: &Arc<TransportHub>, event: TransportEvent) {
+        use kaspaverse_chain::MessageSink;
+        let sink = HubSink { hub: hub.clone() };
+        assert_eq!(
+            sink.fold(vec![event]).await,
+            kaspaverse_chain::Verdict::Folded,
+            "nothing here holds the page"
+        );
+    }
+
+    /// **The F2 gate as a table.** Contact only when a sender is named and it
+    /// is the row's contact; an address-less row matches no one, an empty
+    /// sender included, and on the node lane holds the comm until the row
+    /// learns its contact; a page with no sender asks the return-address lane;
+    /// an archive row never waits.
+    #[test]
+    fn the_sender_verdict_admits_only_the_contact() {
+        use CommSenderVerdict::*;
+        use EventOrigin::*;
+        let v = comm_sender_verdict;
+        assert_eq!(v(Node, Some(VICTIM_CONTACT), VICTIM_CONTACT), Contact);
+        assert_eq!(v(Fill, Some(VICTIM_CONTACT), VICTIM_CONTACT), Contact);
+        assert_eq!(v(Node, Some(ATTACKER), VICTIM_CONTACT), NotContact);
+        assert_eq!(v(Fill, Some(ATTACKER), VICTIM_CONTACT), NotContact);
+        assert_eq!(
+            v(Node, Some(""), ""),
+            AwaitContact,
+            "both empty is never a match"
+        );
+        assert_eq!(
+            v(Node, Some(ATTACKER), ""),
+            AwaitContact,
+            "an address-less row holds"
+        );
+        assert_eq!(
+            v(Fill, Some(ATTACKER), ""),
+            NotContact,
+            "an archive row never waits"
+        );
+        assert_eq!(
+            v(Fill, Some(""), VICTIM_CONTACT),
+            NotContact,
+            "an empty claim"
+        );
+        assert_eq!(v(Node, None, VICTIM_CONTACT), AwaitSender);
+        assert_eq!(
+            v(Fill, None, VICTIM_CONTACT),
+            NotContact,
+            "an archive never waits"
+        );
+    }
+
+    /// **F2 (a), refused: a stranger posting in a contact's thread.** Run 4's
+    /// repro, step 2: anyone who read the alias off the wire seals "pay me" to
+    /// our published key and self-sends it under the CONTACT's alias. The
+    /// envelope opens, the alias routes, and until PRE3-SENDER it was filed as
+    /// the contact's. Real path: the walk's page → `HubSink::fold` →
+    /// `handle_inbound_comm`. The alias does route (asserted), so the refusal
+    /// is the sender check's, not the alias gate's (PB-037).
+    #[tokio::test]
+    async fn a_strangers_comm_in_a_contacts_thread_is_refused() {
+        let (hub, dir, _vault, key) = sender_hub("stranger");
+        assert_eq!(
+            hub.store
+                .lock()
+                .unwrap()
+                .conversation_by_alias(THEIR_ALIAS)
+                .map(|c| c.conversation_id.clone()),
+            Some(VICTIM_ID.to_string()),
+            "the alias routes to the victim's thread"
+        );
+        let event = page_comm(0x31, THEIR_ALIAS, &sealed(&key, b"pay me"), Some(ATTACKER));
+        let txid = event.txid.clone().unwrap();
+        walk_folds(&hub, event).await;
+        assert!(
+            thread(&hub).is_empty(),
+            "a stranger's comm never enters the thread"
+        );
+        assert!(
+            !comm_already_parked(&txid),
+            "refused outright, never parked"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **F2 (b), refused: the contact's own old envelope, replayed.** Dedup is
+    /// by txid, so the same sealed bytes in a fresh transaction were a fresh
+    /// inbound row. Now the replay's sender is the replayer, and the thread
+    /// keeps exactly the contact's original. Real path: as above, twice.
+    #[tokio::test]
+    async fn the_contacts_old_envelope_replayed_from_another_address_is_refused() {
+        let (hub, dir, _vault, key) = sender_hub("replay");
+        let envelope = sealed(&key, b"see you at eight");
+        walk_folds(
+            &hub,
+            page_comm(0x41, THEIR_ALIAS, &envelope, Some(VICTIM_CONTACT)),
+        )
+        .await;
+        walk_folds(
+            &hub,
+            page_comm(0x42, THEIR_ALIAS, &envelope, Some(ATTACKER)),
+        )
+        .await;
+        let rows = thread(&hub);
+        assert_eq!(
+            rows.iter().map(|r| r.txid.as_str()).collect::<Vec<_>>(),
+            [format!("{:02x}", 0x41).repeat(32).as_str()],
+            "only the contact's own transaction is in the thread"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **One rule for our own alias.** `conversation_by_alias` matches either
+    /// side, so our alias, which rides every comm we send, routes too. A
+    /// stranger under it is refused like any other. Real path: as above.
+    #[tokio::test]
+    async fn our_own_alias_used_by_a_stranger_is_refused() {
+        let (hub, dir, _vault, key) = sender_hub("own-alias");
+        assert!(
+            hub.store
+                .lock()
+                .unwrap()
+                .conversation_by_alias(MY_ALIAS)
+                .is_some(),
+            "our alias routes to the thread"
+        );
+        walk_folds(
+            &hub,
+            page_comm(0x51, MY_ALIAS, &sealed(&key, b"it's me"), Some(ATTACKER)),
+        )
+        .await;
+        assert!(thread(&hub).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The contact still writes.** Their comm, from their address, under
+    /// their alias, lands as a node row in their thread; under our alias it
+    /// lands too (one rule, the sender). This is the guard against the
+    /// opposite mutant, a check that refuses the contact. Real path: as above.
+    #[tokio::test]
+    async fn the_contacts_own_comm_is_recorded() {
+        let (hub, dir, _vault, key) = sender_hub("contact");
+        walk_folds(
+            &hub,
+            page_comm(
+                0x61,
+                THEIR_ALIAS,
+                &sealed(&key, b"hi"),
+                Some(VICTIM_CONTACT),
+            ),
+        )
+        .await;
+        walk_folds(
+            &hub,
+            page_comm(
+                0x62,
+                MY_ALIAS,
+                &sealed(&key, b"hi again"),
+                Some(VICTIM_CONTACT),
+            ),
+        )
+        .await;
+        let rows = thread(&hub);
+        assert_eq!(
+            rows.len(),
+            2,
+            "both of the contact's comms are in the thread"
+        );
+        for row in &rows {
+            assert_eq!(row.direction, MessageDirection::Inbound);
+            assert_eq!(row.provenance, RowSource::NodeScanned);
+            assert_eq!(row.sealed_to, None, "opened at the bound slot");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **An archive row must name the contact** (§0.10). The fill asks the
+    /// archive for the contact's comms, and the archive's answer carries its
+    /// own claim of who sent each row, parsed and ignored until now. A row
+    /// claiming someone else, claiming no one, or carrying no claim is
+    /// refused; the contact's row lands with its `archive` provenance, which
+    /// is what the glass shows. Real path: `run_fill`'s comm sweep →
+    /// `handle_inbound(…, Fill)` with `sender: Some(row.sender)`.
+    #[tokio::test]
+    async fn an_archive_row_whose_claimed_sender_disagrees_is_refused() {
+        let (hub, dir, _vault, key) = sender_hub("archive");
+        let fill =
+            |n, sender: Option<&str>| page_comm(n, THEIR_ALIAS, &sealed(&key, b"old"), sender);
+        for (n, claim) in [(0x71, Some(ATTACKER)), (0x72, Some("")), (0x73, None)] {
+            let event = fill(n, claim);
+            let txid = event.txid.clone().unwrap();
+            assert_eq!(
+                handle_inbound(&hub, event, EventOrigin::Fill).await,
+                FoldOutcome::Settled
+            );
+            assert!(
+                !comm_already_parked(&txid),
+                "an archive row never waits on a lookup"
+            );
+        }
+        assert!(
+            thread(&hub).is_empty(),
+            "no claim but the contact's is filed"
+        );
+        assert_eq!(
+            handle_inbound(&hub, fill(0x74, Some(VICTIM_CONTACT)), EventOrigin::Fill).await,
+            FoldOutcome::Recorded
+        );
+        let rows = thread(&hub);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            row_source_label(rows[0].provenance),
+            "archive",
+            "provenance on the glass"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Node truth over the archive's claim.** An archive row the archive
+    /// filed as the contact's is removed when our own walk reaches its txid
+    /// and names another sender; one our walk confirms becomes a node row.
+    /// Real path: `run_fill` records the row, then the walk's `HubSink::fold`
+    /// meets the same txid in OVERRIDE mode.
+    #[tokio::test]
+    async fn node_truth_removes_an_archive_row_it_disproves() {
+        let (hub, dir, _vault, key) = sender_hub("override");
+        let envelope = sealed(&key, b"claimed");
+        let forged = page_comm(0x81, THEIR_ALIAS, &envelope, Some(VICTIM_CONTACT));
+        let confirmed = page_comm(0x82, THEIR_ALIAS, &envelope, Some(VICTIM_CONTACT));
+        let (forged_txid, confirmed_txid) = (
+            forged.txid.clone().unwrap(),
+            confirmed.txid.clone().unwrap(),
+        );
+        assert_eq!(
+            handle_inbound(&hub, forged, EventOrigin::Fill).await,
+            FoldOutcome::Recorded
+        );
+        assert_eq!(
+            handle_inbound(&hub, confirmed, EventOrigin::Fill).await,
+            FoldOutcome::Recorded
+        );
+        assert_eq!(thread(&hub).len(), 2);
+
+        walk_folds(
+            &hub,
+            page_comm(0x81, THEIR_ALIAS, &envelope, Some(ATTACKER)),
+        )
+        .await;
+        walk_folds(
+            &hub,
+            page_comm(0x82, THEIR_ALIAS, &envelope, Some(VICTIM_CONTACT)),
+        )
+        .await;
+        let store = hub.store.lock().unwrap();
+        assert!(
+            store.message(&forged_txid).is_none(),
+            "the disproven archive row is gone"
+        );
+        assert_eq!(
+            store.message(&confirmed_txid).map(|r| r.provenance),
+            Some(RowSource::NodeScanned),
+            "the confirmed one is node truth now"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The fallback** (deliverable 4): a page that names no sender parks the
+    /// comm for the return-address lane instead of filing it, and the lane's
+    /// answer is held to the same rule: a stranger's is refused, the
+    /// contact's lands as a node row. Real path: `HubSink::fold` parks →
+    /// `SenderResolvable` (or the locate) → `adopt_alias_from_sender`'s lookup
+    /// → `fold_parked_comm`, which this drives with the lookup's answer.
+    #[tokio::test]
+    async fn a_page_with_no_sender_waits_for_the_chain_to_name_one() {
+        let (hub, dir, _vault, key) = sender_hub("fallback");
+        let strangers = page_comm(0x91, THEIR_ALIAS, &sealed(&key, b"pay me"), None);
+        let contacts = page_comm(0x92, THEIR_ALIAS, &sealed(&key, b"hello"), None);
+        let (strangers_txid, contacts_txid) = (
+            strangers.txid.clone().unwrap(),
+            contacts.txid.clone().unwrap(),
+        );
+        walk_folds(&hub, strangers).await;
+        walk_folds(&hub, contacts).await;
+        assert!(
+            thread(&hub).is_empty(),
+            "nothing is filed before the chain names a sender"
+        );
+        assert!(comm_already_parked(&strangers_txid) && comm_already_parked(&contacts_txid));
+
+        let parked = take_parked_comm(&strangers_txid).unwrap();
+        fold_parked_comm(&hub, &strangers_txid, parked, ATTACKER);
+        assert!(
+            thread(&hub).is_empty(),
+            "the lookup named a stranger: refused"
+        );
+        assert!(
+            hub.store
+                .lock()
+                .unwrap()
+                .conversation_by_contact_address(ATTACKER)
+                .is_none(),
+            "and the stranger is taught no alias, no row"
+        );
+
+        // A sibling the revival lane parked under the same alias, whose page
+        // named someone else: refused when the contact's resolves, and
+        // remembered against the archive.
+        let sibling = "9a".repeat(32);
+        park_comm(
+            &sibling,
+            ParkedComm {
+                alias: THEIR_ALIAS.into(),
+                slot: (Branch::Receive, 0),
+                envelope: sealed(&key, b"me too"),
+                block_time_ms: Some(1_727_000_000_000),
+                wire: WireNamespace::KChat,
+                sender: Some(INVITER.into()),
+            },
+        );
+        let parked = take_parked_comm(&contacts_txid).unwrap();
+        fold_parked_comm(&hub, &contacts_txid, parked, VICTIM_CONTACT);
+        assert!(
+            !comm_already_parked(&sibling),
+            "another sender's sibling is refused"
+        );
+        assert!(is_refuted(&sibling), "and remembered against the archive");
+        let rows = thread(&hub);
+        assert_eq!(
+            rows.iter().map(|r| r.txid.clone()).collect::<Vec<_>>(),
+            [contacts_txid]
+        );
+        assert_eq!(rows[0].provenance, RowSource::NodeScanned);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A handshake and its first comm in ONE page both land** (PRE3-SENDER,
+    /// `consensus-auditor` finding 1). A catch-up almost always carries a new
+    /// contact's handshake and their first message together. The invitation
+    /// used to be minted address-less and named seconds later, so the comm lane,
+    /// which now admits only the row's contact, would have met an empty contact
+    /// and refused that message for good. The handshake fold now takes the
+    /// page's sender too, so the invitation knows who it is from at fold time.
+    /// Real path: the walk's page → `HubSink::fold` → `handle_inbound_handshake`
+    /// (no wallet engine here, so the return-address fallback can name no one:
+    /// the page is the only source) → `handle_inbound_comm`.
+    #[tokio::test]
+    async fn a_handshake_and_its_first_comm_in_one_page_both_land() {
+        use kaspaverse_chain::MessageSink;
+        let (hub, dir, _vault, key) = sender_hub("one-page");
+        let inviter = "kaspa:qp09uhj7te09uhj7te09uhj7te09uhj7te09uhj7te09uhj7te09un2xaekjp";
+        let inviter_alias = "a1a1a1a1a1a1";
+        let plaintext = HandshakePayload::initial(inviter_alias, 1_727_000_000_000)
+            .unwrap()
+            .to_plaintext()
+            .unwrap();
+        let wire = compose_handshake_wire(&sealed(&key, &plaintext)).unwrap();
+        let (namespace, kind, body) = kaspaverse_chain::parse_payload_in(&wire).unwrap();
+        let ours = hub.keys().watched.iter().next().unwrap().clone();
+        let handshake = TransportEvent {
+            txid: Some("a1".repeat(32)),
+            kind,
+            namespace,
+            body: body.to_vec(),
+            addresses: vec![ours],
+            block_time_ms: Some(1_727_000_000_000),
+            block_hash: Some("cb".repeat(32)),
+            sender: Some(inviter.to_string()),
+        };
+        let comm = page_comm(
+            0xa2,
+            inviter_alias,
+            &sealed(&key, b"hello, it's me"),
+            Some(inviter),
+        );
+        let sink = HubSink { hub: hub.clone() };
+        assert_eq!(
+            sink.fold(vec![handshake, comm]).await,
+            kaspaverse_chain::Verdict::Folded
+        );
+        let store = hub.store.lock().unwrap();
+        let invitation = store
+            .conversation_by_contact_address(inviter)
+            .expect("the invitation knows its sender at fold time");
+        assert_eq!(invitation.status, ConversationStatus::PendingInbound);
+        let comms = store
+            .messages_for(&invitation.conversation_id)
+            .into_iter()
+            .filter(|m| m.kind == StoredKind::Comm)
+            .count();
+        assert_eq!(comms, 1, "the first comm is in the invitation's thread");
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A restored contact is stored in the address's own form**
+    /// (PRE3-SENDER, `consensus-auditor` finding 3). The pin's decoder drops
+    /// non-zero padding bits, so a backup can spell a contact in a form that
+    /// validates and is not canonical; stored raw, it would never equal the
+    /// page's canonical sender and every message from that contact would be
+    /// refused. The fixture is `VICTIM_CONTACT` with its padding bit set and
+    /// its checksum recomputed; the first two assertions prove it is exactly
+    /// that, without trusting how it was made. Real path: the self-stash
+    /// restore → `restored_conversation` → the comm lane's sender check.
+    #[test]
+    fn a_restored_contact_is_stored_in_its_canonical_form() {
+        const SAME_ADDRESS_OTHER_SPELLING: &str =
+            "kaspa:qz7ulu4c25dh7fzec9zjyrmlhnkzrg4wmf89q7gzr3gfrsj3uz6xn2uxevjjg";
+        let decoded = Address::try_from(SAME_ADDRESS_OTHER_SPELLING).expect("it validates");
+        assert_eq!(
+            decoded.to_string(),
+            VICTIM_CONTACT,
+            "it is the victim's contact"
+        );
+        let row = restored_conversation(
+            &stash_payload("aaaaaaaaaaaa", SAME_ADDRESS_OTHER_SPELLING, "r-canon"),
+            30,
+            30,
+        )
+        .expect("a valid row");
+        assert_eq!(row.contact_address, VICTIM_CONTACT);
+        assert_eq!(
+            comm_sender_verdict(
+                EventOrigin::Node,
+                Some(VICTIM_CONTACT),
+                &row.contact_address
+            ),
+            CommSenderVerdict::Contact,
+            "so the contact's own comm is admitted"
+        );
+    }
+
+    const INVITER: &str = "kaspa:qp09uhj7te09uhj7te09uhj7te09uhj7te09uhj7te09uhj7te09un2xaekjp";
+    const INVITER_ALIAS: &str = "b2b2b2b2b2b2";
+
+    /// A handshake from `INVITER` sealed to our key, as a page or an archive
+    /// row carries it: `sender` is the page's (node) or nothing (archive).
+    fn handshake_event(
+        hub: &TransportHub,
+        key: &[u8; 32],
+        n: u8,
+        sender: Option<&str>,
+    ) -> TransportEvent {
+        handshake_event_as(hub, key, n, sender, INVITER_ALIAS)
+    }
+
+    /// [`handshake_event`] under a test's own alias: the parked set is
+    /// process-wide and tests run in parallel, so two tests that park under one
+    /// (alias, sender) would release each other's comms.
+    fn handshake_event_as(
+        hub: &TransportHub,
+        key: &[u8; 32],
+        n: u8,
+        sender: Option<&str>,
+        alias: &str,
+    ) -> TransportEvent {
+        let plaintext = HandshakePayload::initial(alias, 1_727_000_000_000)
+            .unwrap()
+            .to_plaintext()
+            .unwrap();
+        let wire = compose_handshake_wire(&sealed(key, &plaintext)).unwrap();
+        let (namespace, kind, body) = kaspaverse_chain::parse_payload_in(&wire).unwrap();
+        TransportEvent {
+            txid: Some(format!("{n:02x}").repeat(32)),
+            kind,
+            namespace,
+            body: body.to_vec(),
+            addresses: vec![hub.keys().watched.iter().next().unwrap().clone()],
+            block_time_ms: Some(1_727_000_000_000),
+            block_hash: sender.map(|_| "cb".repeat(32)),
+            sender: sender.map(str::to_string),
+        }
+    }
+
+    /// **An invitation that does not know its sender HOLDS what it is sent**
+    /// (PRE3-SENDER, `wallet-security-auditor` CONCERNS-1). An archive's
+    /// invitation is minted address-less (D-139). The comm lane admits only a
+    /// row's contact, and a settled refusal could never be judged again, so a
+    /// comm meeting an address-less row is parked with its page's sender. When
+    /// our own node folds the handshake, its page names the invitation, and
+    /// the held comms are judged: the sender's lands, a stranger's under the
+    /// same alias is refused. Real path: `run_fill` → `handle_inbound(Fill)`
+    /// mints the invitation; the walk's `HubSink::fold` holds the comms; the
+    /// walk reaching the handshake's txid takes `handle_inbound_handshake`'s
+    /// OVERRIDE branch, which names it and calls `release_held_comms`.
+    #[tokio::test]
+    async fn an_invitation_holds_its_senders_comms_until_it_learns_who_sent_them() {
+        let (hub, dir, _vault, key) = sender_hub("hold");
+        assert_eq!(
+            handle_inbound(
+                &hub,
+                handshake_event(&hub, &key, 0xb1, None),
+                EventOrigin::Fill
+            )
+            .await,
+            FoldOutcome::Recorded
+        );
+        let invitation = hub
+            .store
+            .lock()
+            .unwrap()
+            .conversation_by_alias(INVITER_ALIAS)
+            .cloned()
+            .unwrap();
+        assert_eq!(invitation.status, ConversationStatus::PendingInbound);
+        assert!(
+            invitation.contact_address.is_empty(),
+            "an archive sets no identity"
+        );
+
+        let theirs = page_comm(
+            0xb2,
+            INVITER_ALIAS,
+            &sealed(&key, b"before you accept"),
+            Some(INVITER),
+        );
+        let strangers = page_comm(
+            0xb3,
+            INVITER_ALIAS,
+            &sealed(&key, b"pay me"),
+            Some(ATTACKER),
+        );
+        let (theirs_txid, strangers_txid) = (
+            theirs.txid.clone().unwrap(),
+            strangers.txid.clone().unwrap(),
+        );
+        walk_folds(&hub, theirs).await;
+        walk_folds(&hub, strangers).await;
+        let comms = |hub: &TransportHub| {
+            hub.store
+                .lock()
+                .unwrap()
+                .messages_for(&invitation.conversation_id)
+                .into_iter()
+                .filter(|m| m.kind == StoredKind::Comm)
+                .map(|m| m.txid)
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            comms(&hub).is_empty(),
+            "nothing is filed while the sender is unknown"
+        );
+        assert!(
+            comm_already_parked(&theirs_txid) && comm_already_parked(&strangers_txid),
+            "held, not refused"
+        );
+        // While it is held, an archive serves the same txid in a contact's
+        // sweep, claiming the contact: it gets no hearing ahead of our node's
+        // (`wallet-security-auditor` CONCERNS-C), or it would win the dedup.
+        let forged = page_comm(
+            0xb2,
+            THEIR_ALIAS,
+            &sealed(&key, b"forged"),
+            Some(VICTIM_CONTACT),
+        );
+        assert_eq!(
+            handle_inbound(&hub, forged, EventOrigin::Fill).await,
+            FoldOutcome::Settled
+        );
+        assert!(thread(&hub).is_empty(), "the archive's copy is not filed");
+
+        walk_folds(&hub, handshake_event(&hub, &key, 0xb1, Some(INVITER))).await;
+        let named = hub
+            .store
+            .lock()
+            .unwrap()
+            .conversation(&invitation.conversation_id)
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            named.contact_address, INVITER,
+            "our node named the invitation"
+        );
+        assert_eq!(
+            comms(&hub),
+            [theirs_txid],
+            "the sender's comm lands, the stranger's does not"
+        );
+        assert!(
+            !comm_already_parked(&strangers_txid),
+            "the stranger's is refused, not kept"
+        );
+        assert!(
+            is_refuted(&strangers_txid),
+            "and remembered against the archive"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A txid our walk refused is never filed from the archive**
+    /// (`wallet-security-auditor` CONCERNS-2). The fill runs after the walk
+    /// settles, so in the ordinary order the walk refuses a stranger's comm
+    /// first and writes nothing; a hostile archive then claims "the contact
+    /// sent it" for that txid. Real path: the walk's `HubSink::fold`, then
+    /// `run_fill`'s comm sweep → `handle_inbound(Fill)`.
+    #[tokio::test]
+    async fn a_txid_our_walk_refused_is_never_filed_from_the_archive() {
+        let (hub, dir, _vault, key) = sender_hub("refuted");
+        let envelope = sealed(&key, b"pay me");
+        walk_folds(
+            &hub,
+            page_comm(0xc1, THEIR_ALIAS, &envelope, Some(ATTACKER)),
+        )
+        .await;
+        assert_eq!(
+            handle_inbound(
+                &hub,
+                page_comm(0xc1, THEIR_ALIAS, &envelope, Some(VICTIM_CONTACT)),
+                EventOrigin::Fill
+            )
+            .await,
+            FoldOutcome::Settled
+        );
+        assert!(
+            thread(&hub).is_empty(),
+            "the archive's claim gets no second hearing"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **An archive row filed under an alias the chain does not show is
+    /// removed** (`wallet-security-auditor` CONCERNS-2): our node's own
+    /// transaction for that txid carries an alias none of our rows answers to,
+    /// so the archive's filing is disproven before the revival judges the
+    /// real comm. The node's sender is the contact here, so it is the alias
+    /// alone that disproves (the sender rule has its own test). Real path:
+    /// `run_fill` records the row, then the walk's `HubSink::fold` meets the
+    /// txid with the chain's alias.
+    #[tokio::test]
+    async fn an_archive_row_under_an_alias_the_chain_does_not_show_is_removed() {
+        let (hub, dir, _vault, key) = sender_hub("alias-disproved");
+        let envelope = sealed(&key, b"claimed");
+        let filed = page_comm(0xd1, THEIR_ALIAS, &envelope, Some(VICTIM_CONTACT));
+        let txid = filed.txid.clone().unwrap();
+        assert_eq!(
+            handle_inbound(&hub, filed, EventOrigin::Fill).await,
+            FoldOutcome::Recorded
+        );
+        walk_folds(
+            &hub,
+            page_comm(0xd1, "dddddddddddd", &envelope, Some(VICTIM_CONTACT)),
+        )
+        .await;
+        assert!(
+            hub.store.lock().unwrap().message(&txid).is_none(),
+            "the archive's filing is gone"
+        );
+        assert!(is_refuted(&txid));
+        let _ = take_parked_comm(&txid);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **An archive's invitation is never named from its txid label**
+    /// (`wallet-security-auditor` round 2, CONCERNS-A; D-139). The sender
+    /// lookup answers for any txid our wallet has a record of, so an archive
+    /// could pair its own handshake with a real payment's txid and have the
+    /// resweep name its row after a real contact, whose alias and key slot the
+    /// merge would then take. Only a handshake row our node scanned may be
+    /// named that way. Real path: `resweep_invitation_senders` and
+    /// `backfill_invitation_sender` select rows through `nameable_invitation`.
+    #[tokio::test]
+    async fn an_archive_invitation_is_never_named_from_its_txid_label() {
+        let (hub, dir, _vault, key) = sender_hub("label");
+        handle_inbound(
+            &hub,
+            handshake_event(&hub, &key, 0xe1, None),
+            EventOrigin::Fill,
+        )
+        .await;
+        {
+            let store = hub.store.lock().unwrap();
+            let archives = store.conversation_by_alias(INVITER_ALIAS).cloned().unwrap();
+            assert!(archives.contact_address.is_empty());
+            assert!(
+                !nameable_invitation(&store, &archives),
+                "an archive's label names no one"
+            );
+        }
+        // The same invitation as our node saw it with no page sender (off the
+        // pin): its row is node truth, so the lookup may name it.
+        let (hub2, dir2b, _vault2, key2) = sender_hub("label-node");
+        handle_inbound(
+            &hub2,
+            handshake_event(&hub2, &key2, 0xe2, None),
+            EventOrigin::Node,
+        )
+        .await;
+        let store2 = hub2.store.lock().unwrap();
+        let nodes = store2
+            .conversation_by_alias(INVITER_ALIAS)
+            .cloned()
+            .unwrap();
+        assert!(
+            nodes.contact_address.is_empty(),
+            "no page sender, no engine: unnamed"
+        );
+        assert!(
+            nameable_invitation(&store2, &nodes),
+            "a node-scanned invitation may be named"
+        );
+        drop(store2);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2b);
+    }
+
+    /// **Held comms land in the row the merge keeps** (`wallet-security-
+    /// auditor` round 2, CONCERNS-B). When our node names an archive's
+    /// invitation after a contact we already hold, the merge folds it into
+    /// that contact's row, which may keep its own alias. Routed by the held
+    /// alias, the comms would find no row and be lost; released into the merge
+    /// host, they land. Real path: the walk's `HubSink::fold` holds the comm;
+    /// the OVERRIDE branch names the invitation, merges, and releases into the
+    /// host.
+    #[tokio::test]
+    async fn held_comms_land_in_the_row_a_merge_keeps() {
+        const MERGE_ALIAS: &str = "f0f0f0f0f0f0";
+        let (hub, dir, _vault, key) = sender_hub("merge");
+        hub.store
+            .lock()
+            .unwrap()
+            .upsert_conversation(ConversationRecord {
+                conversation_id: "c-host".into(),
+                contact_address: INVITER.into(),
+                my_alias: "0ld0ld0ld0ld".into(),
+                their_alias: Some("a0a0a0a0a0a0".into()),
+                status: ConversationStatus::Active,
+                initiated_by_me: true,
+                bound_branch: KeyBranch::Receive,
+                bound_index: 0,
+                // Announced after the invitation's handshake, so the host's own
+                // alias survives the merge.
+                created_unix_ms: 1_800_000_000_000,
+                last_activity_unix_ms: 1_800_000_000_000,
+                handshake_txid: None,
+            })
+            .unwrap();
+        handle_inbound(
+            &hub,
+            handshake_event_as(&hub, &key, 0xf1, None, MERGE_ALIAS),
+            EventOrigin::Fill,
+        )
+        .await;
+        let held = page_comm(0xf2, MERGE_ALIAS, &sealed(&key, b"it's me"), Some(INVITER));
+        let held_txid = held.txid.clone().unwrap();
+        walk_folds(&hub, held).await;
+        assert!(comm_already_parked(&held_txid), "held");
+        walk_folds(
+            &hub,
+            handshake_event_as(&hub, &key, 0xf1, Some(INVITER), MERGE_ALIAS),
+        )
+        .await;
+        let store = hub.store.lock().unwrap();
+        assert_eq!(
+            store
+                .conversation("c-host")
+                .and_then(|c| c.their_alias.clone())
+                .as_deref(),
+            Some("a0a0a0a0a0a0"),
+            "the host kept its own alias, so the held alias routes nowhere"
+        );
+        assert_eq!(
+            store.message_conversation(&held_txid).as_deref(),
+            Some("c-host"),
+            "the held comm landed in the host"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **An archive row whose alias merely stopped routing is kept**
+    /// (`wallet-security-auditor` round 2, N1). Our node's transaction carries
+    /// the very alias the archive filed it under; the contact has since
+    /// re-handshaked, so that alias routes nowhere now. Nothing is disproven:
+    /// the row stays an archive row. Only a node alias different from the
+    /// filed one disproves a filing. Real path: `run_fill` files the row; the
+    /// contact's re-handshake moves their alias; the walk's `HubSink::fold`
+    /// meets the txid.
+    #[tokio::test]
+    async fn an_archive_row_whose_alias_stopped_routing_is_kept() {
+        // Its own alias: the parked set is process-wide, and the revival below
+        // parks this comm under (alias, contact) for the rest of the run.
+        const OLD_ALIAS: &str = "5a5a5a5a5a5a";
+        let (hub, dir, _vault, key) = sender_hub("stale-alias");
+        {
+            let mut store = hub.store.lock().unwrap();
+            let mut row = store.conversation(VICTIM_ID).cloned().unwrap();
+            row.their_alias = Some(OLD_ALIAS.into());
+            store.upsert_conversation(row).unwrap();
+        }
+        let envelope = sealed(&key, b"genuine");
+        let filed = page_comm(0x15, OLD_ALIAS, &envelope, Some(VICTIM_CONTACT));
+        let txid = filed.txid.clone().unwrap();
+        assert_eq!(
+            handle_inbound(&hub, filed, EventOrigin::Fill).await,
+            FoldOutcome::Recorded
+        );
+        {
+            let mut store = hub.store.lock().unwrap();
+            let mut row = store.conversation(VICTIM_ID).cloned().unwrap();
+            row.their_alias = Some("fefefefefefe".into());
+            store.upsert_conversation(row).unwrap();
+        }
+        walk_folds(
+            &hub,
+            page_comm(0x15, OLD_ALIAS, &envelope, Some(VICTIM_CONTACT)),
+        )
+        .await;
+        assert_eq!(
+            hub.store
+                .lock()
+                .unwrap()
+                .message(&txid)
+                .map(|r| r.provenance),
+            Some(RowSource::FillSourced),
+            "a genuine filing is not removed"
+        );
+        assert!(!is_refuted(&txid));
+        let _ = take_parked_comm(&txid);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A blocked sender's other held comms go with it, and only its own**
+    /// (`wallet-security-auditor` round 2, N3; `consensus-auditor` re-audit,
+    /// CONCERNS-1): a blocked knock keeps its handshake row and nothing else,
+    /// so what that address left parked under the alias must not wait for a
+    /// later accept; a contact's comm parked under the same public alias is
+    /// untouched. Real path: the return-address lookup names a blocked sender →
+    /// `fold_parked_comm`.
+    #[tokio::test]
+    async fn a_blocked_senders_other_parked_comms_are_dropped() {
+        let (hub, dir, _vault, key) = sender_hub("blocked");
+        hub.block_list.lock().unwrap().block(INVITER, 1_000);
+        let parked = |n: u8| ParkedComm {
+            alias: "c3c3c3c3c3c3".into(),
+            slot: (Branch::Receive, 0),
+            envelope: sealed(&key, b"knock"),
+            block_time_ms: Some(1_727_000_000_000 + u64::from(n)),
+            wire: WireNamespace::KChat,
+            sender: Some(INVITER.into()),
+        };
+        let (first, second) = ("a5".repeat(32), "a6".repeat(32));
+        park_comm(&second, parked(2));
+        let third = "a7".repeat(32);
+        park_comm(
+            &third,
+            ParkedComm {
+                sender: Some(VICTIM_CONTACT.into()),
+                ..parked(3)
+            },
+        );
+        fold_parked_comm(&hub, &first, parked(1), INVITER);
+        assert!(
+            !comm_already_parked(&second),
+            "the knock's other comm is dropped too"
+        );
+        // A contact's comm parked beside it under the same public alias is not
+        // the blocked address's to take (`consensus-auditor`): it keeps its own
+        // lookup, unrefuted.
+        assert!(
+            comm_already_parked(&third),
+            "another sender's comm stays parked"
+        );
+        assert!(!is_refuted(&third));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The override names only the invitation whose own handshake it is**
+    /// (`consensus-auditor` re-audit, CONCERNS-2). The override finds its row
+    /// by where the archive filed the txid. A store from before PRE3-SENDER can
+    /// hold an archive COMM inside an address-less invitation; when our node
+    /// later folds that txid as a handshake, the invitation must not be named
+    /// from another transaction's sender. Real path: the walk's `HubSink::fold`
+    /// → `handle_inbound_handshake`'s OVERRIDE branch.
+    #[tokio::test]
+    async fn the_override_names_only_the_invitation_whose_handshake_it_is() {
+        let (hub, dir, _vault, key) = sender_hub("override-guard");
+        let filed_txid = "e7".repeat(32);
+        {
+            let mut store = hub.store.lock().unwrap();
+            store
+                .upsert_conversation(ConversationRecord {
+                    conversation_id: "c-old-invite".into(),
+                    contact_address: String::new(),
+                    my_alias: String::new(),
+                    their_alias: Some("e6e6e6e6e6e6".into()),
+                    status: ConversationStatus::PendingInbound,
+                    initiated_by_me: false,
+                    bound_branch: KeyBranch::Receive,
+                    bound_index: 0,
+                    created_unix_ms: 1_000,
+                    last_activity_unix_ms: 1_000,
+                    handshake_txid: Some("e5".repeat(32)),
+                })
+                .unwrap();
+            store
+                .record_message(MessageRecord {
+                    txid: filed_txid.clone(),
+                    conversation_id: "c-old-invite".into(),
+                    direction: MessageDirection::Inbound,
+                    kind: StoredKind::Comm,
+                    envelope: sealed(&key, b"an older build's archive comm"),
+                    unix_ms: 1_000,
+                    alias_on_wire: Some("e6e6e6e6e6e6".into()),
+                    sealed_to: None,
+                    provenance: RowSource::FillSourced,
+                    wire: WireNamespace::CiphMsg,
+                })
+                .unwrap();
+        }
+        walk_folds(
+            &hub,
+            handshake_event_as(&hub, &key, 0xe7, Some(INVITER), "e8e8e8e8e8e8"),
+        )
+        .await;
+        let store = hub.store.lock().unwrap();
+        assert_eq!(
+            store
+                .conversation("c-old-invite")
+                .map(|c| c.contact_address.clone())
+                .as_deref(),
+            Some(""),
+            "another transaction's sender names no one"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **…and removed when our node names another sender** (`wallet-security-
+    /// auditor` confirmation, note 2). The alias stopped routing, so the alias
+    /// proves nothing either way; the sender still does. Real path: as above,
+    /// with the walk's page naming a stranger.
+    #[tokio::test]
+    async fn an_archive_row_whose_alias_stopped_routing_falls_to_a_stranger_sender() {
+        const OLD_ALIAS: &str = "6b6b6b6b6b6b";
+        let (hub, dir, _vault, key) = sender_hub("stale-alias-stranger");
+        {
+            let mut store = hub.store.lock().unwrap();
+            let mut row = store.conversation(VICTIM_ID).cloned().unwrap();
+            row.their_alias = Some(OLD_ALIAS.into());
+            store.upsert_conversation(row).unwrap();
+        }
+        let envelope = sealed(&key, b"claimed");
+        let filed = page_comm(0x16, OLD_ALIAS, &envelope, Some(VICTIM_CONTACT));
+        let txid = filed.txid.clone().unwrap();
+        assert_eq!(
+            handle_inbound(&hub, filed, EventOrigin::Fill).await,
+            FoldOutcome::Recorded
+        );
+        {
+            let mut store = hub.store.lock().unwrap();
+            let mut row = store.conversation(VICTIM_ID).cloned().unwrap();
+            row.their_alias = Some("fdfdfdfdfdfd".into());
+            store.upsert_conversation(row).unwrap();
+        }
+        walk_folds(&hub, page_comm(0x16, OLD_ALIAS, &envelope, Some(ATTACKER))).await;
+        assert!(
+            hub.store.lock().unwrap().message(&txid).is_none(),
+            "a stranger's transaction is not the contact's archive row"
+        );
+        assert!(is_refuted(&txid));
+        let _ = take_parked_comm(&txid);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **Only a HANDSHAKE row names an invitation** (a sibling session's
+    /// `wallet-security-auditor`, forwarded and verified). The provenance gate
+    /// reads a row's provenance, not its kind: a node-scanned COMM row under
+    /// the invitation's `handshake_txid` must not pass for its handshake. Real
+    /// path: `resweep_invitation_senders` / `backfill_invitation_sender`
+    /// select through `nameable_invitation`.
+    #[tokio::test]
+    async fn a_comm_row_under_the_label_names_no_invitation() {
+        let (hub, dir, _vault, key) = sender_hub("label-kind");
+        let label = "4c".repeat(32);
+        let mut store = hub.store.lock().unwrap();
+        let invitation = ConversationRecord {
+            conversation_id: "c-label-kind".into(),
+            contact_address: String::new(),
+            my_alias: String::new(),
+            their_alias: Some("4d4d4d4d4d4d".into()),
+            status: ConversationStatus::PendingInbound,
+            initiated_by_me: false,
+            bound_branch: KeyBranch::Receive,
+            bound_index: 0,
+            created_unix_ms: 1_000,
+            last_activity_unix_ms: 1_000,
+            handshake_txid: Some(label.clone()),
+        };
+        store.upsert_conversation(invitation.clone()).unwrap();
+        store
+            .record_message(MessageRecord {
+                txid: label.clone(),
+                conversation_id: VICTIM_ID.into(),
+                direction: MessageDirection::Inbound,
+                kind: StoredKind::Comm,
+                envelope: sealed(&key, b"a node comm"),
+                unix_ms: 1_000,
+                alias_on_wire: Some(THEIR_ALIAS.into()),
+                sealed_to: None,
+                provenance: RowSource::NodeScanned,
+                wire: WireNamespace::KChat,
+            })
+            .unwrap();
+        assert!(
+            !nameable_invitation(&store, &invitation),
+            "a comm is not the invitation's handshake"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The refutation memory is bounded, oldest out** (a sibling session's
+    /// `consensus-auditor`, forwarded and verified): a refusal is
+    /// attacker-mintable at chain rate, so the set holds at most
+    /// `REFUTED_CAPACITY` txids and forgets the oldest first; a repeat is not
+    /// a second entry.
+    #[test]
+    fn the_refutation_memory_is_bounded_oldest_out() {
+        let mut set = RefutedTxids::new();
+        set.note("first");
+        set.note("first");
+        assert_eq!(set.order.len(), 1, "a repeat is one entry");
+        for n in 0..REFUTED_CAPACITY {
+            set.note(&format!("{n:064x}"));
+        }
+        assert_eq!(set.order.len(), REFUTED_CAPACITY, "bounded");
+        assert!(!set.contains("first"), "the oldest went first");
+        assert!(set.contains(&format!("{:064x}", REFUTED_CAPACITY - 1)));
+        assert!(set.contains(&format!("{:064x}", 0)));
     }
 }

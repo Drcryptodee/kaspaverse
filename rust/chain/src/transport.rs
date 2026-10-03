@@ -137,6 +137,22 @@ pub struct TransportEvent {
     /// already gone past (D-307). `None` on the fill lane — an indexer row is
     /// a claim, and identity never comes from one (D-139).
     pub block_hash: Option<String>,
+    /// Who sent it: the address behind **input 0's previous output**, the
+    /// pin's own definition of a transaction's sender (`get_utxo_return_address`
+    /// answers with `entries[0]`'s script through `extract_script_pub_key_address`,
+    /// rpc/service `service.rs:1005-1024` @ `01b532e`). The message walk's page
+    /// carries it, so [`scan_accepted`] reads it with no extra call (§0.10,
+    /// PRE3-SENDER). `None` when the source does not carry it: the block
+    /// stream's inputs hold no entry, a coinbase has no input, and a
+    /// non-standard script has no address. **From a node at the pin a walk page
+    /// never yields `None` for a transaction with inputs**: the node fails the
+    /// whole page when an entry is missing (`MissingUtxoEntryForOutpoint`,
+    /// `ConsensusConverterNotFound`) or an input's script has no address (it
+    /// computes `script_public_key_address` from Low up), so `None` there is
+    /// defensive, for a node off the pin (`consensus-auditor`). On the fill
+    /// lane it is the archive's CLAIM (`IndexerComm.sender`), never chain
+    /// truth; the fold's origin says which.
+    pub sender: Option<String>,
 }
 
 /// Parse a raw tx payload into `(kind, body)` — pure, version-neutral, shared
@@ -210,6 +226,9 @@ fn scan_transaction(
         addresses: output_addresses(tx, prefix),
         block_time_ms,
         block_hash,
+        // A block's inputs carry no UTXO entry at the pin
+        // (`RpcTransactionInputVerboseData {}`), so this source cannot name one.
+        sender: None,
     })
 }
 
@@ -245,6 +264,10 @@ fn resolve_txid(tx: &RpcTransaction) -> Option<String> {
 /// pin `rpc/service/src/converter/consensus.rs:538-566`), the same facts the
 /// stream read off a block, so the sender locate's cursor (D-307) and the
 /// thread's clock keep their meaning.
+///
+/// **The sender is on the page** ([`input_zero_sender`]): at High every input
+/// carries its UTXO entry's script (pin `rpc/core/src/model/optional/tx.rs:18-22`,
+/// `convert/verbosity.rs:84-121`), so the comm lane's sender check costs no call.
 pub fn scan_accepted(tx: &RpcOptionalTransaction, prefix: Prefix) -> Option<TransportEvent> {
     let (namespace, kind, body) = parse_payload_in(tx.payload.as_deref()?)?;
     let verbose = tx.verbose_data.as_ref();
@@ -265,7 +288,32 @@ pub fn scan_accepted(tx: &RpcOptionalTransaction, prefix: Prefix) -> Option<Tran
         block_hash: verbose
             .and_then(|v| v.block_hash)
             .map(|hash| hash.to_string()),
+        sender: input_zero_sender(tx, prefix),
     })
+}
+
+/// A transaction's sender as the pin defines it: the address behind input 0's
+/// previous output. `get_utxo_return_address` (rpc/service `service.rs:1005-1024`
+/// @ `01b532e`) takes `entries[0]`, refuses a transaction with no input
+/// (`TxFromCoinbase`) and a script with no address (`NonStandard`), and decodes
+/// the script with `extract_script_pub_key_address` under the network prefix.
+/// This is the same rule over the entry the page already carries; each refusal
+/// is `None` here, and so is a page that withheld the entry. Never input 1,
+/// never an output: a self-send pays its sender back, but an output is the
+/// sender's choice of destination, not proof of who spent.
+fn input_zero_sender(tx: &RpcOptionalTransaction, prefix: Prefix) -> Option<String> {
+    let script = tx
+        .inputs
+        .first()?
+        .verbose_data
+        .as_ref()?
+        .utxo_entry
+        .as_ref()?
+        .script_public_key
+        .as_ref()?;
+    extract_script_pub_key_address(script, prefix)
+        .ok()
+        .map(|address| address.to_string())
 }
 
 /// Output addresses via the pinned standard-script decoder; non-standard
@@ -930,6 +978,107 @@ mod tests {
         .is_none());
         assert!(scan_accepted(&accepted_with(Some(b""), Some(id)), Prefix::Mainnet).is_none());
         assert!(scan_accepted(&accepted_with(None, Some(id)), Prefix::Mainnet).is_none());
+    }
+
+    /// One input as the walk's page carries it at High: its previous output's
+    /// script in the UTXO entry, or nothing where the page withheld it.
+    fn spending(script: Option<ScriptPublicKey>) -> kaspa_rpc_core::RpcOptionalTransactionInput {
+        kaspa_rpc_core::RpcOptionalTransactionInput {
+            previous_outpoint: None,
+            signature_script: None,
+            sequence: None,
+            sig_op_count: None,
+            compute_budget: None,
+            verbose_data: Some(kaspa_rpc_core::RpcOptionalTransactionInputVerboseData {
+                utxo_entry: Some(kaspa_rpc_core::RpcOptionalUtxoEntry::new(
+                    Some(20_000_000),
+                    script,
+                    None,
+                    Some(false),
+                    None,
+                    None,
+                )),
+            }),
+        }
+    }
+
+    /// **The sender is input 0's previous-output address, the pin's own
+    /// definition** (PRE3-SENDER, §0.10): `get_utxo_return_address` takes
+    /// `entries[0]` and decodes it with `extract_script_pub_key_address`. The
+    /// real path: the walk's page → `scan_page` → this scan → the comm lane's
+    /// check. The fixture's outputs pay DEST and CHANGE, and input 1 spends from
+    /// DEST, so a sender read from an output, or from any input but the first,
+    /// names the wrong address.
+    #[test]
+    fn the_sender_is_input_zeros_previous_output_address() {
+        let id = kaspa_consensus_core::Hash::from_bytes([0x5A; 32]);
+        let mut tx = accepted_with(Some(b"kchat:1:comm:aabbccddeeff:body"), Some(id));
+        let sender = "kaspa:qp09uhj7te09uhj7te09uhj7te09uhj7te09uhj7te09uhj7te09un2xaekjp";
+        tx.inputs = vec![
+            spending(Some(pay_to_address_script(&addr(sender)))),
+            spending(Some(pay_to_address_script(&addr(DEST)))),
+        ];
+        let event = scan_accepted(&tx, Prefix::Mainnet).expect("a kchat comm matches");
+        assert_eq!(event.sender.as_deref(), Some(sender));
+        assert_eq!(
+            event.sender,
+            extract_script_pub_key_address(&pay_to_address_script(&addr(sender)), Prefix::Mainnet)
+                .ok()
+                .map(|a| a.to_string()),
+            "the pin's own decoder, nothing hand-rolled"
+        );
+    }
+
+    /// Where the pin's `get_utxo_return_address` refuses, the page names no
+    /// sender either: no input (`TxFromCoinbase`), a script with no address
+    /// (`NonStandard`), and a page that withheld the entry. Each is `None`,
+    /// never a guess from an output, so the comm lane falls back to the
+    /// return-address lookup, which refuses the same way.
+    #[test]
+    fn no_sender_where_the_pin_would_name_none() {
+        let id = kaspa_consensus_core::Hash::from_bytes([0x5A; 32]);
+        let comm = |inputs| {
+            let mut tx = accepted_with(Some(b"ciph_msg:1:comm:aabbccddeeff:body"), Some(id));
+            tx.inputs = inputs;
+            scan_accepted(&tx, Prefix::Mainnet)
+                .expect("still a match")
+                .sender
+        };
+        assert_eq!(comm(vec![]), None, "no input: a coinbase has no sender");
+        assert_eq!(
+            comm(vec![spending(Some(ScriptPublicKey::from_vec(
+                0,
+                vec![0x51]
+            )))]),
+            None,
+            "a non-standard script has no address"
+        );
+        assert_eq!(
+            comm(vec![spending(None)]),
+            None,
+            "the entry's script withheld"
+        );
+        let mut bare = spending(None);
+        bare.verbose_data = None;
+        assert_eq!(comm(vec![bare]), None, "the input's verbose data withheld");
+        // A later input that does carry an address is never promoted to sender.
+        assert_eq!(
+            comm(vec![
+                spending(None),
+                spending(Some(pay_to_address_script(&addr(DEST))))
+            ]),
+            None,
+            "input 1 is never the sender"
+        );
+        // The block stream, the dev parity arm's only source, names none.
+        let block = scan_transaction(
+            &tx_with(1, b"ciph_msg:1:comm:aabbccddeeff:body"),
+            Prefix::Mainnet,
+            None,
+            None,
+        )
+        .expect("a block match");
+        assert_eq!(block.sender, None);
     }
 
     /// At High there is nothing to recompute an id from, so a missing id stays

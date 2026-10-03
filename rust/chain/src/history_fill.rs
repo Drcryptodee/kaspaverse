@@ -1,8 +1,16 @@
 //! V2b history fill (D-074, first D-070 integration): a `ciph_msg` indexer as
-//! a **verifiable hint** — it can point at envelopes we missed while closed,
-//! it can never forge one (every returned envelope is verified by LOCAL
-//! decryption in the existing inbound pipeline; txid dedup makes replays
-//! harmless). INV-8 as amended D-070: optional, disable-able, endpoint
+//! a **hint** — it can point at envelopes we missed while closed. **It can
+//! also forge one** (F68, corrected at PRE3-SENDER): the seal is to our
+//! published key, so anyone can make an envelope we open, and the archive
+//! chooses both a row's bytes and its txid label. The LOCAL decryption in the
+//! inbound pipeline proves only that a row was sealed to us. What bounds an
+//! archive row: a comm is filed only where its claimed sender is the
+//! conversation's contact (the bridge's `comm_sender_verdict`) and never for a
+//! txid our own walk refused this session, every row keeps its `archive`
+//! provenance on the glass, nothing it serves sets identity (D-139), and a walk
+//! that reaches the txid later replaces the row, or removes it when it names
+//! another sender. An invented txid no walk reaches stays an archive row: the
+//! declared residual. Txid dedup makes one row's replays harmless. INV-8 as amended D-070: optional, disable-able, endpoint
 //! replaceable; node-only stays fully functional. Membrane (D-068/D-070):
 //! messages are the social layer — covenant/game STATE never rides this.
 //!
@@ -583,8 +591,7 @@ impl FillCursors {
 // ── Byte helpers (dependency-free; test-pinned) ────────────────────────────
 
 /// Strict lowercase/uppercase hex → bytes. `None` on odd length or a non-hex
-/// byte — the caller skips the row (an indexer can OMIT, never FORGE; a
-/// malformed row is just omitted data).
+/// byte — the caller skips the row (a malformed row is just omitted data).
 pub fn decode_hex(text: &str) -> Option<Vec<u8>> {
     if !text.len().is_multiple_of(2) {
         return None;
