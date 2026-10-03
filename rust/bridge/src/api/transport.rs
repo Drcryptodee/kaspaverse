@@ -26,7 +26,7 @@
 //! be routed through the plaintext `bcast` lane (§4 type-level separation).
 
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -483,7 +483,9 @@ fn take_intent(nonce: u64) -> Option<TransportIntent> {
 /// window (addresses for the handshake relevance filter; key slots for the
 /// establishment scan).
 struct TransportHub {
-    store: Mutex<TransportStore>,
+    /// The process's one message store, shared by every hub generation
+    /// ([`hub_stores`], PRE3-LOG).
+    store: Arc<Mutex<TransportStore>>,
     decryptor: TransportDecryptor,
     /// The addresses an inbound envelope must touch to be ours, and the key
     /// slots we try to open it with.
@@ -504,7 +506,10 @@ struct TransportHub {
     /// **Lock order: `store` before `block_list`, never the reverse.** Every
     /// site that holds both takes them in that order; a site that needs only
     /// this one takes it alone.
-    block_list: Mutex<BlockList>,
+    ///
+    /// One per process, like the store ([`hub_stores`]): it saves whole, so a
+    /// second instance's save would undo the first's change.
+    block_list: Arc<Mutex<BlockList>>,
 }
 
 /// The hub's watched set and key slots as one replaceable value.
@@ -1866,6 +1871,42 @@ fn ping_notice_inputs() {
     ping("");
 }
 
+/// The process's one message store and one block list ([`hub_stores`]).
+type HubStores = (Arc<Mutex<TransportStore>>, Arc<Mutex<BlockList>>);
+
+/// **One message store and one block list per directory per process**
+/// (PRE3-LOG), handed to every hub generation.
+///
+/// A re-unlock used to load both afresh over the same files, while a lane
+/// still holding the previous hub could write after a network wait
+/// (`wallet-security-auditor` + `consensus-auditor`, PRE3-LOG). Under the old
+/// append mode that was harmless; once the logs write at a remembered end, a
+/// second instance's write would cut or overwrite the first's frames (the log
+/// now refuses instead, loudly), and a second block list would undo the
+/// first's change on its next whole-file save. Two first starts can also
+/// overlap (the Dart start has no in-flight guard), so this lock is held
+/// across the load: the second start waits, then takes the first's.
+fn hub_stores(dir: &Path) -> Result<HubStores, AppError> {
+    static STORES: Mutex<std::collections::BTreeMap<PathBuf, HubStores>> =
+        Mutex::new(std::collections::BTreeMap::new());
+    let mut stores = STORES.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((store, list)) = stores.get(dir) {
+        return Ok((store.clone(), list.clone()));
+    }
+    let store = TransportStore::load(dir.to_path_buf()).map_err(AppError::chain)?;
+    // A PRESENT but unreadable `block.list` is quarantined, never read as
+    // empty and then overwritten by the next block (`wallet-security-auditor`,
+    // MSG-BLOCK): the bytes are kept beside it for a repair, and the log says
+    // so. An absent file is the ordinary case and reads as nobody blocked.
+    quarantine_unreadable_block_list(dir);
+    let pair: HubStores = (
+        Arc::new(Mutex::new(store)),
+        Arc::new(Mutex::new(BlockList::load(dir))),
+    );
+    stores.insert(dir.to_path_buf(), pair.clone());
+    Ok(pair)
+}
+
 fn hub() -> Result<Arc<TransportHub>, AppError> {
     HUB.lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -1928,7 +1969,7 @@ pub async fn transport_start() -> Result<(), AppError> {
     monitor.quiesce_intake("the message hub restarts").await;
 
     let transport_dir = vault::transport_store_dir()?;
-    let store = TransportStore::load(transport_dir.clone()).map_err(AppError::chain)?;
+    let (store, block_list) = hub_stores(&transport_dir)?;
     let cursor_path = transport_dir.join("scan.cursor");
     // The walk's committed cursor as this start finds it, read only for the
     // gap-age line below (the walk itself resumes from it). None on the first
@@ -1947,15 +1988,10 @@ pub async fn transport_start() -> Result<(), AppError> {
     let (window_receive, window_change) = wallet::window_after_discovery().await;
     let (watched_addresses, _) = vault::derive_wallet_addresses(window_receive, window_change)?;
 
-    // A PRESENT but unreadable `block.list` is quarantined, never read as
-    // empty and then overwritten by the next block (`wallet-security-auditor`,
-    // MSG-BLOCK): the bytes are kept beside it for a repair, and the log says
-    // so. An absent file is the ordinary case and reads as nobody blocked.
-    quarantine_unreadable_block_list(&transport_dir);
     let hub = Arc::new(TransportHub {
-        store: Mutex::new(store),
+        store,
         decryptor,
-        block_list: Mutex::new(BlockList::load(&transport_dir)),
+        block_list,
         keys: Mutex::new(Arc::new(KeyWindow::build(
             window_receive,
             window_change,
@@ -8157,13 +8193,15 @@ pub fn transport_conversations() -> Result<Vec<ConversationDto>, AppError> {
 /// Idempotent: hiding an unknown id is a no-op success.
 pub fn transport_hide_conversation(conversation_id: String) -> Result<(), AppError> {
     let hub = hub()?;
-    let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
-    hide_conversation_rows(&mut store, &conversation_id)?;
-    drop(store);
+    let hidden = {
+        let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
+        hide_conversation_rows(&mut store, &conversation_id)
+    };
     // Nudge any open list to re-pull. The thread does NOT 404 — the row
-    // survives by design; it simply stops being listed.
+    // survives by design; it simply stops being listed. Pinged even when the
+    // scrub failed: the hide itself is on disk by then (PRE3-LOG).
     ping(&conversation_id);
-    Ok(())
+    hidden
 }
 
 /// Hide's store half: content goes, identity stays, and the content's sealed
@@ -8186,7 +8224,7 @@ fn hide_conversation_rows(
     store
         .tombstone_conversation(conversation_id)
         .map_err(AppError::chain)?;
-    store.compact().map_err(AppError::chain)
+    store.scrub().map_err(AppError::chain)
 }
 
 /// Forget what was SAID in one conversation, keeping the conversation itself.
@@ -8231,7 +8269,15 @@ pub fn transport_clear_messages(conversation_id: String) -> Result<WipeReportDto
     });
     let cleared = {
         let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
-        clear_conversation_rows(&mut store, &conversation_id)?
+        clear_conversation_rows(&mut store, &conversation_id)
+    };
+    let cleared = match cleared {
+        Ok(cleared) => cleared,
+        Err(e) => {
+            // Rows may have gone before the failure: the thread re-pulls either way.
+            ping(&conversation_id);
+            return Err(e);
+        }
     };
 
     log::info!(
@@ -8295,9 +8341,11 @@ fn clear_conversation_rows(
     // "I do not want these words on my phone" has to reach the file, not
     // only the screen: each removed row's frame, envelope included, stayed
     // behind its `Remove` until a compaction that never came (PRE3-LOG,
-    // F30). A failure is the error, like a failed remove above, because
-    // the count returned would otherwise promise something the disk lacks.
-    store.compact().map_err(AppError::chain)?;
+    // F30), and a copy kept aside held all of them. A failure is the error,
+    // like a failed remove above, because the count returned would
+    // otherwise promise something the disk lacks; the next start's load
+    // finishes the rewrite whether or not the user retries.
+    store.scrub().map_err(AppError::chain)?;
     Ok(cleared)
 }
 
@@ -8613,7 +8661,7 @@ pub fn transport_block_conversation(conversation_id: String) -> Result<(), AppEr
             cursors.comms.remove(id);
         }
     });
-    let (rows, messages) = {
+    let ((rows, messages), scrubbed) = {
         let mut store = hub.store.lock().unwrap_or_else(PoisonError::into_inner);
         block_purge(&mut store, &address)?
     };
@@ -8635,7 +8683,9 @@ pub fn transport_block_conversation(conversation_id: String) -> Result<(), AppEr
     for id in &ids {
         ping(id);
     }
-    Ok(())
+    // Last: the block is complete by now, and only the words' removal from
+    // the file failed, which the next start finishes.
+    scrubbed.map_err(AppError::chain)
 }
 
 /// Move a present-but-unreadable `block.list` aside as `block.list.corrupt`,
@@ -8679,6 +8729,8 @@ fn sweep_blocked_rows(store: &mut TransportStore, addresses: &[String]) -> (usiz
             swept.0,
             swept.1
         );
+        // A compaction, not a scrub: a copy the load kept aside moments ago,
+        // at this very start, is not this sweep's to delete.
         if let Err(e) = store.compact() {
             log::warn!("transport-block: compaction after the start sweep failed: {e}");
         }
@@ -8687,12 +8739,18 @@ fn sweep_blocked_rows(store: &mut TransportStore, addresses: &[String]) -> (usiz
 }
 
 /// The block's store half: every row for the address, then their sealed
-/// bytes out of the file, not only off the screen (PRE3-LOG, F30). Pure over
-/// the store, so it is tested without a hub.
-fn block_purge(store: &mut TransportStore, address: &str) -> Result<(usize, usize), AppError> {
+/// bytes out of the file and its copies, not only off the screen (PRE3-LOG,
+/// F30). The scrub's outcome is returned beside the counts, not raised: by
+/// then the rows are gone for good, and the block's claims and pings must
+/// still run (`ffi-leak-auditor` + `consensus-auditor`); a scrub that failed
+/// is finished by the next start's load. Pure over the store, so it is
+/// tested without a hub.
+fn block_purge(
+    store: &mut TransportStore,
+    address: &str,
+) -> Result<((usize, usize), kaspaverse_chain::Result<()>), AppError> {
     let purged = purge_contact_rows(store, address, false)?;
-    store.compact().map_err(AppError::chain)?;
-    Ok(purged)
+    Ok((purged, store.scrub()))
 }
 
 /// Destroy every conversation row for an address and every message in them.
@@ -10383,9 +10441,9 @@ mod tests {
         drop(vault); // the lock: every decrypt now answers VaultLocked
         let watched = Address::try_from(VICTIM_CONTACT).unwrap();
         let hub = Arc::new(TransportHub {
-            store: Mutex::new(TransportStore::load(dir.clone()).unwrap()),
+            store: Arc::new(Mutex::new(TransportStore::load(dir.clone()).unwrap())),
             decryptor,
-            block_list: Mutex::new(BlockList::load(&dir)),
+            block_list: Arc::new(Mutex::new(BlockList::load(&dir))),
             keys: Mutex::new(Arc::new(KeyWindow::build(1, 0, &[watched]))),
         });
         let sink = HubSink { hub };
@@ -11789,9 +11847,9 @@ mod tests {
             })
             .unwrap();
         let hub = Arc::new(TransportHub {
-            store: Mutex::new(store),
+            store: Arc::new(Mutex::new(store)),
             decryptor: vault.transport_decryptor(),
-            block_list: Mutex::new(BlockList::load(&dir)),
+            block_list: Arc::new(Mutex::new(BlockList::load(&dir))),
             keys: Mutex::new(Arc::new(KeyWindow::build(1, 0, &[ours]))),
         });
         (hub, dir, vault, published_key)
@@ -12861,17 +12919,27 @@ mod tests {
         assert!(set.contains(&format!("{:064x}", 0)));
     }
 
-    /// **F30 through every erase lane.** Clear, hide, block and the start
-    /// sweep each leave the removed message's sealed bytes out of
-    /// `messages.kvlog`: the search finds them before (it can look) and not
-    /// after. Each lane's store half is the code the public call runs.
+    /// **F30 through every erase lane.** Clear, hide and block leave the
+    /// removed message's sealed bytes in no file of the store's folder: not in
+    /// `messages.kvlog`, and not in a copy an earlier load kept aside (planted
+    /// here). The start sweep compacts the log but leaves the copy, which may
+    /// be the one this very start made. The search finds the words before
+    /// (it can look). Each lane's store half is the code the public call runs.
     #[test]
     fn every_erase_lane_takes_the_words_out_of_the_file() {
-        let on_disk = |dir: &std::path::Path, needle: &[u8]| {
-            std::fs::read(dir.join("messages.kvlog"))
+        let holding = |dir: &std::path::Path, needle: &[u8]| -> Vec<String> {
+            let mut found: Vec<String> = std::fs::read_dir(dir)
                 .unwrap()
-                .windows(needle.len())
-                .any(|w| w == needle)
+                .map(|e| e.unwrap().path())
+                .filter(|path| {
+                    std::fs::read(path)
+                        .map(|bytes| bytes.windows(needle.len()).any(|w| w == needle))
+                        .unwrap_or(false)
+                })
+                .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+                .collect();
+            found.sort();
+            found
         };
         for (n, lane) in ["clear", "hide", "block", "sweep"].into_iter().enumerate() {
             let (mut store, dir) = stash_store(&format!("f30-{lane}"));
@@ -12895,23 +12963,32 @@ mod tests {
                     wire: WireNamespace::CiphMsg,
                 })
                 .unwrap();
-            assert!(
-                on_disk(&dir, &words),
+            let aside = "messages.kvlog.unreadable-1-00000000";
+            std::fs::copy(dir.join("messages.kvlog"), dir.join(aside)).unwrap();
+            assert_eq!(
+                holding(&dir, &words),
+                ["messages.kvlog", aside],
                 "{lane}: before, the search finds the words"
             );
 
             match lane {
                 "clear" => assert_eq!(clear_conversation_rows(&mut store, "thread").unwrap(), 1),
                 "hide" => hide_conversation_rows(&mut store, "thread").unwrap(),
-                "block" => assert_eq!(block_purge(&mut store, PARTNER_A).unwrap(), (1, 1)),
+                "block" => {
+                    let (purged, scrubbed) = block_purge(&mut store, PARTNER_A).unwrap();
+                    assert_eq!(purged, (1, 1));
+                    scrubbed.unwrap();
+                }
                 _ => assert_eq!(
                     sweep_blocked_rows(&mut store, &[PARTNER_A.to_string()]),
                     (1, 1)
                 ),
             }
-            assert!(
-                !on_disk(&dir, &words),
-                "{lane}: after, the words are gone from the file"
+            let expected: &[&str] = if lane == "sweep" { &[aside] } else { &[] };
+            assert_eq!(
+                holding(&dir, &words),
+                expected,
+                "{lane}: after, no file holds the words but what the lane may not touch"
             );
             assert!(TransportStore::load(dir.clone())
                 .unwrap()
@@ -12919,5 +12996,34 @@ mod tests {
                 .is_none());
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    /// **One store per directory per process** (PRE3-LOG): every hub
+    /// generation gets the same store and block list, so a lane still holding
+    /// an old hub writes through the same log as the live one, and nothing is
+    /// cut or refused. Both writes survive a reload.
+    #[test]
+    fn every_hub_generation_shares_one_store_and_one_block_list() {
+        let dir = std::env::temp_dir().join(format!("kv-hub-stores-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (old_store, old_list) = hub_stores(&dir).unwrap();
+        let (new_store, new_list) = hub_stores(&dir).unwrap();
+        assert!(Arc::ptr_eq(&old_store, &new_store));
+        assert!(Arc::ptr_eq(&old_list, &new_list));
+
+        new_store
+            .lock()
+            .unwrap()
+            .upsert_conversation(row_for("live", PARTNER_A, ConversationStatus::Active))
+            .unwrap();
+        old_store
+            .lock()
+            .unwrap()
+            .upsert_conversation(row_for("stale", PARTNER_A, ConversationStatus::Active))
+            .unwrap();
+        let reloaded = TransportStore::load(dir.clone()).unwrap();
+        assert!(reloaded.conversation("live").is_some());
+        assert!(reloaded.conversation("stale").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

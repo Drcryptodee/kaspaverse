@@ -40,7 +40,7 @@ use std::path::PathBuf;
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
-use crate::error::Result;
+use crate::error::{ChainError, Result};
 use crate::kvlog::Log;
 use crate::read_marks::ReadMarks;
 use crate::transport::WireNamespace;
@@ -278,15 +278,41 @@ pub struct TransportStore {
 
 impl TransportStore {
     /// Load both logs from `dir` (missing files = empty stores).
+    ///
+    /// **One instance per process** (PRE3-LOG): the logs write at a
+    /// remembered end, so a second store over the same files would refuse to
+    /// write (it never cuts another writer's frames). The bridge keeps the
+    /// first store it loads for every later hub.
+    ///
+    /// **Fails closed over a read-only log.** A message write that fails is
+    /// warned past in several lanes, and an outbound row lost that way is lost
+    /// for good, so the messaging store refuses to open over a log it cannot
+    /// write rather than run on one.
+    ///
+    /// **A removal's bytes do not outlive the next start** (F30): a log that
+    /// still holds a `Remove` frame (an erase whose own compaction failed, or
+    /// a removal no erase lane made) is compacted here.
     pub fn load(dir: PathBuf) -> Result<Self> {
-        Ok(Self {
+        let mut store = Self {
             conversations: Log::load(dir.join("conversations.kvlog"), |c: &ConversationRecord| {
                 c.conversation_id.clone()
             })?,
             messages: Log::load(dir.join("messages.kvlog"), |m: &MessageRecord| {
                 m.txid.clone()
             })?,
-        })
+        };
+        if let Some(why) = store.messages.hold().or(store.conversations.hold()) {
+            return Err(ChainError::Message(format!(
+                "the message store cannot be written ({why}); messaging stays closed so nothing \
+                 is lost"
+            )));
+        }
+        if store.messages.holds_removed() || store.conversations.holds_removed() {
+            if let Err(e) = store.compact() {
+                log::warn!("transport-store: compaction of removed rows at load failed: {e}");
+            }
+        }
+        Ok(store)
     }
 
     // ── conversations ────────────────────────────────────────────────────
@@ -536,9 +562,22 @@ impl TransportStore {
     /// What it cannot reach, stated rather than implied: the blocks the old
     /// file occupied are freed to the file system, not overwritten, and on the
     /// phone they sit under the platform's file-based encryption until reused.
+    /// The copies a load kept aside are [`Self::scrub`]'s, not this one's: a
+    /// load compacts too, and must not delete the copy it just made.
     pub fn compact(&mut self) -> Result<()> {
         self.messages.compact()?;
         self.conversations.compact()
+    }
+
+    /// **An erase's rewrite: every copy first, then both logs** (PRE3-LOG,
+    /// F30). The copies a load kept aside of a file it could not read whole
+    /// hold everything that file held, erased words included, and nothing
+    /// reads them, so the user's erase reaches them too. They go first:
+    /// deleting needs no space and frees some for the rewrite.
+    pub fn scrub(&mut self) -> Result<()> {
+        self.messages.remove_asides()?;
+        self.conversations.remove_asides()?;
+        self.compact()
     }
 
     /// What [`Self::wipe`] WOULD destroy, without destroying it.
@@ -2951,77 +2990,97 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// **PB-023: the old bytes are the contract.** Both files were written by
-    /// the v1 writer — `[u32 LE len][borsh Frame]`, no header, no checksum —
-    /// through this store's own API at `d76ab91`, before the v2 format
-    /// existed, and committed before any decoder changed. They are never
-    /// regenerated: a fixture written through the new code cannot see the old
-    /// format. Every expectation below is a literal from the calls that wrote
-    /// them (an overwrite, a remove, a tombstone flipped three times, an
-    /// indexer row overridden by node truth, a reorg ghost).
+    /// **PB-023: the old bytes are the contract.** The v1 files were written
+    /// by the v1 writer — `[u32 LE len][borsh Frame]`, no header, no checksum —
+    /// through this store's own API at `d76ab91`, before the v2 format existed,
+    /// and committed before any decoder changed. The v2 files were written by
+    /// the same calls through the v2 writer at PRE3-LOG and frozen, so a later
+    /// change to the framing or the checksum turns red too (dependency-steward,
+    /// PRE3-LOG). Neither set is ever regenerated: a fixture written through
+    /// new code cannot see an old format. Every expectation is a literal from
+    /// the calls that wrote them (an overwrite, a remove, a tombstone flipped
+    /// three times, an indexer row overridden by node truth, a reorg ghost).
     #[test]
-    fn the_v1_fixture_written_by_the_v1_writer_loads_whole() {
-        let dir = test_dir("v1-fixture");
-        std::fs::create_dir_all(&dir).unwrap();
-        let conversations: &[u8] = include_bytes!("../tests/fixtures/kvlog_v1/conversations.kvlog");
-        let messages: &[u8] = include_bytes!("../tests/fixtures/kvlog_v1/messages.kvlog");
-        assert_eq!(
-            (conversations.len(), messages.len()),
-            (541, 710),
-            "the committed v1 bytes, unchanged"
-        );
-        std::fs::write(dir.join("conversations.kvlog"), conversations).unwrap();
-        std::fs::write(dir.join("messages.kvlog"), messages).unwrap();
+    fn the_frozen_fixtures_load_whole() {
+        let fixtures = [
+            (
+                "v1",
+                include_bytes!("../tests/fixtures/kvlog_v1/conversations.kvlog").as_slice(),
+                include_bytes!("../tests/fixtures/kvlog_v1/messages.kvlog").as_slice(),
+                (541, 710),
+            ),
+            (
+                "v2",
+                include_bytes!("../tests/fixtures/kvlog_v2/conversations.kvlog").as_slice(),
+                include_bytes!("../tests/fixtures/kvlog_v2/messages.kvlog").as_slice(),
+                (581, 750),
+            ),
+        ];
+        for (version, conversations, messages, lens) in fixtures {
+            let dir = test_dir(&format!("{version}-fixture"));
+            std::fs::create_dir_all(&dir).unwrap();
+            assert_eq!(
+                (conversations.len(), messages.len()),
+                lens,
+                "{version}: the committed bytes, unchanged"
+            );
+            std::fs::write(dir.join("conversations.kvlog"), conversations).unwrap();
+            std::fs::write(dir.join("messages.kvlog"), messages).unwrap();
 
-        let store = TransportStore::load(dir.clone()).unwrap();
+            let store = TransportStore::load(dir.clone()).unwrap();
 
-        let c1 = store.conversation("c1").expect("c1 survives");
-        assert_eq!(c1.status, ConversationStatus::Active, "the later frame won");
-        assert_eq!(c1.their_alias.as_deref(), Some("a1e1b60b5fca"));
-        assert_eq!(c1.last_activity_unix_ms, 30);
-        assert_eq!(c1.my_alias, "0000000000c1");
-        let c2 = store.conversation("c2").expect("c2 survives");
-        assert_eq!(c2.status, ConversationStatus::PendingInbound);
-        assert_eq!(c2.bound_index, 4);
-        assert!(c2.contact_address.is_empty());
-        assert!(
-            store.is_conversation_tombstoned("c2"),
-            "hidden, then shown, then hidden"
-        );
-        assert!(!store.is_conversation_tombstoned("c1"));
-        assert!(
-            store.conversation("c3").is_none(),
-            "the removed row stays removed"
-        );
+            let c1 = store.conversation("c1").expect("c1 survives");
+            assert_eq!(
+                c1.status,
+                ConversationStatus::Active,
+                "{version}: the later frame won"
+            );
+            assert_eq!(c1.their_alias.as_deref(), Some("a1e1b60b5fca"));
+            assert_eq!(c1.last_activity_unix_ms, 30);
+            assert_eq!(c1.my_alias, "0000000000c1");
+            let c2 = store.conversation("c2").expect("c2 survives");
+            assert_eq!(c2.status, ConversationStatus::PendingInbound);
+            assert_eq!(c2.bound_index, 4);
+            assert!(c2.contact_address.is_empty());
+            assert!(
+                store.is_conversation_tombstoned("c2"),
+                "{version}: hidden, shown, hidden"
+            );
+            assert!(!store.is_conversation_tombstoned("c1"));
+            assert!(
+                store.conversation("c3").is_none(),
+                "{version}: the removed row stays removed"
+            );
 
-        let m_in = store.message("m-in").expect("m-in");
-        assert_eq!(m_in.direction, MessageDirection::Inbound);
-        assert_eq!(m_in.provenance, RowSource::NodeScanned);
-        assert_eq!(m_in.wire, WireNamespace::CiphMsg);
-        assert_eq!(m_in.envelope[60], 1);
-        let m_out = store.message("m-out").expect("the outbound row");
-        assert_eq!(m_out.direction, MessageDirection::Outbound);
-        assert_eq!(m_out.provenance, RowSource::Own);
-        assert_eq!(m_out.sealed_to, Some((KeyBranch::Receive, 7)));
-        assert_eq!(m_out.wire, WireNamespace::KChat);
-        assert_eq!(m_out.alias_on_wire, None);
-        assert_eq!(m_out.envelope[60], 2);
-        let m_hs = store.message("m-hs").expect("m-hs");
-        assert_eq!(m_hs.kind, StoredKind::Handshake);
-        assert_eq!(
-            m_hs.provenance,
-            RowSource::NodeScanned,
-            "the override frame won"
-        );
-        assert!(
-            store.message("m-gone").is_none(),
-            "the removed row stays removed"
-        );
-        assert!(store.is_message_tombstoned("m-ghost"));
-        assert_eq!(store.messages_for("c1").len(), 3);
-        assert_eq!(store.messages_for("c2").len(), 1);
+            let m_in = store.message("m-in").expect("m-in");
+            assert_eq!(m_in.direction, MessageDirection::Inbound);
+            assert_eq!(m_in.provenance, RowSource::NodeScanned);
+            assert_eq!(m_in.wire, WireNamespace::CiphMsg);
+            assert_eq!(m_in.envelope[60], 1);
+            let m_out = store.message("m-out").expect("the outbound row");
+            assert_eq!(m_out.direction, MessageDirection::Outbound);
+            assert_eq!(m_out.provenance, RowSource::Own);
+            assert_eq!(m_out.sealed_to, Some((KeyBranch::Receive, 7)));
+            assert_eq!(m_out.wire, WireNamespace::KChat);
+            assert_eq!(m_out.alias_on_wire, None);
+            assert_eq!(m_out.envelope[60], 2);
+            let m_hs = store.message("m-hs").expect("m-hs");
+            assert_eq!(m_hs.kind, StoredKind::Handshake);
+            assert_eq!(
+                m_hs.provenance,
+                RowSource::NodeScanned,
+                "{version}: the override won"
+            );
+            assert!(
+                store.message("m-gone").is_none(),
+                "{version}: the removed row stays removed"
+            );
+            assert!(store.is_message_tombstoned("m-ghost"));
+            assert_eq!(store.messages_for("c1").len(), 3);
+            assert_eq!(store.messages_for("c2").len(), 1);
 
-        let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     /// **F3 on the store that matters most, red at `d76ab91`.** A row written
@@ -3101,6 +3160,88 @@ mod tests {
         let reloaded = TransportStore::load(dir.clone()).unwrap();
         assert!(reloaded.message("tx-kept").is_some());
         assert!(reloaded.message("tx-cleared").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A removal's bytes do not outlive the next start** (F30): a removal
+    /// whose compaction never ran (an erase's own failed, or a lane that only
+    /// removes) is finished by the next load.
+    #[test]
+    fn a_removal_left_uncompacted_is_scrubbed_by_the_next_load() {
+        let dir = test_dir("removal-debt");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        let marker: Vec<u8> = (0..61u8).map(|i| i.wrapping_mul(53) ^ 0x3C).collect();
+        let mut row = message("tx-gone", "c1", 100, 1);
+        row.envelope = marker.clone();
+        store.record_message(row).unwrap();
+        store
+            .record_message(message("tx-kept", "c1", 200, 2))
+            .unwrap();
+        store.remove_message("tx-gone").unwrap();
+        let path = dir.join("messages.kvlog");
+        let holds = |needle: &[u8]| {
+            std::fs::read(&path)
+                .unwrap()
+                .windows(needle.len())
+                .any(|w| w == needle)
+        };
+        assert!(
+            holds(&marker),
+            "removed, not yet compacted: still in the file"
+        );
+        drop(store);
+
+        let reloaded = TransportStore::load(dir.clone()).unwrap();
+        assert!(!holds(&marker), "the next load finished the erase");
+        assert!(reloaded.message("tx-kept").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The message store fails closed over a log it cannot write**: a
+    /// message write that fails is warned past in several lanes, so running on
+    /// a read-only log would lose rows quietly. The file is left untouched.
+    #[test]
+    fn the_store_refuses_to_open_over_a_log_it_cannot_write() {
+        let dir = test_dir("held");
+        std::fs::create_dir_all(&dir).unwrap();
+        let bytes = crate::kvlog::testing::v1_frame_bytes(
+            &borsh::to_vec(&(0u8, message("tx1", "c1", 100, 1))).unwrap(),
+        );
+        std::fs::write(dir.join("messages.kvlog"), &bytes).unwrap();
+        // The migration cannot be written: a directory sits on its temp name.
+        std::fs::create_dir_all(dir.join(".messages.kvlog.tmp")).unwrap();
+
+        assert!(TransportStore::load(dir.clone()).is_err(), "fails closed");
+        assert_eq!(std::fs::read(dir.join("messages.kvlog")).unwrap(), bytes);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A scrub deletes every copy a load kept aside**, a crash's leftover
+    /// temp copy included, and keeps the live rows.
+    #[test]
+    fn a_scrub_deletes_the_copies_a_load_kept_aside() {
+        let dir = test_dir("scrub-asides");
+        let mut store = TransportStore::load(dir.clone()).unwrap();
+        store.record_message(message("tx1", "c1", 100, 1)).unwrap();
+        store.upsert_conversation(conversation("c1", 10)).unwrap();
+        std::fs::write(
+            dir.join("messages.kvlog.unreadable-9-deadbeef"),
+            b"an old copy",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(".conversations.kvlog.unreadable-9-deadbeef.tmp"),
+            b"a crash's leftover",
+        )
+        .unwrap();
+
+        store.scrub().unwrap();
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(!names.iter().any(|n| n.contains("unreadable")), "{names:?}");
+        assert!(store.message("tx1").is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

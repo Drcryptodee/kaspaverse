@@ -2787,45 +2787,69 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// **PB-023: the old bytes are the contract.** Written by the v1 writer —
-    /// `[u32 LE len][borsh StoreFrame]`, a tombstone carrying the raw 32-byte
-    /// txid — through this store at `d76ab91`, before the activity log moved
-    /// onto `kvlog`, and never regenerated. Literal expectations from the calls
-    /// that wrote it: a deposit (written twice), a send, a reorged deposit.
+    /// **PB-023: the old bytes are the contract.** The v1 file was written by
+    /// the v1 writer — `[u32 LE len][borsh StoreFrame]`, a tombstone carrying
+    /// the raw 32-byte txid — through this store at `d76ab91`, before the
+    /// activity log moved onto `kvlog`; the v2 file by the same calls through
+    /// the v2 writer at PRE3-LOG, frozen so a later framing or checksum change
+    /// turns red. Never regenerated. Literal expectations from the calls that
+    /// wrote them: a deposit (written twice), a send, a reorged deposit.
     #[test]
-    fn the_v1_fixture_written_by_the_v1_writer_loads_whole() {
-        let dir = std::env::temp_dir().join(format!("kv-wsync-v1-fixture-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let bytes: &[u8] = include_bytes!("../tests/fixtures/kvlog_v1/activity.kvlog");
-        assert_eq!(bytes.len(), 730, "the committed v1 bytes, unchanged");
-        let path = dir.join("activity.kvlog");
-        std::fs::write(&path, bytes).unwrap();
+    fn the_frozen_fixtures_load_whole() {
+        let fixtures: [(&str, &[u8], usize); 2] = [
+            (
+                "v1",
+                include_bytes!("../tests/fixtures/kvlog_v1/activity.kvlog"),
+                730,
+            ),
+            (
+                "v2",
+                include_bytes!("../tests/fixtures/kvlog_v2/activity.kvlog"),
+                794,
+            ),
+        ];
+        for (version, bytes, len) in fixtures {
+            let dir = std::env::temp_dir()
+                .join(format!("kv-wsync-{version}-fixture-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            assert_eq!(
+                bytes.len(),
+                len,
+                "{version}: the committed bytes, unchanged"
+            );
+            let path = dir.join("activity.kvlog");
+            std::fs::write(&path, bytes).unwrap();
 
-        let store = ActivityStore::load(path).unwrap();
-        let rows = store.list(Some(1_000_000), &HashSet::new(), &HashSet::new());
-        assert_eq!(rows.len(), 2, "the reorged deposit stays removed");
-        let deposit = rows
-            .iter()
-            .find(|r| r.txid == "11".repeat(32))
-            .expect("the deposit");
-        assert_eq!(deposit.direction, ActivityDirection::Incoming);
-        assert_eq!(deposit.value_sompi, 500_000);
-        assert_eq!(deposit.block_daa_score, 1_000);
-        assert_eq!(deposit.unixtime_msec, Some(1_700_000_001_000));
-        let send = rows
-            .iter()
-            .find(|r| r.txid == "22".repeat(32))
-            .expect("the send");
-        assert_eq!(send.direction, ActivityDirection::Outgoing);
-        assert_eq!(send.fee_sompi, Some(1234));
-        assert_eq!(
-            send.counterparty_address,
-            Some(mainnet_address(1).to_string())
-        );
-        assert!(!rows.iter().any(|r| r.txid == "33".repeat(32)));
+            let store = ActivityStore::load(path).unwrap();
+            let rows = store.list(Some(1_000_000), &HashSet::new(), &HashSet::new());
+            assert_eq!(
+                rows.len(),
+                2,
+                "{version}: the reorged deposit stays removed"
+            );
+            let deposit = rows
+                .iter()
+                .find(|r| r.txid == "11".repeat(32))
+                .expect("the deposit");
+            assert_eq!(deposit.direction, ActivityDirection::Incoming);
+            assert_eq!(deposit.value_sompi, 500_000);
+            assert_eq!(deposit.block_daa_score, 1_000);
+            assert_eq!(deposit.unixtime_msec, Some(1_700_000_001_000));
+            let send = rows
+                .iter()
+                .find(|r| r.txid == "22".repeat(32))
+                .expect("the send");
+            assert_eq!(send.direction, ActivityDirection::Outgoing);
+            assert_eq!(send.fee_sompi, Some(1234));
+            assert_eq!(
+                send.counterparty_address,
+                Some(mainnet_address(1).to_string())
+            );
+            assert!(!rows.iter().any(|r| r.txid == "33".repeat(32)));
 
-        let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     /// **F3 on the activity log, red at `d76ab91`.** Its own copy of the replay

@@ -119,7 +119,8 @@ impl BlockList {
     }
 
     /// Block an address. Re-blocking keeps the original `since`. Returns
-    /// whether the entry is new.
+    /// whether the entry is new. In memory only: a change that must last goes
+    /// through [`Self::commit`], which saves before it keeps it.
     pub fn block(&mut self, address: &str, now_unix_ms: u64) -> bool {
         if address.is_empty() {
             return false;
@@ -136,7 +137,8 @@ impl BlockList {
         true
     }
 
-    /// Lift a block. Returns whether there was one.
+    /// Lift a block. Returns whether there was one. In memory only, like
+    /// [`Self::block`]; persist through [`Self::commit`].
     pub fn unblock(&mut self, address: &str) -> bool {
         self.blocked.remove(address).is_some()
     }

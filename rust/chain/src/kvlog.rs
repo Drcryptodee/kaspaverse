@@ -28,9 +28,20 @@
 //! repair never destroys bytes it could not read. [`Log::wipe`] removes the
 //! copies with the log.
 //!
-//! **The writer always writes at the end it knows is good.** Anything past it
-//! (a write that failed half-way in this session) is cut first, so a failed
-//! write cannot hide the next one either.
+//! **The writer always writes at the end it knows is good, and cuts only what
+//! it knows is garbage**: a write of its own that failed half-way, or a tail
+//! its own load classified and could not rewrite away. A failed write
+//! therefore cannot hide the next one either. Bytes some other writer
+//! appended are never cut: the write is refused, loudly. Writing at a
+//! remembered end assumes one writer per file, where the old append mode
+//! tolerated two, so every store keeps one instance per file per process.
+//!
+//! **A log that cannot be made safe to write is served read-only**, never
+//! refused outright and never cut: when the checksum fails its known answer on
+//! this device, when a v1 migration cannot be written, or when unreadable
+//! bytes cannot be copied aside. Its records still load (the wallet must still
+//! open and spend); every write returns `Err`. A store whose writes must not
+//! fail silently refuses a held log at its own load ([`Log::hold`]).
 //!
 //! **Compaction** rewrites the file as one frame per live record plus its
 //! tombstone flag, through the crate's one durable write
@@ -38,7 +49,8 @@
 //! the state it was built from before it replaces anything. It runs at load
 //! when the file is v1, has a tail to cut, or has grown past
 //! [`COMPACT_RATIO`] times its live size and past [`COMPACT_FLOOR`]; and on
-//! demand ([`Log::compact`]) after an erase.
+//! demand ([`Log::compact`]) after an erase, which also deletes the copies
+//! kept aside ([`Log::remove_asides`]).
 //!
 //! **Frame compatibility law** (unchanged by v2, which changed the framing
 //! around the body and never the body): variants are append-only and
@@ -83,7 +95,8 @@ const V1_FRAME_HEADER_LEN: usize = 4;
 /// with a minimum size), which is Kafka's default `min.cleanable.dirty.ratio`
 /// of 0.5 seen from the dead side. Each rewrite resets the file to its live
 /// size, so a byte is rewritten a bounded number of times however long the
-/// log lives, and replay never reads more than twice what it keeps.
+/// log lives, and a load starts from at most twice what the log keeps plus
+/// what the last session appended (the rule runs at load, not between).
 const COMPACT_RATIO: u64 = 2;
 
 /// **The floor under which a log is left to grow.** Fitted on the funded
@@ -98,6 +111,42 @@ const COMPACT_RATIO: u64 = 2;
 /// (618 KB holding 214 KB live), and the acceptance log's old fixed 256 KiB
 /// threshold had never once fired on that phone.
 const COMPACT_FLOOR: u64 = 64 * 1024;
+
+/// The standard CRC-32 check value and a 4 KiB pattern long enough to reach
+/// the accelerated paths, both computed by zlib, an implementation independent
+/// of the one in use.
+const CHECK_VALUE: u32 = 0xCBF4_3926;
+const LONG_PATTERN_CRC: u32 = 0x5D1C_4EE3;
+
+fn long_pattern() -> Vec<u8> {
+    (0..4096u32)
+        .map(|i| i.wrapping_mul(31).wrapping_add(7) as u8)
+        .collect()
+}
+
+/// **The checksum is checked before it judges anything.** A broken
+/// implementation (a dependency update that changed the output, a faulty
+/// hardware path) would fail every frame of every file, and a load would read
+/// the logs as empty and cut them. So the known answers are asserted once per
+/// process, on this device's own code path (the phone takes crc32fast's
+/// hardware-CRC route, which the host gate never runs); if they fail, logs are
+/// read without the checksum and served read-only.
+fn checksum_holds() -> bool {
+    #[cfg(test)]
+    if testing::CHECKSUM_BROKEN.with(|broken| broken.get()) {
+        return false;
+    }
+    static HOLDS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *HOLDS.get_or_init(|| {
+        crc32fast::hash(b"123456789") == CHECK_VALUE
+            && crc32fast::hash(&long_pattern()) == LONG_PATTERN_CRC
+    })
+}
+
+/// The growth rule, alone so its boundaries can be tested.
+fn grown(file_len: u64, live_len: u64) -> bool {
+    file_len > COMPACT_FLOOR && file_len > COMPACT_RATIO.saturating_mul(live_len)
+}
 
 fn encode<B: BorshSerialize>(value: &B) -> Result<Vec<u8>> {
     borsh::to_vec(value).map_err(|e| ChainError::Message(format!("kvlog encode: {e}")))
@@ -164,6 +213,9 @@ struct Replayed<T> {
     records: HashMap<String, T>,
     tombstoned: HashSet<String>,
     frames: usize,
+    /// Whether any `Remove` frame was replayed: a removed record's bytes are
+    /// still in the file.
+    removed: bool,
     /// Byte offset just past the last good frame.
     good_end: usize,
     tail: Tail,
@@ -174,6 +226,13 @@ struct Replayed<T> {
 /// Read one v2 frame at the start of `bytes`: `(body, frame length)` when its
 /// length fits and its checksum holds.
 fn v2_frame_at(bytes: &[u8]) -> Option<(&[u8], usize)> {
+    v2_frame_checked(bytes, true)
+}
+
+/// [`v2_frame_at`], with the checksum comparison skippable: only for reading
+/// a log read-only when the checksum implementation itself failed its known
+/// answers, never for judging a tail.
+fn v2_frame_checked(bytes: &[u8], verify: bool) -> Option<(&[u8], usize)> {
     if bytes.len() < FRAME_HEADER_LEN {
         return None;
     }
@@ -182,7 +241,7 @@ fn v2_frame_at(bytes: &[u8]) -> Option<(&[u8], usize)> {
     let crc = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
     let end = FRAME_HEADER_LEN.checked_add(len)?;
     let body = bytes.get(FRAME_HEADER_LEN..end)?;
-    (frame_crc(&len_bytes, body) == crc).then_some((body, end))
+    (!verify || frame_crc(&len_bytes, body) == crc).then_some((body, end))
 }
 
 fn tombstone_frame_len(key: &str) -> u64 {
@@ -196,11 +255,13 @@ fn replay<T: BorshDeserialize>(
     bytes: &[u8],
     key_of: fn(&T) -> String,
     v1: fn(&[u8]) -> Option<Frame<T>>,
+    verify: bool,
 ) -> Result<Replayed<T>> {
     let mut records = HashMap::new();
     let mut tombstoned = HashSet::new();
     let mut sizes: HashMap<String, u64> = HashMap::new();
     let mut frames = 0;
+    let mut removed = false;
 
     let (format, mut at) = if bytes.is_empty() {
         (Format::Empty, 0)
@@ -229,7 +290,7 @@ fn replay<T: BorshDeserialize>(
                 if at == 0 {
                     break; // a torn file header
                 }
-                let Some((body, step)) = v2_frame_at(rest) else {
+                let Some((body, step)) = v2_frame_checked(rest, verify) else {
                     break;
                 };
                 let Ok(frame) = Frame::<T>::try_from_slice(body) else {
@@ -261,6 +322,7 @@ fn replay<T: BorshDeserialize>(
                 records.remove(&key);
                 tombstoned.remove(&key);
                 sizes.remove(&key);
+                removed = true;
             }
             Frame::Tombstone(key) => {
                 tombstoned.insert(key);
@@ -285,6 +347,7 @@ fn replay<T: BorshDeserialize>(
         records,
         tombstoned,
         frames,
+        removed,
         good_end: at,
         tail,
         live_len,
@@ -315,12 +378,23 @@ fn classify(format: Format, rest: &[u8]) -> Tail {
             // A checksum-valid frame at the stop (whose body would not decode:
             // something wrote it whole) or anywhere after it (LevelDB's reader
             // resyncs the same way, on its block boundaries) is data behind a
-            // bad frame. A false match is a 2^-32 event per offset. Without
-            // one, nothing here can be read by anyone: a tear.
+            // bad frame. A false match is a 2^-32 event per offset.
             if (0..n).any(|i| v2_frame_at(&rest[i..]).is_some()) {
-                Tail::Unreadable(n)
-            } else {
+                return Tail::Unreadable(n);
+            }
+            if n < FRAME_HEADER_LEN {
+                return Tail::Torn(n);
+            }
+            // **A tear is at most one frame**: one append was in flight when
+            // the process died, so its declared extent reaches the end of the
+            // file. Anything longer is not a tear, and is kept: it is what a
+            // checksum failing on EVERY frame looks like (the dependency
+            // steward's case), and cutting it would empty the log.
+            let len = u32::from_le_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
+            if FRAME_HEADER_LEN.saturating_add(len) >= n {
                 Tail::Torn(n)
+            } else {
+                Tail::Unreadable(n)
             }
         }
     }
@@ -336,6 +410,16 @@ pub(crate) struct Log<T> {
     /// Where the next frame goes: just past the last frame this log knows is
     /// good. Zero means the file holds nothing yet, header included.
     end: u64,
+    /// The bytes past [`Self::end`] are this log's own garbage, and the next
+    /// write may cut them: a write of its own failed, or its load classified a
+    /// tail it could not rewrite away. Anything past the end without this is
+    /// another writer's, and is never cut.
+    cut_owed: bool,
+    /// Why this log is read-only, when it is. See the module docs.
+    held: Option<&'static str>,
+    /// A `Remove` frame is in the file, so a removed record's bytes are too:
+    /// replayed at load, or written since the last compaction.
+    removed: bool,
 }
 
 impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
@@ -355,13 +439,17 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(e) => return Err(e.into()),
         };
-        let found = replay(&bytes, key_of, v1)?;
+        let verify = checksum_holds();
+        let found = replay(&bytes, key_of, v1, verify)?;
         let mut log = Self {
             path,
             key_of,
             records: found.records,
             tombstoned: found.tombstoned,
             end: found.good_end as u64,
+            cut_owed: false,
+            held: None,
+            removed: found.removed,
         };
         if found.format == Format::Empty {
             return Ok(log);
@@ -369,10 +457,31 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
         let name = log.name();
         let file_len = bytes.len() as u64;
 
+        if !verify {
+            // Frames were read on their lengths alone, as v1 always was. Judge
+            // nothing and write nothing: a write would carry a wrong checksum
+            // and a cut would trust one.
+            log.held = Some("the checksum fails its known answers on this device");
+            log::error!(
+                "kvlog: {name}: the checksum fails its known answers here — {} record(s) read \
+                 unverified, the log is read-only and nothing was cut",
+                log.records.len()
+            );
+            return Ok(log);
+        }
+
         if let Tail::Unreadable(n) = found.tail {
             // Nothing is cut until these bytes are safe somewhere else.
-            let aside = log.aside_path();
-            atomic_write(&aside, &bytes)?;
+            let aside = log.aside_path(&bytes);
+            if let Err(e) = atomic_write(&aside, &bytes) {
+                log.held = Some("unreadable bytes could not be copied aside");
+                log::error!(
+                    "kvlog: {name}: {n} unreadable byte(s) after byte {} could not be copied \
+                     aside ({e}) — the log is read-only and nothing was cut",
+                    found.good_end
+                );
+                return Ok(log);
+            }
             log::warn!(
                 "kvlog: {name}: {n} unreadable byte(s) after byte {} ({} frame(s) kept) — the \
                  whole file is copied aside as {} before the cut",
@@ -382,7 +491,7 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
             );
         }
 
-        let grown = file_len > COMPACT_FLOOR && file_len > COMPACT_RATIO * found.live_len;
+        let grown = grown(file_len, found.live_len);
         let why = match (found.format, found.tail, grown) {
             (Format::V1, _, _) => Some("migrated v1 → v2"),
             (_, Tail::Torn(_), _) => Some("torn tail cut"),
@@ -402,18 +511,52 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
                     log.tombstoned.len(),
                     log.end
                 ),
-                // Only the migration must happen before the next write: a v2
-                // frame behind v1 bytes would be unreadable. A tear is cut by
-                // the next write anyway, and growth only costs replay time.
-                Err(e) if found.format == Format::V1 => return Err(e),
-                Err(e) => log::warn!(
-                    "kvlog: {name}: {why} failed ({e}) — kept the file; the next write lands at \
-                     byte {}",
-                    log.end
-                ),
+                // A v2 frame behind v1 bytes would be unreadable, so an
+                // unmigrated v1 log takes no write until a load migrates it;
+                // its records are still served (the wallet must still open).
+                Err(e) if found.format == Format::V1 => {
+                    log.held = Some("the v1 file could not be migrated");
+                    log::error!(
+                        "kvlog: {name}: the v1 → v2 migration failed ({e}) — {} record(s) \
+                         served read-only until a later load migrates the file",
+                        log.records.len()
+                    );
+                }
+                // A tear's bytes are ours to cut at the next write; growth only
+                // costs replay time.
+                Err(e) => {
+                    log.cut_owed = found.tail != Tail::Clean;
+                    log::warn!(
+                        "kvlog: {name}: {why} failed ({e}) — kept the file; the next write \
+                         lands at byte {}",
+                        log.end
+                    );
+                }
             }
         }
         Ok(log)
+    }
+
+    /// Why this log is read-only, when it is. A store whose writes must never
+    /// fail silently refuses to open over a held log.
+    pub(crate) fn hold(&self) -> Option<&'static str> {
+        self.held
+    }
+
+    /// Whether a removed record's bytes are still in the file: a `Remove`
+    /// frame replayed at load or written since the last compaction.
+    pub(crate) fn holds_removed(&self) -> bool {
+        self.removed
+    }
+
+    fn refuse_if_held(&self) -> Result<()> {
+        match self.held {
+            Some(why) => Err(ChainError::Message(format!(
+                "kvlog: {} is read-only ({why})",
+                self.name()
+            ))),
+            None => Ok(()),
+        }
     }
 
     fn name(&self) -> String {
@@ -427,16 +570,20 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
         format!("{}.unreadable-", self.name())
     }
 
-    fn aside_path(&self) -> PathBuf {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        self.path
-            .with_file_name(format!("{}{now_ms}", self.aside_prefix()))
+    /// Named by the file's length and checksum, so a load retried over the
+    /// same bytes (a migration failing on a full disk at every start) writes
+    /// the same copy again instead of another one.
+    fn aside_path(&self, bytes: &[u8]) -> PathBuf {
+        self.path.with_file_name(format!(
+            "{}{}-{:08x}",
+            self.aside_prefix(),
+            bytes.len(),
+            crc32fast::hash(bytes)
+        ))
     }
 
-    /// The copies a load kept of files it could not read whole.
+    /// The copies a load kept of files it could not read whole, and the temp
+    /// file a crash can leave mid-copy (`.<name>.unreadable-….tmp`).
     fn asides(&self) -> Result<Vec<PathBuf>> {
         let Some(dir) = self.path.parent() else {
             return Ok(Vec::new());
@@ -447,18 +594,33 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
             Err(e) => return Err(e.into()),
         };
         let prefix = self.aside_prefix();
+        let temp = format!(".{prefix}");
         let mut out = Vec::new();
         for entry in entries {
             let entry = entry?;
-            if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(&prefix) || name.starts_with(&temp) {
                 out.push(entry.path());
             }
         }
         Ok(out)
     }
 
-    /// Write one frame at [`Self::end`], cutting anything past it first.
+    /// Delete every copy a load kept aside, and say how many. An erase the
+    /// user asked for reaches them too: no product surface reads them, and
+    /// they hold everything the log held, the erased words included.
+    pub(crate) fn remove_asides(&self) -> Result<usize> {
+        let asides = self.asides()?;
+        for aside in &asides {
+            std::fs::remove_file(aside)?;
+        }
+        Ok(asides.len())
+    }
+
+    /// Write one frame at [`Self::end`], cutting first only bytes this log
+    /// owns (see [`Self::cut_owed`]).
     fn append(&mut self, body: &[u8]) -> Result<()> {
+        self.refuse_if_held()?;
         let mut buf = Vec::with_capacity(FILE_HEADER_LEN + FRAME_HEADER_LEN + body.len());
         if self.end == 0 {
             push_file_header(&mut buf);
@@ -484,14 +646,47 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
             )));
         }
         if on_disk > self.end {
-            // Bytes this log never acknowledged: a write that failed half-way.
-            // Left in place, the frame below would land behind them (F3).
+            if !self.cut_owed {
+                // Not ours: another writer appended (a second instance of this
+                // log, which the stores exist to prevent). Cutting would
+                // destroy its frames, and writing over them would too.
+                log::error!(
+                    "kvlog: {} is {on_disk} bytes but this log wrote {} — another writer; \
+                     refusing to cut or write",
+                    self.name(),
+                    self.end
+                );
+                return Err(ChainError::Message(format!(
+                    "kvlog: {} grew behind this log — refusing to write over another writer",
+                    self.name()
+                )));
+            }
+            // Our own garbage: a write that failed half-way, or the tail our
+            // load classified. Left in place, the frame below would land behind
+            // it (F3).
             file.set_len(self.end)?;
         }
         file.seek(SeekFrom::Start(self.end))?;
-        file.write_all(&buf)?;
-        file.sync_all()?;
+        let mut write = || -> std::io::Result<()> {
+            // The test seam: a write that stops half-way, as a full disk does,
+            // failing through the same branch below as a real one.
+            #[cfg(test)]
+            if let Some(n) = testing::FAIL_WRITE_AFTER.with(|f| f.take()) {
+                file.write_all(&buf[..n.min(buf.len())])?;
+                return Err(std::io::Error::other(
+                    "injected: the write stopped half-way",
+                ));
+            }
+            file.write_all(&buf)?;
+            file.sync_all()
+        };
+        if let Err(e) = write() {
+            // Some of these bytes may be on disk: ours to cut next time.
+            self.cut_owed = true;
+            return Err(e.into());
+        }
         self.end += buf.len() as u64;
+        self.cut_owed = false;
         Ok(())
     }
 
@@ -534,6 +729,7 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
             self.append(&encode(&Frame::<T>::Remove(key.to_string()))?)?;
             self.records.remove(key);
             self.tombstoned.remove(key);
+            self.removed = true;
         }
         Ok(())
     }
@@ -586,13 +782,14 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
     /// object, and an absent parent directory is a different failure to
     /// diagnose than an empty file.
     pub(crate) fn wipe(&mut self) -> Result<()> {
-        for aside in self.asides()? {
-            std::fs::remove_file(&aside)?;
-        }
+        self.refuse_if_held()?;
+        self.remove_asides()?;
         atomic_write(&self.path, &[])?;
         self.records.clear();
         self.tombstoned.clear();
         self.end = 0;
+        self.cut_owed = false;
+        self.removed = false;
         Ok(())
     }
 
@@ -620,8 +817,9 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
     /// whose decoder does not give back what its encoder wrote would
     /// otherwise be lost by the very rewrite meant to keep it.
     pub(crate) fn compact(&mut self) -> Result<()> {
+        self.refuse_if_held()?;
         let image = self.image()?;
-        let check = replay(&image, self.key_of, v1_frame::<T>)?;
+        let check = replay(&image, self.key_of, v1_frame::<T>, true)?;
         let same = check.format == Format::V2
             && check.tail == Tail::Clean
             && check.tombstoned == self.tombstoned
@@ -641,6 +839,8 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
         }
         atomic_write(&self.path, &image)?;
         self.end = image.len() as u64;
+        self.cut_owed = false;
+        self.removed = false;
         Ok(())
     }
 }
@@ -650,6 +850,23 @@ impl<T: BorshSerialize + BorshDeserialize + Clone> Log<T> {
 /// recomputed, so a test can reach the record decoder past the checksum.
 #[cfg(test)]
 pub(crate) mod testing {
+    thread_local! {
+        /// Make the next frame write on this thread stop after this many
+        /// bytes and fail, the way a full disk does. Thread-local, so a test
+        /// arms only its own writes.
+        pub(crate) static FAIL_WRITE_AFTER: std::cell::Cell<Option<usize>> =
+            const { std::cell::Cell::new(None) };
+
+        /// Make the checksum self-check fail on this thread: the device case
+        /// the host cannot produce, a crc32fast path that gives wrong answers.
+        pub(crate) static CHECKSUM_BROKEN: std::cell::Cell<bool> =
+            const { std::cell::Cell::new(false) };
+    }
+
+    pub(crate) fn fail_next_write_after(bytes: usize) {
+        FAIL_WRITE_AFTER.with(|f| f.set(Some(bytes)));
+    }
+
     /// One v1 frame: `[u32 LE len][body]`. The old framing, kept only to
     /// hand-write old bytes.
     pub(crate) fn v1_frame_bytes(body: &[u8]) -> Vec<u8> {
@@ -986,11 +1203,13 @@ mod tests {
             "the copy is the file as found"
         );
 
+        let leftover = path.with_file_name(".test.kvlog.unreadable-7-00000000.tmp");
+        std::fs::write(&leftover, b"a copy a crash cut short").unwrap();
         log.wipe().unwrap();
         assert_eq!(
             files_in(&path),
             ["test.kvlog"],
-            "the wipe removes the copy too"
+            "the wipe removes the copy, and a crash's leftover temp copy too"
         );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
@@ -1137,12 +1356,41 @@ mod tests {
         let path = test_path("half-written");
         let mut log = Log::load(path.clone(), key_of).unwrap();
         log.upsert("a".into(), row("a", 1)).unwrap();
-        // The half of a frame this session failed to finish.
-        tear(&path, &[200, 0, 0, 0, 1, 2]);
-        log.upsert("b".into(), row("b", 2)).unwrap();
+        testing::fail_next_write_after(6);
+        assert!(
+            log.upsert("b".into(), row("b", 2)).is_err(),
+            "the half-finished write fails"
+        );
+        assert!(!log.records.contains_key("b"), "and is not a record");
+        log.upsert("c".into(), row("c", 3)).unwrap();
 
         let again = Log::load(path.clone(), key_of).unwrap();
-        assert_eq!(sorted_keys(&again), ["a", "b"]);
+        assert_eq!(sorted_keys(&again), ["a", "c"]);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// **Another writer's frames are refused, never cut** (wallet-security and
+    /// consensus, PRE3-LOG). A second instance of a log on the same file used
+    /// to be harmless under append mode; writing at a remembered end would
+    /// destroy its frames, so a file that grew behind this log is not touched.
+    #[test]
+    fn another_writer_s_frames_are_refused_never_cut() {
+        let path = test_path("two-writers");
+        let mut first = Log::load(path.clone(), key_of).unwrap();
+        first.upsert("a".into(), row("a", 1)).unwrap();
+        let mut second = Log::load(path.clone(), key_of).unwrap();
+        second.upsert("b".into(), row("b", 2)).unwrap();
+
+        assert!(
+            first.upsert("c".into(), row("c", 3)).is_err(),
+            "refused, loudly"
+        );
+        let reloaded = Log::load(path.clone(), key_of).unwrap();
+        assert_eq!(
+            sorted_keys(&reloaded),
+            ["a", "b"],
+            "the other writer's frame survives"
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
@@ -1174,6 +1422,207 @@ mod tests {
         assert!(log.upsert("b".into(), row("b", 2)).is_err());
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 0, "nothing padded");
         assert!(!log.records.contains_key("b"));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// **The checksum gives the standard answers** (dependency-steward,
+    /// PRE3-LOG): the CRC-32 check value and a 4 KiB pattern, both computed by
+    /// zlib. A dependency update that changed the output turns this red before
+    /// it can make every frame on every phone fail. The same check runs once
+    /// per process on the device's own code path.
+    #[test]
+    fn the_checksum_gives_the_standard_answers() {
+        assert_eq!(crc32fast::hash(b"123456789"), CHECK_VALUE);
+        assert_eq!(crc32fast::hash(&long_pattern()), LONG_PATTERN_CRC);
+        assert!(checksum_holds());
+        assert_ne!(
+            frame_crc(&[0; 4], &[]),
+            0,
+            "a header of zeros is never a valid frame"
+        );
+    }
+
+    /// **The growth rule at its boundaries**: strictly past the floor, and
+    /// strictly past twice the live size. (The consensus auditor's mutants
+    /// found both comparisons and the ratio unpinned.)
+    #[test]
+    fn the_growth_rule_holds_at_its_boundaries() {
+        assert!(!grown(COMPACT_FLOOR, 100), "at the floor: left alone");
+        assert!(grown(COMPACT_FLOOR + 1, 100), "past it: compacted");
+        let live = COMPACT_FLOOR; // above the floor, the ratio decides
+        assert!(
+            !grown(live * 3 / 2, live),
+            "one and a half times live: left alone"
+        );
+        assert!(!grown(2 * live, live), "exactly twice live: left alone");
+        assert!(grown(2 * live + 1, live), "past twice live: compacted");
+    }
+
+    /// **A checksum failing on every frame is not a tear**: one append is in
+    /// flight when a process dies, so a tear is at most one frame. A file
+    /// whose every checksum fails (a broken implementation, the steward's
+    /// case) is kept whole aside rather than cut to nothing.
+    #[test]
+    fn a_file_whose_every_checksum_fails_is_kept_aside_not_emptied() {
+        let path = test_path("all-crc-bad");
+        let mut log = Log::load(path.clone(), key_of).unwrap();
+        for id in ["a", "b", "c"] {
+            log.upsert(id.into(), row(id, 1)).unwrap();
+        }
+        let mut bytes = std::fs::read(&path).unwrap();
+        let mut at = FILE_HEADER_LEN;
+        while at + FRAME_HEADER_LEN <= bytes.len() {
+            let len = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+            bytes[at + 4] ^= 0xFF; // every frame's checksum
+            at += FRAME_HEADER_LEN + len;
+        }
+        std::fs::write(&path, &bytes).unwrap();
+
+        let reloaded = Log::load(path.clone(), key_of).unwrap();
+        assert!(
+            reloaded.records.is_empty(),
+            "point in time: nothing before the first frame"
+        );
+        let names = files_in(&path);
+        assert_eq!(
+            std::fs::read(path.with_file_name(aside_in(&names))).unwrap(),
+            bytes,
+            "every byte is kept aside"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// **A migration that cannot be written serves the records read-only**
+    /// (wallet-security, PRE3-LOG): the wallet's activity log must still open
+    /// so the wallet can spend, and no v2 frame may land behind v1 bytes. A
+    /// later load migrates it.
+    #[test]
+    fn a_failed_migration_serves_the_records_read_only() {
+        let path = test_path("migrate-fails");
+        let mut bytes = Vec::new();
+        for frame in [Frame::Upsert(row("a", 1)), Frame::Upsert(row("b", 2))] {
+            bytes.extend_from_slice(&testing::v1_frame_bytes(&borsh::to_vec(&frame).unwrap()));
+        }
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        // The durable write cannot create its temp file: a directory sits on
+        // the name.
+        let blocker = path.with_file_name(".test.kvlog.tmp");
+        std::fs::create_dir_all(&blocker).unwrap();
+
+        let mut log = Log::load(path.clone(), key_of).unwrap();
+        assert_eq!(sorted_keys(&log), ["a", "b"], "the records are served");
+        assert!(log.hold().is_some(), "read-only");
+        assert!(log.upsert("c".into(), row("c", 3)).is_err());
+        assert!(log.compact().is_err());
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            bytes,
+            "the v1 file is untouched"
+        );
+
+        std::fs::remove_dir(&blocker).unwrap();
+        let migrated = Log::load(path.clone(), key_of).unwrap();
+        assert!(migrated.hold().is_none());
+        assert_eq!(
+            &std::fs::read(&path).unwrap()[..4],
+            b"KVLG",
+            "a later load migrates"
+        );
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Unreadable bytes that cannot be copied aside are not cut: the log is
+    /// served read-only and the file left exactly as it was.
+    #[test]
+    fn unreadable_bytes_that_cannot_be_copied_aside_hold_the_log() {
+        let path = test_path("aside-fails");
+        let mut log = Log::load(path.clone(), key_of).unwrap();
+        log.upsert("a".into(), row("a", 1)).unwrap();
+        let after_a = std::fs::metadata(&path).unwrap().len() as usize;
+        log.upsert("b".into(), row("b", 2)).unwrap();
+        log.upsert("c".into(), row("c", 3)).unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[after_a + FRAME_HEADER_LEN + 6] ^= 0x01; // inside b's body: c stays behind it
+        std::fs::write(&path, &bytes).unwrap();
+        let temp = path.with_file_name(format!(
+            ".test.kvlog.unreadable-{}-{:08x}.tmp",
+            bytes.len(),
+            crc32fast::hash(&bytes)
+        ));
+        std::fs::create_dir_all(&temp).unwrap();
+
+        let mut held = Log::load(path.clone(), key_of).unwrap();
+        assert_eq!(sorted_keys(&held), ["a"]);
+        assert!(held.hold().is_some());
+        assert!(held.upsert("d".into(), row("d", 4)).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "nothing was cut");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// **A checksum that fails its known answers judges nothing and writes
+    /// nothing.** The records still load, on their lengths alone as v1 always
+    /// did, so the wallet still opens; the log is read-only; neither a v2 file
+    /// nor a v1 file awaiting migration is touched.
+    #[test]
+    fn a_broken_checksum_serves_the_records_read_only_and_touches_nothing() {
+        let v2 = test_path("crc-broken-v2");
+        let mut log = Log::load(v2.clone(), key_of).unwrap();
+        log.upsert("a".into(), row("a", 1)).unwrap();
+        log.upsert("b".into(), row("b", 2)).unwrap();
+        let v2_bytes = std::fs::read(&v2).unwrap();
+
+        let v1 = test_path("crc-broken-v1");
+        let v1_bytes =
+            testing::v1_frame_bytes(&borsh::to_vec(&Frame::Upsert(row("c", 3))).unwrap());
+        std::fs::create_dir_all(v1.parent().unwrap()).unwrap();
+        std::fs::write(&v1, &v1_bytes).unwrap();
+
+        testing::CHECKSUM_BROKEN.with(|broken| broken.set(true));
+        let mut held = Log::load(v2.clone(), key_of).unwrap();
+        let mut unmigrated = Log::load(v1.clone(), key_of).unwrap();
+        testing::CHECKSUM_BROKEN.with(|broken| broken.set(false));
+
+        assert_eq!(
+            sorted_keys(&held),
+            ["a", "b"],
+            "read unverified, not dropped"
+        );
+        assert!(held.hold().is_some());
+        assert!(held.upsert("x".into(), row("x", 9)).is_err());
+        assert_eq!(
+            std::fs::read(&v2).unwrap(),
+            v2_bytes,
+            "nothing judged, nothing cut"
+        );
+        assert_eq!(sorted_keys(&unmigrated), ["c"]);
+        assert!(
+            unmigrated.compact().is_err(),
+            "no migration under a broken checksum"
+        );
+        assert_eq!(std::fs::read(&v1).unwrap(), v1_bytes);
+        let _ = std::fs::remove_dir_all(v2.parent().unwrap());
+        let _ = std::fs::remove_dir_all(v1.parent().unwrap());
+    }
+
+    /// A removal marks the file until a compaction drops the removed bytes,
+    /// and a load reads the mark from the file itself.
+    #[test]
+    fn a_removal_marks_the_file_until_a_compaction() {
+        let path = test_path("removed-mark");
+        let mut log = Log::load(path.clone(), key_of).unwrap();
+        log.upsert("a".into(), row("a", 1)).unwrap();
+        assert!(!log.holds_removed());
+        log.remove("a").unwrap();
+        assert!(log.holds_removed());
+        assert!(Log::<Row>::load(path.clone(), key_of)
+            .unwrap()
+            .holds_removed());
+        log.compact().unwrap();
+        assert!(!log.holds_removed());
+        assert!(!Log::<Row>::load(path.clone(), key_of)
+            .unwrap()
+            .holds_removed());
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
