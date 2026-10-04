@@ -15,6 +15,7 @@ You need:
 | cargo-ndk | 4.1.2 |
 | cargo-deny | 0.19.8 |
 | flutter_rust_bridge_codegen | 2.12.0 |
+| cargo-expand | 1.0.124 (the codegen runs it) |
 | JDK | 21 |
 
 These are the versions CI installs (`.github/workflows/gate.yml`). `tools/gate.sh` compares

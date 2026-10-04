@@ -916,7 +916,20 @@ fi
 if [ -f "$ROOT/flutter_rust_bridge.yaml" ]; then
   if command -v flutter_rust_bridge_codegen >/dev/null 2>&1; then
     codegen_drift() {
-      flutter_rust_bridge_codegen generate >/dev/null 2>&1 || return 1
+      # FRB runs `cargo metadata` and `cargo expand` itself, without `--locked`, so
+      # a stale Cargo.lock would be rewritten here and the next run judge it. The
+      # lock is snapshotted, restored if the generator moved it, and that fails.
+      local lock="$ROOT/rust/Cargo.lock" snap gen_rc=0
+      snap="$(mktemp)" || return 1
+      cp "$lock" "$snap"
+      flutter_rust_bridge_codegen generate >/dev/null 2>&1 || gen_rc=1
+      if ! cmp -s "$lock" "$snap"; then
+        cp "$snap" "$lock"; rm -f "$snap"
+        echo "   the code generator rewrote rust/Cargo.lock (restored): the committed lock is stale"
+        return 1
+      fi
+      rm -f "$snap"
+      [ "$gen_rc" -eq 0 ] || return 1
       # BOTH generated trees: the Dart bindings AND the Rust side. gate.sh
       # regenerates before cargo builds, so a stale committed frb_generated.rs
       # is invisible to every earlier check — only this diff can see it (L61).
@@ -1110,6 +1123,12 @@ toolchain_pins() {
   # The `kotlin compile` lane's compiler. MAJOR version only: the workflow pins
   # a track ('21') and runners move the patch level under us, so comparing the
   # full string would make this a permanent false alarm — and a warning that is
+  # FRB runs `cargo expand`, and installs the newest one unpinned when it is
+  # missing, so the version it runs is pinned like the codegen itself.
+  want="$(pins_expected "$WF" 's/.*cargo install cargo-expand --version \([0-9][0-9.]*\).*/\1/p')"
+  got="$(cargo expand --version 2>/dev/null | awk '{print $2}')"
+  _pin_cmp "cargo-expand (gate.yml)" "$want" "$got"
+
   # always on is the L84 sin this whole check exists to end.
   want="$(pins_expected "$WF" "s/.*java-version:[[:space:]]*'\([0-9][0-9.]*\)'.*/\1/p")"
   got="$(java -version 2>&1 | head -1 | sed -n 's/.*version "\([0-9]*\).*/\1/p')"

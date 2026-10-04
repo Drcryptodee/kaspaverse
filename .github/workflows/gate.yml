@@ -101,7 +101,7 @@ jobs:
         uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: ~/ci-tools
-          key: ci-tools-${{ runner.os }}-deny0.19.8-ndk4.1.2-frb2.12.0
+          key: ci-tools-${{ runner.os }}-deny0.19.8-ndk4.1.2-frb2.12.0-expand1.0.124
 
       - name: Restore cargo registry + build artifacts
         id: rust-cache
@@ -125,6 +125,10 @@ jobs:
             cargo install cargo-ndk --version 4.1.2 --locked --root "$HOME/ci-tools"
           command -v flutter_rust_bridge_codegen >/dev/null || \
             cargo install flutter_rust_bridge_codegen --version 2.12.0 --locked --root "$HOME/ci-tools"
+          # The codegen runs `cargo expand`, and when it is missing it installs the
+          # newest release itself, unpinned and unlocked, on every run.
+          command -v cargo-expand >/dev/null || \
+            cargo install cargo-expand --version 1.0.124 --locked --root "$HOME/ci-tools"
 
       - name: Set up Flutter (pinned — codegen-drift check needs this exact version)
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
@@ -180,7 +184,7 @@ jobs:
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
           path: ~/ci-tools
-          key: ci-tools-${{ runner.os }}-deny0.19.8-ndk4.1.2-frb2.12.0
+          key: ci-tools-${{ runner.os }}-deny0.19.8-ndk4.1.2-frb2.12.0-expand1.0.124
 
       - name: Save cargo registry + build artifacts
         if: always() && steps.rust-cache.outputs.cache-hit != 'true'
