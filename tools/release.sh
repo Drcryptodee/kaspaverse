@@ -116,6 +116,11 @@ SHIPPED="$(tools/shipped_toolchain.sh "$APK")" \
   || { printf '%s\n' "$SHIPPED" >&2; die "the native library was not compiled by the pinned toolchain"; }
 printf '%s\n' "$SHIPPED"
 
+# And the unsafe code in the library the APK carries: cargokit's release build,
+# read from the dep-info it wrote, not the debug build the gate compiles.
+tools/bridge_unsafe.sh build/kaspaverse_bridge/build/aarch64-linux-android/release/deps/kaspaverse_bridge.d \
+  || die "the shipped library's unsafe code is not the pinned set"
+
 # The versionCode must be the commit count the build was meant to stamp: a lower
 # one is refused as an update on every phone that has a newer build, and the
 # usual way past that refusal, an uninstall, loses the wallet without its words.
