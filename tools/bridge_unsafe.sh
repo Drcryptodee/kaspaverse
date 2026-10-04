@@ -94,7 +94,12 @@ if [ -z "$so" ] || [ ! -f "$so" ]; then
   echo "   the dep-info names no built libkaspaverse_bridge.so, so its exports cannot be read"
   exit 1
 fi
-symbols="$(readelf --dyn-syms -W "$so" 2>/dev/null \
+if ! dynsyms="$(readelf --dyn-syms -W "$so" 2>&1)"; then
+  echo "   readelf could not read the exports of ${so#"$ROOT"/}:"
+  printf '%s\n' "$dynsyms" | head -3 | sed 's/^/     /'
+  exit 1
+fi
+symbols="$(printf '%s\n' "$dynsyms" \
   | awk '$7 != "UND" && ($8 ~ /^Java_/ || $8 ~ /^JNI_On/) { print $8 }' | sort -u)"
 want_symbols='Java_org_kaspaverse_app_VaultBridge_nativeExportSeedForKeystore
 Java_org_kaspaverse_app_VaultBridge_nativeInstallVaultPepper
