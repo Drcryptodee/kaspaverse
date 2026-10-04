@@ -148,6 +148,26 @@ if command -v gh >/dev/null 2>&1 && timeout 10 gh auth status >/dev/null 2>&1; t
     fi
   fi
 fi
+# Advisories beyond cargo-deny. cargo-deny reads the RustSec database only, so an
+# advisory published only on GitHub against a crate, and every advisory against a
+# Dart package or a GitHub Action, never reaches the gate. GitHub's dependency alerts
+# cover all three graphs; the open ones are printed at every session start, so a new
+# one is a mismatch against the expected state and is triaged in the sitting it
+# appears. Silent without an authenticated `gh` (a public clone); a failed call says
+# so rather than reading as none.
+if command -v gh >/dev/null 2>&1 && timeout 10 gh auth status >/dev/null 2>&1; then
+  if ADV=$(timeout 20 gh api --paginate "repos/{owner}/{repo}/dependabot/alerts?state=open&per_page=100" \
+             --jq '.[] | "\(.dependency.package.ecosystem)\t\(.dependency.package.name)"' 2>/dev/null); then
+    if [ -z "$ADV" ]; then
+      echo "• advisories: dependabot 0 open"
+    else
+      echo "• advisories: dependabot $(printf '%s\n' "$ADV" | grep -c '') open ($(printf '%s\n' "$ADV" | cut -f1 | sort | uniq -c \
+        | awk '{printf "%s%s %s", sep, $2, $1; sep=" · "}')): $(printf '%s\n' "$ADV" | cut -f2 | sort -u | paste -sd, - | sed 's/,/, /g')"
+    fi
+  else
+    echo "• advisories: dependabot alerts could not be read, so the sensor beyond cargo-deny is blind this session"
+  fi
+fi
 # Upstream revs (D-243 item 6; built 2026-09-09, D-314). A READ-ONLY compare of the five
 # upstream repositories the covenant path depends on against the committed record: at most
 # fourteen API calls, hard-timeouted, SKIPs offline or rate-limited, never fatal. Default-ON,
