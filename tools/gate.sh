@@ -1123,15 +1123,15 @@ toolchain_pins() {
   got="$(flutter_rust_bridge_codegen --version 2>/dev/null | awk '{print $2}')"
   _pin_cmp "frb_codegen (gate.yml)" "$want" "$got"
 
-  # The `kotlin compile` lane's compiler. MAJOR version only: the workflow pins
-  # a track ('21') and runners move the patch level under us, so comparing the
-  # full string would make this a permanent false alarm — and a warning that is
   # FRB runs `cargo expand`, and installs the newest one unpinned when it is
   # missing, so the version it runs is pinned like the codegen itself.
   want="$(pins_expected "$WF" 's/.*cargo install cargo-expand --version \([0-9][0-9.]*\).*/\1/p')"
   got="$(cargo expand --version 2>/dev/null | awk '{print $2}')"
   _pin_cmp "cargo-expand (gate.yml)" "$want" "$got"
 
+  # The `kotlin compile` lane's compiler. MAJOR version only: the workflow pins
+  # a track ('21') and runners move the patch level under us, so comparing the
+  # full string would make this a permanent false alarm — and a warning that is
   # always on is the L84 sin this whole check exists to end.
   want="$(pins_expected "$WF" "s/.*java-version:[[:space:]]*'\([0-9][0-9.]*\)'.*/\1/p")"
   got="$(java -version 2>&1 | head -1 | sed -n 's/.*version "\([0-9]*\).*/\1/p')"
