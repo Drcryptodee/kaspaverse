@@ -18,8 +18,8 @@ cd "$ROOT"
 die() { echo "release: $*" >&2; exit 1; }
 
 # ── Preconditions ───────────────────────────────────────────────
-[ -z "$(git status --porcelain)" ] \
-  || die "working tree is dirty — a release builds a committed state only"
+TREE="$(git status --porcelain)" || die "git could not read the working tree"
+[ -z "$TREE" ] || die "working tree is dirty — a release builds a committed state only"
 TAG="$(git describe --tags --exact-match HEAD 2>/dev/null)" \
   || die "HEAD is not tagged — tag the release commit first (git tag <tag>)"
 COMMIT="$(git rev-parse --short HEAD)"
@@ -100,21 +100,29 @@ AAPT2="$(dirname "$APKSIGNER")/aapt2"
 # ── Build ───────────────────────────────────────────────────────
 echo "── release: building $TAG ($COMMIT) — arm64-v8a, release profile"
 # The Dart graph comes from the committed lock: Flutter's own pub get does not
-# enforce it, and pub rewrites a lock entry whose content hash moved and exits 0,
-# so the lock is enforced once and the build does not resolve again.
+# enforce it, and pub rewrites a lock entry whose content hash moved and exits 0.
+# The build still runs its own pub get, because only that one regenerates the
+# plugin registrant for release mode, so the enforced resolution is fingerprinted
+# here and compared after the build.
 flutter pub get --enforce-lockfile \
   || die "the Dart dependencies do not resolve to the committed pubspec.lock"
+RESOLVED="$(sha256sum < .dart_tool/package_config.json)" \
+  || die "no package config after pub get"
+
 # Pin the platform set: flutter's release default is arm+arm64+x64, and
 # cargokit compiles EVERY requested platform — abiFilters only governs
 # packaging, it does not trim cargokit's build matrix. kaspa-hashes can't
 # build x86_64-android at the pinned rev (L18/L25), so an unpinned release
 # build dies mid-compile after minutes of wasted armv7 work.
-flutter build apk --no-pub --release --target-platform android-arm64
+flutter build apk --release --target-platform android-arm64
 
 APK="build/app/outputs/flutter-apk/app-release.apk"
 [ -f "$APK" ] || die "expected output missing: $APK"
-[ -z "$(git status --porcelain)" ] \
-  || die "the build changed the working tree, so the APK may not be the committed state: $(git status --porcelain | head -3 | tr '\n' ' ')"
+TREE="$(git status --porcelain)" || die "git could not read the working tree after the build"
+[ -z "$TREE" ] \
+  || die "the build changed the working tree, so the APK may not be the committed state: $(printf '%s\n' "$TREE" | head -3 | tr '\n' ' ')"
+[ "$(sha256sum < .dart_tool/package_config.json)" = "$RESOLVED" ] \
+  || die "the build's own pub get resolved the Dart graph differently from the enforced lock"
 
 # ── Verify the artifact's compiler, not the build's config ──────
 # The native library must name the pinned rustc in its own bytes (INV-7): the

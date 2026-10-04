@@ -11,6 +11,7 @@
 # gate asserts its SHA-256 against the value Gradle publishes for this version —
 # see the `gradle wrapper jar` lane in tools/gate.sh.
 /.gradle
+/.kotlin/
 /captures/
 /local.properties
 GeneratedPluginRegistrant.java
