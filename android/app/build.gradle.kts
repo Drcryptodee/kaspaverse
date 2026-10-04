@@ -40,6 +40,22 @@ val keystoreProperties = Properties().apply {
 // app's identity, and publication is founder-owned (D-094).
 val devInstall = System.getenv("KV_DEV_INSTALL") == "1"
 
+// The versionCode counts the commits in HEAD's history, so every commit builds a
+// higher one and Android refuses to install an older build over a newer one
+// (INSTALL_FAILED_VERSION_DOWNGRADE). That keeps a build from before a storage
+// format change off a phone whose data it would misread. History rather than the
+// clock: an old commit rebuilt today must still read as older. GIT_DIR is dropped
+// so an exported one cannot point the count at another repository. Outside a git
+// checkout it falls back to pubspec.yaml's build number, lower than any counted
+// build, so such a build can never replace one.
+val commitCount: Int? = runCatching {
+    providers.exec {
+        commandLine("git", "-C", rootProject.projectDir.parentFile.path, "rev-list", "--count", "HEAD")
+        environment.remove("GIT_DIR")
+        environment.remove("GIT_WORK_TREE")
+    }.standardOutput.asText.get().trim().toInt()
+}.getOrNull()
+
 android {
     // NOT the applicationId: `namespace` is the Kotlin/JNI package, and it is
     // deliberately left alone. The JNI seed lane resolves classes by
@@ -66,7 +82,9 @@ android {
         // Min SDK 26: BiometricPrompt baseline; StrongBox detected at runtime in P1 (P0 §0.4).
         minSdk = 26
         targetSdk = flutter.targetSdkVersion
-        versionCode = flutter.versionCode
+        versionCode = commitCount ?: flutter.versionCode.also {
+            logger.warn("WARNING: no git history to count, so versionCode falls back to $it")
+        }
         versionName = flutter.versionName
         ndk {
             // arm64 only in P0: kaspa-hashes (pin `01b532e` v2.1.0 — D-324;
