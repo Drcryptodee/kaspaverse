@@ -81,10 +81,14 @@ if [ "$got" != "$want" ]; then
   exit 1
 fi
 
-exported="$(cd "$ROOT" && grep -rln 'macro_export' rust/core/src rust/chain/src)"
+exported="$(grep -rln 'macro_export' "$ROOT/rust/core/src" "$ROOT/rust/chain/src")"
+if [ $? -gt 1 ]; then
+  echo "   rust/core/src and rust/chain/src could not be searched for exported macros"
+  exit 1
+fi
 if [ -n "$exported" ]; then
   echo "   a workspace crate exports a macro, which would bring code into the bridge unlinted:"
-  printf '%s\n' "$exported" | sed 's/^/     /'
+  printf '%s\n' "$exported" | sed "s|^$ROOT/|     |"
   exit 1
 fi
 
