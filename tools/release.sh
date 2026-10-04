@@ -25,6 +25,10 @@ TAG="$(git describe --tags --exact-match HEAD 2>/dev/null)" \
 COMMIT="$(git rev-parse --short HEAD)"
 [ -f android/key.properties ] \
   || die "android/key.properties missing — copy android/key.properties.template to it and fill in the keystore path, alias and passwords (without it the build falls back to the unshippable debug key)"
+# The versionCode is the commit count, so a shallow clone would stamp a number
+# lower than builds already installed and Android would refuse the update.
+[ "$(git rev-parse --is-shallow-repository)" = "false" ] \
+  || die "this clone is shallow, and the versionCode counts commits: run 'git fetch --unshallow' first"
 
 # Published-release trigger gate (D-091, founder-ratified 2026-07-30): some parked
 # work is gated on "the first build that reaches people who aren't the founder".
@@ -103,6 +107,13 @@ flutter build apk --release --target-platform android-arm64
 APK="build/app/outputs/flutter-apk/app-release.apk"
 [ -f "$APK" ] || die "expected output missing: $APK"
 
+# ── Verify the artifact's compiler, not the build's config ──────
+# The native library must name the pinned rustc in its own bytes (INV-7): the
+# same check the gate runs on the newest APK, here on the one being released.
+SHIPPED="$(tools/shipped_toolchain.sh "$APK")" \
+  || { printf '%s\n' "$SHIPPED" >&2; die "the native library was not compiled by the pinned toolchain"; }
+printf '%s\n' "$SHIPPED"
+
 # ── Verify the artifact's signer, not the config ────────────────
 CERTS="$("$APKSIGNER" verify --print-certs "$APK")" \
   || die "apksigner rejected the APK (unsigned or invalid signature)"
@@ -141,7 +152,10 @@ cp "$APK" "dist/$OUT"
   echo "tag:     $TAG"
   echo "commit:  $(git rev-parse HEAD)"
   echo "flutter: $(flutter --version | head -1)"
-  echo "rustc:   $(rustc -V)"
+  # Read from the library itself: `rustc -V` here would name the repo root's
+  # default toolchain, not the one that compiled the shipped code.
+  echo "rustc (from the shipped library):"
+  printf '%s\n' "$SHIPPED" | grep -E '\.comment|std path' | sed 's/^ */  /'
   echo "signer:"
   echo "$CERTS" | grep -E "certificate (DN|SHA-256)" | sed 's/^/  /'
 } > "dist/$OUT.buildinfo"
