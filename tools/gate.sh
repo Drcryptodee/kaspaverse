@@ -1224,27 +1224,46 @@ if [ -d "$ROOT/rust_builder" ]; then
 fi
 
 # ── Unsafe code in the bridge (INV-2) ───────────────────────────
-# The bridge denies unsafe code at its root and allows it at three module
-# declarations: the generated FFI glue, the JNI exports of the seed lane and the
-# socket witness's libc calls. Any other line naming the lint (an allow, an
-# expect, a warn, alone or inside a list) would switch the deny off for what it
-# covers, so every such line in the crate is pinned, each allow with the module
-# it annotates. A `#[path]` module or an `include!` would bring in a file this
-# scan never reads, so either one is a line in the set too, and the crate root
-# must be the default src/lib.rs.
+# The bridge denies hand-written unsafe code at its root. It is allowed at the
+# declarations of the generated FFI glue and the socket witness's libc calls, and
+# on each of the seed lane's five JNI exports. Any other line naming the lint (an
+# allow, an expect, a warn, alone or inside a list) would switch the deny off for
+# what it covers, so every such line is pinned, each allow with the item after it.
+# Which files to read comes from the compiler, not a pattern: the arm64 dep-info
+# the cross-compile lane wrote names every file rustc compiled into the crate, so
+# a `#[path]` module, an `include!` in any spelling or through a macro, or a moved
+# crate root shows up as a file outside rust/bridge/src.
 bridge_unsafe_allowlist() {
-  local got want
-  if sed -n '/^\[lib\]/,/^\[/p' "$ROOT/rust/bridge/Cargo.toml" | grep -q '^path[[:space:]]*='; then
-    echo "   rust/bridge/Cargo.toml moves the crate root, so src/lib.rs is not what this lane pins"
+  local dep stale compiled src got want
+  dep="$(find "$ROOT/rust/target/aarch64-linux-android/debug/deps" -maxdepth 1 \
+    -name 'kaspaverse_bridge*.d' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-)"
+  if [ -z "$dep" ]; then
+    echo "   no arm64 dep-info for the bridge, so the files compiled into it are unknown"
     return 1
   fi
-  got="$(cd "$ROOT" && find rust/bridge/src -name '*.rs' -print0 | sort -z | xargs -0 awk '
+  stale="$(find "$ROOT/rust/bridge/src" "$ROOT/rust/bridge/Cargo.toml" -type f -newer "$dep" -print -quit)"
+  if [ -n "$stale" ]; then
+    echo "   the bridge's dep-info is older than ${stale#"$ROOT"/}, so it does not describe this tree"
+    return 1
+  fi
+  compiled="$(head -1 "$dep" | tr ' ' '\n' | tail -n +2 | grep -v '^$' | sed 's|^|rust/|' | sort)"
+  src="$(cd "$ROOT" && find rust/bridge/src -type f -name '*.rs' | sort)"
+  if [ -z "$compiled" ] || [ "$compiled" != "$src" ]; then
+    echo "   the files compiled into the bridge are not the files in rust/bridge/src:"
+    diff <(echo "$src") <(echo "$compiled") | sed 's/^/     /'
+    return 1
+  fi
+  got="$(cd "$ROOT" && printf '%s\n' "$compiled" | xargs awk '
     pending != "" { print pending " " $0; pending = ""; next }
     /^#\[allow\(unsafe_code\)\]$/ { pending = FILENAME ":" $0; next }
-    /unsafe_code|#\[path|include!\(/ { print FILENAME ":" $0 }')"
-  want="rust/bridge/src/lib.rs:#![deny(unsafe_code)]
+    /unsafe_code/ { print FILENAME ":" $0 }')"
+  want="rust/bridge/src/jni_seed.rs:#[allow(unsafe_code)] pub extern \"system\" fn Java_org_kaspaverse_app_VaultBridge_nativeUnlockWithSeed(
+rust/bridge/src/jni_seed.rs:#[allow(unsafe_code)] pub extern \"system\" fn Java_org_kaspaverse_app_VaultBridge_nativeExportSeedForKeystore(
+rust/bridge/src/jni_seed.rs:#[allow(unsafe_code)] pub extern \"system\" fn Java_org_kaspaverse_app_VaultBridge_nativeRevealCeremonyWords(
+rust/bridge/src/jni_seed.rs:#[allow(unsafe_code)] pub extern \"system\" fn Java_org_kaspaverse_app_VaultBridge_nativeInstallVaultPepper(
+rust/bridge/src/jni_seed.rs:#[allow(unsafe_code)] pub extern \"system\" fn Java_org_kaspaverse_app_VaultBridge_nativeRegenerateCeremony(
+rust/bridge/src/lib.rs:#![deny(unsafe_code)]
 rust/bridge/src/lib.rs:#[allow(unsafe_code)] mod frb_generated;
-rust/bridge/src/lib.rs:#[allow(unsafe_code)] mod jni_seed;
 rust/bridge/src/lib.rs:#[allow(unsafe_code)] mod sockstat;"
   if [ "$got" != "$want" ]; then
     echo "   the bridge's unsafe_code lint lines are not the pinned set:"
@@ -1253,7 +1272,11 @@ rust/bridge/src/lib.rs:#[allow(unsafe_code)] mod sockstat;"
   fi
 }
 if [ -f "$ROOT/rust/bridge/src/lib.rs" ]; then
-  run_check "bridge unsafe allowlist (INV-2)" bridge_unsafe_allowlist
+  if command -v cargo-ndk >/dev/null 2>&1; then
+    run_check "bridge unsafe allowlist (INV-2)" bridge_unsafe_allowlist
+  else
+    skip_check "bridge unsafe allowlist (INV-2)" "cargo-ndk not installed, so no arm64 dep-info to read"
+  fi
 fi
 
 # ── Public-repo hygiene (always runs — the repo is public, D-011/D-019) ──

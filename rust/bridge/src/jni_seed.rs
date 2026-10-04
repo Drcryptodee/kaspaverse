@@ -60,6 +60,7 @@ fn throw(env: &mut JNIEnv, msg: &str) {
 /// Standard JNI contract: `env`/`seed` are valid for the call, supplied by the
 /// JVM. No Rust unwinding may escape — `catch_unwind` guarantees it.
 #[no_mangle]
+#[allow(unsafe_code)]
 pub extern "system" fn Java_org_kaspaverse_app_VaultBridge_nativeUnlockWithSeed(
     mut env: JNIEnv,
     _class: JClass,
@@ -105,6 +106,7 @@ fn unlock_with_seed(env: &mut JNIEnv, seed: &JByteArray) -> Result<(), AppError>
 /// # Safety
 /// Standard JNI contract, as above; no unwinding escapes.
 #[no_mangle]
+#[allow(unsafe_code)]
 pub extern "system" fn Java_org_kaspaverse_app_VaultBridge_nativeExportSeedForKeystore(
     mut env: JNIEnv,
     _class: JClass,
@@ -146,6 +148,7 @@ fn export_seed(env: &mut JNIEnv) -> Result<jbyteArray, AppError> {
 /// # Safety
 /// Standard JNI contract, as above; no unwinding escapes (`catch_unwind`).
 #[no_mangle]
+#[allow(unsafe_code)]
 pub extern "system" fn Java_org_kaspaverse_app_VaultBridge_nativeRevealCeremonyWords(
     mut env: JNIEnv,
     _class: JClass,
@@ -184,6 +187,7 @@ fn reveal_words(env: &mut JNIEnv) -> Result<jbyteArray, AppError> {
 /// # Safety
 /// Standard JNI contract, as above; no unwinding escapes (`catch_unwind`).
 #[no_mangle]
+#[allow(unsafe_code)]
 pub extern "system" fn Java_org_kaspaverse_app_VaultBridge_nativeInstallVaultPepper(
     mut env: JNIEnv,
     _class: JClass,
@@ -227,6 +231,7 @@ fn take_pepper_from_jvm(env: &mut JNIEnv, pepper: &JByteArray) -> Result<(), App
 /// # Safety
 /// Standard JNI contract, as above; no unwinding escapes (`catch_unwind`).
 #[no_mangle]
+#[allow(unsafe_code)]
 pub extern "system" fn Java_org_kaspaverse_app_VaultBridge_nativeRegenerateCeremony(
     mut env: JNIEnv,
     _class: JClass,

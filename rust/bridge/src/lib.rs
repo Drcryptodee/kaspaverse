@@ -1,6 +1,7 @@
-// Unsafe code is denied crate-wide. The three modules that need it allow it at
-// their declaration: the generated FFI glue, the JNI exports of the seed lane and
-// the socket witness's libc calls. A new `unsafe` anywhere else fails the build.
+// Hand-written unsafe code is denied crate-wide. It is allowed only at the
+// declarations of the generated FFI glue and the socket witness's libc calls, and
+// on each of the seed lane's five JNI exports (their `no_mangle` is what the lint
+// reports; the module holds no unsafe block). Anything else fails the build.
 #![deny(unsafe_code)]
 
 pub mod api;
@@ -12,7 +13,6 @@ mod logging;
 // On the host it does not exist, so its callers in `api::vault` are reached
 // only by tests there — hence the targeted dead-code allow on those fns.
 #[cfg(target_os = "android")]
-#[allow(unsafe_code)]
 mod jni_seed;
 
 // LINK-Q2: the TCP_INFO witness's platform half — dev flags only.
