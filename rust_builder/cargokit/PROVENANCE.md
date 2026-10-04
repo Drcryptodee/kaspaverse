@@ -34,7 +34,7 @@ path.
 |:--|:--|
 | `gradle/plugin.gradle` | Upstream added `android-x86` and `android-x64` to every debug build (emulator support). `kaspa-hashes` at the pinned rusty-kaspa rev cannot build for x86_64 Android (its build script panics "Unsupported OS"), and the app ships arm64 only, so debug builds use exactly the platforms Flutter requests. |
 | `build_tool/lib/src/builder.dart` | **The toolchain.** Upstream ran `rustup run stable cargo build`, and an explicit `rustup run` outranks `rust-toolchain.toml`, so the shipped library was compiled by whatever `stable` the build machine had. The builder now reads the channel from the nearest `rust-toolchain.toml` at or above the crate (with the TOML parser cargokit already depends on), fails the build when that file names no channel, and keeps upstream's choice only when no toolchain file exists. It also passes `--locked`, so the shipped build uses the committed `Cargo.lock` or fails. |
-| `run_build_tool.sh` | **The build tool's own dependencies.** Upstream gave the runner package no lock, so `dart pub get` there resolved `build_tool`'s transitive dependencies fresh on a clean build directory or a new machine, and `build_tool/pubspec.lock` was never read. The committed lock is now copied into the runner before `pub get`, which keeps its versions and checks each download against its sha256; a runner lock naming any other version is resolved again, and the build stops, naming the package, if pub still moves one. `--enforce-lockfile` cannot be used because the runner's lock records `build_tool` by its absolute path. |
+| `run_build_tool.sh` | **The build tool's own dependencies.** Upstream gave the runner package no lock, so `dart pub get` there resolved `build_tool`'s transitive dependencies fresh on a clean build directory or a new machine, and `build_tool/pubspec.lock` was never read. The committed lock is now copied into the runner before `pub get`, which keeps its versions. Pub does not refuse a download whose hash differs from a lock (it records the new hash and carries on), so the script then compares every runner entry with the committed lock by name, version and sha256, re-resolves a runner lock that differs, and stops the build, naming each entry, if one still differs or the comparison cannot be made. `--enforce-lockfile` cannot be used because the runner's lock records `build_tool` by its absolute path. |
 | `build_tool/lib/src/rustup.dart` | **Finding an installed pin.** Upstream's toolchain listing kept only `stable`, `beta` and `nightly`, so an installed `1.94.0` toolchain looked absent and was handed to `rustup toolchain install`, which syncs the channel over the network on every build and fails offline. Version toolchains are now listed too; custom toolchains (such as `esp`) stay excluded, as upstream's tests expect. |
 
 The two shipped-binary witnesses that prove the toolchain change works are read by
@@ -100,7 +100,7 @@ caaba585614e064b3d33b4962c4bc12af1cab0504c1cd424de704b6452fab695  gradle/plugin.
 e4256b48bc6c7bafa4bca007f4f5545861e9d6d97c66b68158d162ca83bcc536  LICENSE
 23fd3759d7825db0864f9176547b537ff3c18ff496cd1fca61dec379c2d100af  README
 52c0a2f95055e2b275d996af807c96f4b0cf73f99e153b0c5ccd3e1779f667db  run_build_tool.cmd
-55f1987ad4d68045132d882e29552a0c6d57f70bc6c0e7349dde57b6ccda7353  run_build_tool.sh  ← PATCHED
+7a8fb7ad65bf5feaa09ec1ed368e67e758e87f1ea5fcb8219e20a42ec50cf081  run_build_tool.sh  ← PATCHED
 ```
 
 Patched-file anchors (the hash of our version of each changed file):
@@ -109,7 +109,7 @@ Patched-file anchors (the hash of our version of each changed file):
 PATCHED  caaba585614e064b3d33b4962c4bc12af1cab0504c1cd424de704b6452fab695  gradle/plugin.gradle
 PATCHED  6e5b70c26810dd2e8792ae0d25ae917aab4e997e2294afc100ab8277e1a48cbd  build_tool/lib/src/builder.dart
 PATCHED  1a93c85ea1414f916780f2ade67f3ad85f2bf8b1fdf097b1b7df6fdc6feabefa  build_tool/lib/src/rustup.dart
-PATCHED  55f1987ad4d68045132d882e29552a0c6d57f70bc6c0e7349dde57b6ccda7353  run_build_tool.sh
+PATCHED  7a8fb7ad65bf5feaa09ec1ed368e67e758e87f1ea5fcb8219e20a42ec50cf081  run_build_tool.sh
 ```
 
 ## Re-vendoring

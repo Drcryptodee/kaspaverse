@@ -70,22 +70,42 @@ if [ -f "$PACKAGE_HASH_FILE" ]; then
     fi
 fi
 
-# KaspaVerse patch: the build tool runs on the dependency versions its committed
-# lock names. Upstream gave this runner no lock, so a clean build directory or a
-# new machine resolved the transitive versions fresh. The committed lock is copied
-# in before `pub get`, which keeps its versions and checks each download against
-# its sha256; a runner lock naming any other version is resolved again, and the
-# build stops if pub still moves one. `--enforce-lockfile` cannot be used: the
+# KaspaVerse patch: the build tool runs on the dependencies its committed lock
+# names, by name, version and content hash. Upstream gave this runner no lock, so
+# a clean build directory or a new machine resolved the transitive versions fresh.
+# The committed lock is copied in before `pub get`, which keeps its versions. Pub
+# does not refuse a download whose hash differs from a lock (it records the new
+# hash and carries on), so the check after it compares all three and stops the
+# build, naming each entry that moved. `--enforce-lockfile` cannot be used: the
 # runner's own lock records build_tool by its absolute path.
 LOCKED="$BUILD_TOOL_PKG_DIR/pubspec.lock"
-lock_versions() {
-  awk '/^  [^ ]+:$/ { name = $1; sub(/:$/, "", name) }
-       /^    version: / { v = $2; gsub(/"/, "", v); print name " " v }' "$1"
+lock_entries() {
+  awk '/^  [^ ]+:$/ { name = $1; sub(/:$/, "", name); sha = "" }
+       /^      sha256: / { sha = $2; gsub(/"/, "", sha) }
+       /^    version: / { v = $2; gsub(/"/, "", v); print name " " v " " sha }' "$1"
 }
+# Each runner entry the committed lock does not hold, or a line saying the two
+# could not be compared. Empty means the runner is on the committed lock.
 unlocked() {
+  local have want rc=0
   if [ ! -f pubspec.lock ]; then echo "no runner lock"; return 0; fi
-  lock_versions pubspec.lock | grep -v '^build_tool ' \
-    | grep -vxF -f <(lock_versions "$LOCKED") || true
+  have="$(lock_entries pubspec.lock | grep -v '^build_tool ' || true)"
+  want="$(lock_entries "$LOCKED" || true)"
+  if [ -z "$have" ] || [ -z "$want" ]; then echo "a lock could not be read"; return 0; fi
+  printf '%s\n' "$have" | grep -vxF -f <(printf '%s\n' "$want") || rc=$?
+  if [ "$rc" -gt 1 ]; then echo "the locks could not be compared"; fi
+  return 0
+}
+resolve_locked() {
+  local moved
+  cp "$LOCKED" pubspec.lock
+  "$DART" pub get --no-precompile || { echo "cargokit: pub get failed" >&2; exit 1; }
+  moved="$(unlocked)"
+  if [ -n "$moved" ]; then
+    echo "cargokit: the build tool's dependencies left $LOCKED:" >&2
+    echo "$moved" >&2
+    exit 1
+  fi
 }
 if [ -n "$(unlocked)" ]; then
     rm -f "$PACKAGE_HASH_FILE"
@@ -93,14 +113,7 @@ fi
 
 # Run pub get if needed.
 if [ ! -f "$PACKAGE_HASH_FILE" ]; then
-    cp "$LOCKED" pubspec.lock
-    "$DART" pub get --no-precompile
-    MOVED="$(unlocked)"
-    if [ -n "$MOVED" ]; then
-        echo "cargokit: the build tool's dependencies left $LOCKED:" >&2
-        echo "$MOVED" >&2
-        exit 1
-    fi
+    resolve_locked
     "$DART" compile kernel bin/build_tool_runner.dart
     echo "$PACKAGE_HASH" > "$PACKAGE_HASH_FILE"
 fi
@@ -118,7 +131,7 @@ exit_code=$?
 
 # 253 means invalid snapshot version.
 if [ $exit_code == 253 ]; then
-  "$DART" pub get --no-precompile
+  resolve_locked
   "$DART" compile kernel bin/build_tool_runner.dart
   "$DART" bin/build_tool_runner.dill "$@"
   exit_code=$?
