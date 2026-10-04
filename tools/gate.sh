@@ -1194,8 +1194,8 @@ vendored_cargokit() {
     fi
     anchored=$((anchored+1))
   done < <(grep -E '^PATCHED  [0-9a-f]{64}  ' "$rec")
-  if [ "$anchored" -ne 3 ]; then
-    echo "   the record anchors $anchored changed files, expected 3"
+  if [ "$anchored" -ne 4 ]; then
+    echo "   the record anchors $anchored changed files, expected 4"
     rc=1
   fi
   marked_set="$(awk '/^[0-9a-f]{64}  .*← PATCHED$/{print $2}' "$rec" | sort)"

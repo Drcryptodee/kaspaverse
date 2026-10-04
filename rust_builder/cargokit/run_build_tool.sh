@@ -70,9 +70,37 @@ if [ -f "$PACKAGE_HASH_FILE" ]; then
     fi
 fi
 
+# KaspaVerse patch: the build tool runs on the dependency versions its committed
+# lock names. Upstream gave this runner no lock, so a clean build directory or a
+# new machine resolved the transitive versions fresh. The committed lock is copied
+# in before `pub get`, which keeps its versions and checks each download against
+# its sha256; a runner lock naming any other version is resolved again, and the
+# build stops if pub still moves one. `--enforce-lockfile` cannot be used: the
+# runner's own lock records build_tool by its absolute path.
+LOCKED="$BUILD_TOOL_PKG_DIR/pubspec.lock"
+lock_versions() {
+  awk '/^  [^ ]+:$/ { name = $1; sub(/:$/, "", name) }
+       /^    version: / { v = $2; gsub(/"/, "", v); print name " " v }' "$1"
+}
+unlocked() {
+  if [ ! -f pubspec.lock ]; then echo "no runner lock"; return 0; fi
+  lock_versions pubspec.lock | grep -v '^build_tool ' \
+    | grep -vxF -f <(lock_versions "$LOCKED") || true
+}
+if [ -n "$(unlocked)" ]; then
+    rm -f "$PACKAGE_HASH_FILE"
+fi
+
 # Run pub get if needed.
 if [ ! -f "$PACKAGE_HASH_FILE" ]; then
+    cp "$LOCKED" pubspec.lock
     "$DART" pub get --no-precompile
+    MOVED="$(unlocked)"
+    if [ -n "$MOVED" ]; then
+        echo "cargokit: the build tool's dependencies left $LOCKED:" >&2
+        echo "$MOVED" >&2
+        exit 1
+    fi
     "$DART" compile kernel bin/build_tool_runner.dart
     echo "$PACKAGE_HASH" > "$PACKAGE_HASH_FILE"
 fi
