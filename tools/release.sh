@@ -119,7 +119,7 @@ printf '%s\n' "$SHIPPED"
 # And the unsafe code in the library the APK carries: cargokit's release build,
 # read from the dep-info it wrote, not the debug build the gate compiles.
 tools/bridge_unsafe.sh build/kaspaverse_bridge/build/aarch64-linux-android/release/deps/kaspaverse_bridge.d \
-  || die "the shipped library's unsafe code is not the pinned set"
+  || die "the bridge crate's own unsafe-code lines in the shipped build are not the pinned set"
 
 # The versionCode must be the commit count the build was meant to stamp: a lower
 # one is refused as an update on every phone that has a newer build, and the

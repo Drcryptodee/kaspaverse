@@ -12,8 +12,10 @@
 # spelling or through a macro, or a moved crate root shows up as a file outside
 # rust/bridge/src. A dep-info describes one build, so lines that could pull in a
 # file under another configuration (a `path = "..."` attribute, an `include!`, a
-# `debug_assertions` cfg) are pinned too, and so is any `unsafe` token in the
-# seed lane, whose allows cover whole function bodies.
+# `debug_assertions` cfg) are pinned too. So is anything in the seed lane that
+# the lint would report or that exports a symbol, because its allows cover whole
+# function bodies: an `unsafe` token, and in edition 2021 the attributes that
+# carry none (`no_mangle`, `export_name`, `link_section`) and `global_asm!`.
 #
 # Usage: tools/bridge_unsafe.sh <dep-info>
 #   the gate passes the arm64 debug build's, rust/target/aarch64-linux-android/
@@ -48,11 +50,16 @@ got="$(cd "$ROOT" && printf '%s\n' "$compiled" | xargs awk '
   pending != "" { print pending " " $0; pending = ""; next }
   /^#\[allow\(unsafe_code\)\]$/ { pending = FILENAME ":" $0; next }
   /unsafe_code|(^|[^[:alnum:]_])path[[:space:]]*=[[:space:]]*r?#*"|include[[:space:]]*!|debug_assertions/ { print FILENAME ":" $0; next }
-  FILENAME ~ /jni_seed\.rs$/ && /unsafe/ { print FILENAME ":" $0 }')"
-want='rust/bridge/src/jni_seed.rs:#[allow(unsafe_code)] pub extern "system" fn Java_org_kaspaverse_app_VaultBridge_nativeUnlockWithSeed(
+  FILENAME ~ /jni_seed\.rs$/ && /unsafe|no_mangle|export_name|link_section|global_asm/ { print FILENAME ":" $0 }')"
+want='rust/bridge/src/jni_seed.rs:#[no_mangle]
+rust/bridge/src/jni_seed.rs:#[allow(unsafe_code)] pub extern "system" fn Java_org_kaspaverse_app_VaultBridge_nativeUnlockWithSeed(
+rust/bridge/src/jni_seed.rs:#[no_mangle]
 rust/bridge/src/jni_seed.rs:#[allow(unsafe_code)] pub extern "system" fn Java_org_kaspaverse_app_VaultBridge_nativeExportSeedForKeystore(
+rust/bridge/src/jni_seed.rs:#[no_mangle]
 rust/bridge/src/jni_seed.rs:#[allow(unsafe_code)] pub extern "system" fn Java_org_kaspaverse_app_VaultBridge_nativeRevealCeremonyWords(
+rust/bridge/src/jni_seed.rs:#[no_mangle]
 rust/bridge/src/jni_seed.rs:#[allow(unsafe_code)] pub extern "system" fn Java_org_kaspaverse_app_VaultBridge_nativeInstallVaultPepper(
+rust/bridge/src/jni_seed.rs:#[no_mangle]
 rust/bridge/src/jni_seed.rs:#[allow(unsafe_code)] pub extern "system" fn Java_org_kaspaverse_app_VaultBridge_nativeRegenerateCeremony(
 rust/bridge/src/lib.rs:#![deny(unsafe_code)]
 rust/bridge/src/lib.rs:#[allow(unsafe_code)] mod frb_generated;
