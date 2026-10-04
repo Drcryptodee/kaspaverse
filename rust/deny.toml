@@ -14,8 +14,8 @@ targets = ["x86_64-unknown-linux-gnu", "aarch64-linux-android"]
 [advisories]
 # Vulnerabilities are errors by default (cargo-deny ≥0.14) — for the WHOLE tree,
 # transitive included; a CVE landing in the pinned tree SHOULD turn the gate red.
-# Baseline ignores: none. An ignore entry requires a D-entry with its repayment
-# trigger.
+# An ignore entry requires a recorded decision with its repayment trigger; the
+# four below are the unsound advisories this tree held when `unsound` was widened.
 #
 # unmaintained = "workspace": only OUR direct deps must be actively maintained.
 # The pinned rusty-kaspa tree carries 7 unmaintained transitive crates
@@ -27,7 +27,19 @@ targets = ["x86_64-unknown-linux-gnu", "aarch64-linux-android"]
 # "all"` in a scratch copy of this file, after editing the rev.
 unmaintained = "workspace"
 yanked = "deny"
-ignore = []
+# unsound = "all": an advisory that a crate is unsound (undefined behaviour
+# reachable from safe code) fails the gate wherever the crate sits in the tree.
+# The default covers direct dependencies only, which left four of them in the
+# compiled tree unreported. Each is ignored below with why it is not reached
+# here; an ignore goes when the lock moves past the fixed version or its reason
+# stops holding.
+unsound = "all"
+ignore = [
+  { id = "RUSTSEC-2026-0190", reason = "anyhow 1.0.102, Error::downcast_mut after context: nothing in this workspace or the pinned rusty-kaspa calls downcast_mut. Fixed in 1.0.103, lock-only, taken at the next lockfile change." },
+  { id = "RUSTSEC-2026-0221", reason = "event-listener 5.4.1, a !Send tag crossing threads through StackSlot: only Event::with_tag sets a tag, and nothing in the arm64 graph calls it. Fixed in 5.4.2, lock-only, taken at the next lockfile change." },
+  { id = "RUSTSEC-2021-0145", reason = "atty 0.2.14, an unaligned read in msys_tty_on under cfg(windows): neither target here is Windows. No fixed release; the crate comes with the pinned tree." },
+  { id = "RUSTSEC-2026-0306", reason = "faster-hex 0.9.0, hex_decode_unchecked's AVX2 path on x86 and x86_64: the shipped library is arm64, and nothing here or in the pin calls the function. The version comes with the pinned tree." },
+]
 
 [licenses]
 # Explicit SPDX allow-list — anything not listed is denied. Derived from the
