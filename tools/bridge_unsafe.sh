@@ -19,12 +19,15 @@
 # or that exports a symbol is pinned: an `unsafe` token, the edition-2021
 # attributes that carry none (`no_mangle`, `export_name`, `link_section`), and the
 # `global_asm!` macro. A native method can also be bound by a safe registration
-# call, so `register_native`/`RegisterNatives` is pinned everywhere. A
-# `#[macro_export]` macro from a path crate the bridge compiles would bring code in
-# with no lint at all, so none of them, by cargo's own resolution, may define one.
-# And because a source scan cannot see what a dependency's macro emits, the built
-# library's exported JNI symbols are read too: exactly the five the Kotlin side
-# declares, and the app declares no other native method.
+# call, so `register_native`/`RegisterNatives` is pinned everywhere. A macro from a
+# path crate the bridge compiles (`#[macro_export]` or a procedural macro) would
+# bring code in with no lint at all, so none of them, by cargo's own resolution,
+# may define one, or pull in a file by `#[path]` or `include!` that the search,
+# which follows symlinks, would not read. And because a source scan cannot see
+# what a dependency's macro emits, the built library's exported JNI symbols are
+# read too: exactly the five the Kotlin side declares. Every Kotlin line with the
+# word `external` is pinned, so a sixth native method in any spelling fails, and
+# no Java line may say `native`.
 #
 # Usage: tools/bridge_unsafe.sh <dep-info>
 #   the gate passes the arm64 debug build's, rust/target/aarch64-linux-android/
@@ -98,13 +101,13 @@ for need in "$ROOT/rust/core" "$ROOT/rust/chain"; do
     exit 1
   fi
 done
-exported="$(grep -rln --include='*.rs' 'macro_export' "${crates[@]}")"
+exported="$(grep -RlE --include='*.rs' 'macro_export|proc_macro|(^|[^[:alnum:]_])include[[:space:]]*!|(^|[^[:alnum:]_])path[[:space:]]*=[[:space:]]*r?#*"' "${crates[@]}")"
 if [ $? -gt 1 ]; then
-  echo "   the bridge's path crates could not be searched for exported macros"
+  echo "   the bridge's path crates could not be searched for macros and file paths"
   exit 1
 fi
 if [ -n "$exported" ]; then
-  echo "   a path crate the bridge compiles exports a macro, which would bring code into it unlinted:"
+  echo "   a path crate the bridge compiles defines a macro (code it would bring in unlinted) or pulls in a file by path:"
   printf '%s\n' "$exported" | sed "s|^$ROOT/|     |"
   exit 1
 fi
@@ -136,24 +139,31 @@ fi
 
 # The app declares exactly those five native methods: a sixth could be bound
 # without an export, by a registration call from code the scans above miss.
-declared="$(grep -rhoE --include='*.kt' 'external[[:space:]]+fun[[:space:]]+[A-Za-z0-9_]+' "$ROOT/android/app/src")"
+# Every Kotlin line with the word `external` is pinned, so a declaration in any
+# spelling (split across lines, generic, backticked, reusing a name) adds a line.
+declared="$(cd "$ROOT" && grep -Rw --include='*.kt' 'external' android/app/src)"
 if [ $? -gt 1 ]; then
   echo "   android/app/src could not be searched for native method declarations"
   exit 1
 fi
-declared="$(printf '%s\n' "$declared" | awk 'NF { print $NF }' | sort -u)"
-if [ "$declared" != "$(printf '%s\n' "$want_symbols" | sed 's/^Java_org_kaspaverse_app_VaultBridge_//')" ]; then
-  echo "   the app's Kotlin native methods are not the five the library exports:"
-  printf '%s\n' "${declared:-(none)}" | sed 's/^/     /'
+declared="$(printf '%s\n' "$declared" | sort)"
+want_declared='android/app/src/main/kotlin/org/kaspaverse/app/VaultBridge.kt:    external fun nativeExportSeedForKeystore(): ByteArray
+android/app/src/main/kotlin/org/kaspaverse/app/VaultBridge.kt:    external fun nativeInstallVaultPepper(pepper: ByteArray): Int
+android/app/src/main/kotlin/org/kaspaverse/app/VaultBridge.kt:    external fun nativeRegenerateCeremony(wordCount: Int): Int
+android/app/src/main/kotlin/org/kaspaverse/app/VaultBridge.kt:    external fun nativeRevealCeremonyWords(): ByteArray
+android/app/src/main/kotlin/org/kaspaverse/app/VaultBridge.kt:    external fun nativeUnlockWithSeed(seed: ByteArray): Int'
+if [ "$declared" != "$want_declared" ]; then
+  echo "   the app's Kotlin lines with the word external are not the five native declarations:"
+  diff <(echo "$want_declared") <(echo "$declared") | sed 's/^/     /'
   exit 1
 fi
-java_natives="$(grep -rlE --include='*.java' '(^|[[:space:]])native[[:space:]]+[^=;]*\(' "$ROOT/android/app/src")"
+java_natives="$(grep -Rlw --include='*.java' 'native' "$ROOT/android/app/src")"
 if [ $? -gt 1 ]; then
   echo "   android/app/src could not be searched for Java native methods"
   exit 1
 fi
 if [ -n "$java_natives" ]; then
-  echo "   a Java file declares a native method:"
+  echo "   a Java file says native, which may declare a native method:"
   printf '%s\n' "$java_natives" | sed "s|^$ROOT/|     |"
   exit 1
 fi
