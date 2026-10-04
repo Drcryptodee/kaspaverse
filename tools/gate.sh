@@ -9,7 +9,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # resolution` — and `set -u` turns a definition that sits below its first reader into
 # an unbound-variable abort mid-run, which is a gate that stops rather than reports.
 OPS_GIT_DIR="${KASPAVERSE_OPS_GIT_DIR:-$HOME/.kaspaverse-ops.git}"
-PASS=0; FAIL=0; SKIP=0; WARN=0
+PASS=0; FAIL=0; SKIP=0; WARN=0; UNBUILT=0
 declare -a RESULTS
 # Every lane that emitted a row, by name. The summary asserts this against the
 # roster below: the gate proves what ran by SUMMING what ran, so a lane that
@@ -58,6 +58,11 @@ run_check_warnable() { # name, command...
   esac
 }
 skip_check() { SEEN["$1"]=1; RESULTS+=("SKIP  $1 ($2)"); SKIP=$((SKIP+1)); }
+# A lane whose subject is a build product the gate does not make (an APK). With
+# none on disk it reports SKIP with the reason, like any lane that could not run,
+# but strict mode does not count it: CI builds no APK, so the absence there is
+# not a missing tool. It is never a pass, and the verdict line names it.
+skip_unbuilt() { skip_check "$1" "$2"; UNBUILT=$((UNBUILT+1)); }
 
 # ── The expected-lane roster (product-audit run 2: F2/F9/S4-11/S4-54) ──
 # Four separate findings, one shape. `GATE_STRICT` reds on SKIP > 0 — so it
@@ -97,6 +102,7 @@ else
   expect_lane "rust workspace"
 fi
 if [ -f "$ROOT/pubspec.yaml" ]; then
+  expect_lane "pub lockfile (INV-7)"
   expect_lane "dart format"; expect_lane "flutter analyze"; expect_lane "flutter test"
   [ -d "$ROOT/assets/fonts" ] && expect_lane "bundled fonts (INV-7)"
 else
@@ -120,6 +126,10 @@ expect_lane "race fan-out exponent (L135)"
 # a spuriously red check is how a real check earns a `git rm` from the ledger.
 { [ -f "$ROOT/rust/rust-toolchain.toml" ] || [ -f "$ROOT/.github/workflows/gate.yml" ]; } \
   && expect_lane "toolchain pins (D-024)"
+# Guarded on what each lane is about, never on the file it asserts: an app that
+# ships an APK, and the vendored build tool that compiles its native library.
+[ -f "$ROOT/android/build.gradle.kts" ] && expect_lane "shipped toolchain (INV-7)"
+[ -d "$ROOT/rust_builder" ] && expect_lane "vendored cargokit (INV-7)"
 expect_lane "public-repo hygiene (no tracked secrets)"
 expect_lane "section-anchor resolution (Group U-2)"
 expect_lane "internal-record boundary (D-102)"
@@ -130,8 +140,12 @@ expect_lane "drift census (living pointers)"
 # ── Rust workspace ──────────────────────────────────────────────
 if [ -f "$ROOT/rust/Cargo.toml" ]; then
   cd "$ROOT/rust"
+  # `--locked` on every lane that resolves the graph: a manifest edit committed
+  # without its Cargo.lock update must red here, not be re-resolved silently so
+  # that every lane, `cargo deny` included, judges a graph the repo does not
+  # carry. `cargo fmt` reads no lockfile and takes no such flag.
   run_check "cargo fmt"    cargo fmt --all --check
-  run_check "cargo clippy" cargo clippy --workspace --all-targets -- -D warnings
+  run_check "cargo clippy" cargo clippy --locked --workspace --all-targets -- -D warnings
   # BOUNDED, and the bound is the check (F47, product-audit run 3 fix wave).
   # `cargo test` has no per-test timeout: a test that blocks forever blocks the
   # gate forever, and the gate is the only arbiter of "done" — so a hang is not a
@@ -145,7 +159,7 @@ if [ -f "$ROOT/rust/Cargo.toml" ]; then
   # whole workspace runs in well under a minute today (the chain crate alone: 0.72 s
   # after the F47 fix), so 600 s is roughly a 60x headroom: it cannot red a merely
   # slow machine, and it cannot fail to red a hang.
-  cargo_tests() { timeout 600 cargo test --workspace; }
+  cargo_tests() { timeout 600 cargo test --locked --workspace; }
   run_check "cargo test"   cargo_tests
   # ── The vendored dialer (D-217) ────────────────────────────────────────────
   # It is deliberately NOT a workspace member (see rust/Cargo.toml's `exclude`),
@@ -293,7 +307,7 @@ if [ -f "$ROOT/rust/Cargo.toml" ]; then
     }
   fi
   if command -v cargo-deny >/dev/null 2>&1; then
-    run_check "cargo deny (INV-7)" cargo deny check
+    run_check "cargo deny (INV-7)" cargo deny --locked check
   else
     skip_check "cargo deny (INV-7)" "cargo-deny not installed — REQUIRED from P0-D4"
   fi
@@ -317,7 +331,7 @@ if [ -f "$ROOT/rust/Cargo.toml" ]; then
     done
   fi
   if command -v cargo-ndk >/dev/null 2>&1; then
-    run_check "android cross-compile" cargo ndk -t arm64-v8a build --workspace
+    run_check "android cross-compile" cargo ndk -t arm64-v8a build --locked --workspace
   else
     skip_check "android cross-compile" "cargo-ndk not installed — REQUIRED from P0-D1"
   fi
@@ -329,6 +343,10 @@ fi
 # ── Flutter app ─────────────────────────────────────────────────
 if [ -f "$ROOT/pubspec.yaml" ]; then
   cd "$ROOT"
+  # The committed pubspec.lock, or red. `flutter analyze` and `flutter test` run
+  # an implicit `pub get` when pubspec.yaml is newer than the package config, and
+  # that one re-resolves; enforcing the lock first leaves them nothing to do.
+  run_check "pub lockfile (INV-7)" flutter pub get --enforce-lockfile
   # Hand-written Dart only — generated bindings (lib/src/rust/) are formatted
   # by FRB codegen and vendored cargokit is excluded like in analysis_options.
   # Enumerated by find, not a hardcoded dir list: a future lib/ subdir must not
@@ -399,11 +417,12 @@ if [ -f "$ROOT/pubspec.yaml" ]; then
   # That happened, once, in the commit that removed Inter.
   fonts_pinned() {
     local dir="$ROOT/assets/fonts" rec="$ROOT/assets/fonts/PROVENANCE.md"
-    local rc=0 checked=0 file want bytes got actual fam kt
+    local rc=0 checked=0 file want bytes got actual fam kt recorded="" referenced
     [ -f "$rec" ] || { echo "   assets/fonts/PROVENANCE.md is missing — fail closed"; return 1; }
 
     # (a) every recorded face still hashes and sizes to its anchor.
     while read -r file want bytes; do
+      recorded+="$file"$'\n'
       got="$(sha256sum "$dir/$file" 2>/dev/null | cut -d" " -f1)"
       if [ "$got" != "$want" ]; then
         echo "   DRIFT: $file does not match its PROVENANCE.md digest"
@@ -443,17 +462,28 @@ if [ -f "$ROOT/pubspec.yaml" ]; then
       rc=1
     fi
 
-    # (d) the native surface's hand-written asset paths still resolve.
+    # (d) the native surface loads exactly the recorded faces. RevealActivity.kt
+    #     names them as runtime asset paths that nothing compiles, and a failed
+    #     load is caught and logged, so the seed phrase would render in the
+    #     system face. The faces it references must equal the faces recorded:
+    #     a renamed path, a deleted one, or a file this lane cannot find all red,
+    #     so zero matches never reads as nothing to check.
     kt="$ROOT/android/app/src/main/kotlin/org/kaspaverse/app/RevealActivity.kt"
-    if [ -f "$kt" ]; then
-      while read -r file; do
-        [ -n "$file" ] || continue
-        [ -f "$dir/$file" ] || {
-          echo "   RevealActivity.kt loads assets/fonts/$file, which does not exist —"
-          echo "   createFromAsset fails at RUNTIME and is caught, so the seed screen"
-          echo "   would silently render in the system face"
-          rc=1; }
-      done < <(grep -o "flutter_assets/assets/fonts/[A-Za-z-]*\.ttf" "$kt" | sed 's|.*/||')
+    if [ ! -f "$kt" ]; then
+      echo "   RevealActivity.kt is not at its path, so the faces it loads cannot be checked"
+      rc=1
+    else
+      referenced="$(grep -o 'flutter_assets/assets/fonts/[^"]*' "$kt" | sed 's|.*/||' | sort -u)"
+      recorded="$(printf '%s' "$recorded" | sort -u)"
+      if [ -z "$referenced" ]; then
+        echo "   RevealActivity.kt references no font asset, so the seed screen would"
+        echo "   render in the system face"
+        rc=1
+      elif [ "$referenced" != "$recorded" ]; then
+        echo "   RevealActivity.kt loads a face set that is not the recorded one:"
+        diff <(echo "$recorded") <(echo "$referenced") | sed 's/^/     /'
+        rc=1
+      fi
     fi
     return $rc
   }
@@ -870,6 +900,21 @@ if [ -f "$ROOT/flutter_rust_bridge.yaml" ]; then
         echo "   before gating (L20/L61)"
         return 1
       }
+      # `git diff` compares tracked files only. A new API module generates a new
+      # binding file, and left unstaged it passed above while a clean checkout
+      # would build without it. Ignored files count too: nothing generated here
+      # may live outside the index.
+      local untracked
+      untracked="$(git --git-dir="$ROOT/.git" --work-tree="$ROOT" ls-files --others -- lib/src/rust/ rust/bridge/src/frb_generated.rs)" || {
+        echo "   git could not list untracked files, so the check cannot look"
+        return 1
+      }
+      if [ -n "$untracked" ]; then
+        echo "   generated files the index does not track:"
+        printf '%s\n' "$untracked" | sed 's/^/     /'
+        echo "   stage them with the rest of the bindings ('git add lib/src/rust/')"
+        return 1
+      fi
     }
     run_check "codegen drift (lib/src/rust/ + frb_generated.rs)" codegen_drift
   else
@@ -998,19 +1043,22 @@ pins_expected() { # file, sed-expression
   [ -f "$1" ] && sed -n "$2" "$1" 2>/dev/null | head -1
 }
 toolchain_pins() {
-  local drift=0 want got
-  local TT="$ROOT/rust/rust-toolchain.toml" WF="$ROOT/.github/workflows/gate.yml"
+  local drift=0 unreadable=0 want got
+  local WF="$ROOT/.github/workflows/gate.yml"
   _pin_cmp() { # label, want, got
-    # An unreadable pin is reported, never silently treated as agreement.
+    # An unreadable pin compares nothing, so it fails the lane below rather than
+    # passing as agreement. Drift is a local WARN; a pin nobody can read is not.
     if [ -z "$2" ]; then
-      printf '   %-30s PIN UNREADABLE (skipped)\n' "$1"; return 0
+      printf '   %-30s PIN UNREADABLE\n' "$1"; unreadable=$((unreadable+1)); return 0
     fi
     if [ "$2" != "${3:-}" ]; then
       printf '   %-30s pinned %-12s installed %s\n' "$1" "$2" "${3:-MISSING}"
       drift=$((drift+1))
     fi
   }
-  want="$(pins_expected "$TT" 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p')"
+  # The same reader the shipped-toolchain lane and the release script use, so the
+  # toolchain file has one parser: either quoting, one channel, an exact version.
+  want="$("$ROOT/tools/shipped_toolchain.sh" --pin 2>/dev/null)"
   got="$( (cd "$ROOT/rust" 2>/dev/null && rustc --version 2>/dev/null) | cut -d' ' -f2)"
   _pin_cmp "rustc (rust-toolchain.toml)" "$want" "$got"
 
@@ -1038,6 +1086,10 @@ toolchain_pins() {
   got="$(java -version 2>&1 | head -1 | sed -n 's/.*version "\([0-9]*\).*/\1/p')"
   _pin_cmp "jdk (gate.yml)" "$want" "$got"
 
+  if [ "$unreadable" -gt 0 ]; then
+    echo "   $unreadable pin(s) could not be read, so nothing was compared for them"
+    return 1
+  fi
   [ "$drift" -eq 0 ] && return 0
   if [ "${GATE_STRICT:-0}" = "1" ]; then
     echo "   $drift toolchain pin(s) drifted — local and CI must match (D-024)"
@@ -1053,6 +1105,93 @@ toolchain_pins() {
 }
 if [ -f "$ROOT/rust/rust-toolchain.toml" ] || [ -f "$ROOT/.github/workflows/gate.yml" ]; then
   run_check_warnable "toolchain pins (D-024)" toolchain_pins
+fi
+
+# ── The shipped toolchain (INV-7) ───────────────────────────────
+# The pins above govern the host lanes. The library inside an APK is compiled by
+# cargokit on the machine that builds the APK, and cargokit used to run
+# `rustup run stable`, so the gate tested 1.94.0 while every APK carried 1.97.1.
+# This lane reads the newest APK under build/app/outputs and asserts that its
+# bridge library names the pinned compiler, in `.comment` and in the standard
+# library's source paths. The release script and the install ritual run the same
+# check on the APK they ship. With no APK there is nothing to read: a SKIP that
+# says so, never a pass.
+if [ -f "$ROOT/android/build.gradle.kts" ]; then
+  lane="shipped toolchain (INV-7)"
+  echo "── gate: $lane"
+  if [ -x "$ROOT/tools/shipped_toolchain.sh" ]; then
+    "$ROOT/tools/shipped_toolchain.sh"; rc=$?
+  else
+    echo "   tools/shipped_toolchain.sh is missing or not executable, so nothing was read"
+    rc=1
+  fi
+  case "$rc" in
+    0) SEEN["$lane"]=1; RESULTS+=("PASS  $lane"); PASS=$((PASS+1)) ;;
+    3) skip_unbuilt "$lane" "no APK under build/app/outputs, so the shipped compiler is unmeasured" ;;
+    4) skip_check "$lane" "a tool the check needs is missing, named above" ;;
+    *) SEEN["$lane"]=1; RESULTS+=("FAIL  $lane"); FAIL=$((FAIL+1)) ;;
+  esac
+fi
+
+# ── The vendored build tool (INV-7) ─────────────────────────────
+# cargokit compiles the shipped native library, so it is a dependency on the
+# build path: every file must hash to rust_builder/cargokit/PROVENANCE.md, the
+# changed files must be exactly the anchored ones, and nothing may be added. The
+# pinned-toolchain change is one of those files; lose it and the next APK is
+# compiled by the machine's `stable` again.
+vendored_cargokit() {
+  local dir="$ROOT/rust_builder/cargokit" rec="$ROOT/rust_builder/cargokit/PROVENANCE.md"
+  local rc=0 checked=0 anchored=0 want file got listed actual marked_set anchored_set
+  [ -f "$rec" ] || { echo "   rust_builder/cargokit/PROVENANCE.md is missing, so nothing can be checked"; return 1; }
+  # (a) every recorded file still hashes to the record, counted so a deleted row reds
+  while read -r want file _; do
+    got="$(sha256sum "$dir/$file" 2>/dev/null | cut -d' ' -f1)"
+    if [ "$got" != "$want" ]; then
+      echo "   DRIFT: $file does not match the record"
+      rc=1
+    fi
+    checked=$((checked+1))
+  done < <(grep -E '^[0-9a-f]{64}  ' "$rec")
+  if [ "$checked" -ne 32 ]; then
+    echo "   the record lists $checked files, expected 32"
+    rc=1
+  fi
+  # (b) each changed file holds its anchor, and the files marked changed are
+  #     exactly the files anchored, so a duplicated row cannot stand in for one
+  while read -r _ want file; do
+    got="$(sha256sum "$dir/$file" 2>/dev/null | cut -d' ' -f1)"
+    if [ "$got" != "$want" ]; then
+      echo "   DRIFT: the changed file $file does not match its anchor"
+      rc=1
+    fi
+    anchored=$((anchored+1))
+  done < <(grep -E '^PATCHED  [0-9a-f]{64}  ' "$rec")
+  if [ "$anchored" -ne 3 ]; then
+    echo "   the record anchors $anchored changed files, expected 3"
+    rc=1
+  fi
+  marked_set="$(awk '/^[0-9a-f]{64}  .*← PATCHED$/{print $2}' "$rec" | sort)"
+  anchored_set="$(awk '/^PATCHED  [0-9a-f]{64}  /{print $3}' "$rec" | sort)"
+  if [ -z "$marked_set" ] || [ "$marked_set" != "$anchored_set" ]; then
+    echo "   the files marked changed and the files anchored differ"
+    rc=1
+  fi
+  # (c) nothing added: a new Dart file under build_tool/ is compiled into the
+  #     build tool, so the file set on disk must be the record's. Only the
+  #     outputs the tree's .gitignore names are left out; none is built from.
+  listed="$(awk '/^[0-9a-f]{64}  /{print $2}' "$rec" | sort)"
+  actual="$(cd "$dir" && find . -type f -not -name PROVENANCE.md \
+    -not -path '*/.dart_tool/*' -not -path '*/target/*' -not -name '*.iml' \
+    | sed 's|^\./||' | sort)"
+  if [ "$listed" != "$actual" ]; then
+    echo "   FILE-SET DRIFT: the vendored tree is not the recorded file list"
+    diff <(echo "$listed") <(echo "$actual") | sed 's/^/     /'
+    rc=1
+  fi
+  return $rc
+}
+if [ -d "$ROOT/rust_builder" ]; then
+  run_check "vendored cargokit (INV-7)" vendored_cargokit
 fi
 
 # ── Public-repo hygiene (always runs — the repo is public, D-011/D-019) ──
@@ -1982,12 +2121,18 @@ if [ "$FAIL" -gt 0 ]; then echo "GATE: RED"; exit 1; fi
 # Strict mode (CI, D-024): a SKIP means a tool is missing — on a runner that is a
 # provisioning bug, not an acceptable gap, or CI reads green while checking less
 # than the local gate does.
-if [ "${GATE_STRICT:-0}" = "1" ] && [ "$SKIP" -gt 0 ]; then
-  echo "GATE: RED (strict — $SKIP skipped check(s); provision the missing tool)"
+# A lane with no build product to read (skip_unbuilt) is the one exception: CI
+# builds no APK, so that SKIP is not a missing tool.
+if [ "${GATE_STRICT:-0}" = "1" ] && [ "$((SKIP - UNBUILT))" -gt 0 ]; then
+  echo "GATE: RED (strict — $((SKIP - UNBUILT)) skipped check(s); provision the missing tool)"
   exit 1
 fi
 if [ "$PASS" -eq 0 ]; then echo "GATE: NOTHING TO CHECK (scaffold state)"; exit 0; fi
 # A warning rides IN the verdict line, so a pasted proof carries it (INV-10) —
 # a warning printed 40 lines above the verdict is a warning nobody reads (L84).
-if [ "$WARN" -gt 0 ]; then echo "GATE: GREEN ($WARN warning(s) — read them)"; exit 0; fi
+# So does a lane that had no build product to read.
+notes=""
+[ "$WARN" -gt 0 ] && notes="$WARN warning(s) — read them"
+[ "$UNBUILT" -gt 0 ] && notes="${notes:+$notes; }$UNBUILT lane(s) had no build product to read"
+if [ -n "$notes" ]; then echo "GATE: GREEN ($notes)"; exit 0; fi
 echo "GATE: GREEN"

@@ -127,24 +127,39 @@ void main() {
     });
   });
 
-  group('KvLoader — the one indeterminate spinner (§8 v2.2)', () {
-    testWidgets('mark is 24 dp, inline is 16 dp, both stroke 2', (
-      tester,
-    ) async {
+  group('KvLoader draws one filled shape at both sizes', () {
+    // Each loader is found and read on its own, so a drawing rule that stops
+    // holding cannot pass by matching nothing.
+    testWidgets('the mark is 24 dp and the inline loader 16 dp, each a filled '
+        'shape over its centre', (tester) async {
       await tester.pumpWidget(
         const Directionality(
           textDirection: TextDirection.ltr,
           child: Column(children: [KvLoader(), KvLoader.inline()]),
         ),
       );
-      final boxes = tester.widgetList<SizedBox>(find.byType(SizedBox)).toList();
-      expect(boxes[0].width, KvSpace.l);
-      expect(boxes[1].width, KvSpace.m);
-      for (final spinner in tester.widgetList<CircularProgressIndicator>(
-        find.byType(CircularProgressIndicator),
-      )) {
-        expect(spinner.strokeWidth, 2);
+      final loaders = find.byType(KvLoader);
+      expect(loaders, findsNWidgets(2));
+      void drawsAt(int index, double side) {
+        final paint = find.descendant(
+          of: loaders.at(index),
+          matching: find.byType(CustomPaint),
+        );
+        expect(paint, findsOneWidget);
+        expect(tester.widget<CustomPaint>(paint).painter, isA<KvLoaderShape>());
+        expect(tester.getSize(paint), Size.square(side));
+        expect(
+          tester.renderObject(paint),
+          paints..path(
+            style: PaintingStyle.fill,
+            includes: [Offset(side / 2, side / 2)],
+            excludes: [const Offset(0.5, 0.5)],
+          ),
+        );
       }
+
+      drawsAt(0, KvSpace.l);
+      drawsAt(1, KvSpace.m);
     });
   });
 }

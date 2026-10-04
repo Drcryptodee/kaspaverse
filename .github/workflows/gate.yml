@@ -133,7 +133,9 @@ jobs:
           flutter-version: 3.41.5
           cache: true
 
-      - run: flutter pub get
+      # The committed pubspec.lock, or red: a pubspec.yaml change pushed without
+      # its lock update must fail here, not be re-resolved on a clean runner.
+      - run: flutter pub get --enforce-lockfile
 
       - name: Run the gate (strict — every check provisioned or red)
         # ANDROID_NDK_HOME is preset on the runner image; the gate uses it for
