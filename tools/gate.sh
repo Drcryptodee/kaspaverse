@@ -1229,13 +1229,19 @@ fi
 # socket witness's libc calls. Any other line naming the lint (an allow, an
 # expect, a warn, alone or inside a list) would switch the deny off for what it
 # covers, so every such line in the crate is pinned, each allow with the module
-# it annotates.
+# it annotates. A `#[path]` module or an `include!` would bring in a file this
+# scan never reads, so either one is a line in the set too, and the crate root
+# must be the default src/lib.rs.
 bridge_unsafe_allowlist() {
   local got want
+  if sed -n '/^\[lib\]/,/^\[/p' "$ROOT/rust/bridge/Cargo.toml" | grep -q '^path[[:space:]]*='; then
+    echo "   rust/bridge/Cargo.toml moves the crate root, so src/lib.rs is not what this lane pins"
+    return 1
+  fi
   got="$(cd "$ROOT" && find rust/bridge/src -name '*.rs' -print0 | sort -z | xargs -0 awk '
     pending != "" { print pending " " $0; pending = ""; next }
     /^#\[allow\(unsafe_code\)\]$/ { pending = FILENAME ":" $0; next }
-    /unsafe_code/ { print FILENAME ":" $0 }')"
+    /unsafe_code|#\[path|include!\(/ { print FILENAME ":" $0 }')"
   want="rust/bridge/src/lib.rs:#![deny(unsafe_code)]
 rust/bridge/src/lib.rs:#[allow(unsafe_code)] mod frb_generated;
 rust/bridge/src/lib.rs:#[allow(unsafe_code)] mod jni_seed;
