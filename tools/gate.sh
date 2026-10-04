@@ -130,6 +130,7 @@ expect_lane "race fan-out exponent (L135)"
 # ships an APK, and the vendored build tool that compiles its native library.
 [ -f "$ROOT/android/build.gradle.kts" ] && expect_lane "shipped toolchain (INV-7)"
 [ -d "$ROOT/rust_builder" ] && expect_lane "vendored cargokit (INV-7)"
+[ -f "$ROOT/rust/bridge/src/lib.rs" ] && expect_lane "bridge unsafe allowlist (INV-2)"
 expect_lane "public-repo hygiene (no tracked secrets)"
 expect_lane "section-anchor resolution (Group U-2)"
 expect_lane "internal-record boundary (D-102)"
@@ -1220,6 +1221,33 @@ vendored_cargokit() {
 }
 if [ -d "$ROOT/rust_builder" ]; then
   run_check "vendored cargokit (INV-7)" vendored_cargokit
+fi
+
+# ── Unsafe code in the bridge (INV-2) ───────────────────────────
+# The bridge denies unsafe code at its root and allows it at three module
+# declarations: the generated FFI glue, the JNI exports of the seed lane and the
+# socket witness's libc calls. Any other line naming the lint (an allow, an
+# expect, a warn, alone or inside a list) would switch the deny off for what it
+# covers, so every such line in the crate is pinned, each allow with the module
+# it annotates.
+bridge_unsafe_allowlist() {
+  local got want
+  got="$(cd "$ROOT" && find rust/bridge/src -name '*.rs' -print0 | sort -z | xargs -0 awk '
+    pending != "" { print pending " " $0; pending = ""; next }
+    /^#\[allow\(unsafe_code\)\]$/ { pending = FILENAME ":" $0; next }
+    /unsafe_code/ { print FILENAME ":" $0 }')"
+  want="rust/bridge/src/lib.rs:#![deny(unsafe_code)]
+rust/bridge/src/lib.rs:#[allow(unsafe_code)] mod frb_generated;
+rust/bridge/src/lib.rs:#[allow(unsafe_code)] mod jni_seed;
+rust/bridge/src/lib.rs:#[allow(unsafe_code)] mod sockstat;"
+  if [ "$got" != "$want" ]; then
+    echo "   the bridge's unsafe_code lint lines are not the pinned set:"
+    diff <(echo "$want") <(echo "$got") | sed 's/^/     /'
+    return 1
+  fi
+}
+if [ -f "$ROOT/rust/bridge/src/lib.rs" ]; then
+  run_check "bridge unsafe allowlist (INV-2)" bridge_unsafe_allowlist
 fi
 
 # ── Public-repo hygiene (always runs — the repo is public, D-011/D-019) ──
