@@ -11,15 +11,18 @@
 # and android_device.dart installApp). An uninstall destroys the Keystore key
 # the wallet is sealed to.
 #
-# So the harness is built first as the .dev package and copied where no other
-# build writes; the copy's own package must read org.kaspaverse.app.dev, and
-# drive is handed that copy, which fixes the package for every attempt.
-# --keep-app-running keeps drive's teardown from uninstalling the app when the
-# run ends. KV_DEV_INSTALL stays set for drive too, in case it rebuilds.
+# So the harness is built first as the .dev package and copied to a file of its
+# own; the copy's own package must read org.kaspaverse.app.dev, and drive is
+# handed that copy, which fixes the package for every attempt. --keep-app-running
+# keeps drive's teardown from uninstalling the app when the run ends.
+# KV_DEV_INSTALL stays set for drive too, in case it rebuilds. Flutter's own pub
+# get does not enforce the lock, so the graph is resolved from it once, and the
+# build and drive run with --no-pub.
 #
 # Usage: tools/perf/frame_traces.sh <device-serial>
-# Exit: drive's own status; 1 when the build fails, aapt2 is missing, or the
-# APK is not the .dev package (nothing is installed then).
+# Exit: drive's own status; 1 when the lock does not resolve, the build fails,
+# aapt2 is missing, or the APK is not the .dev package (nothing is installed
+# then, and the refused copy is removed).
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT" || exit 1
@@ -32,7 +35,6 @@ fi
 target=integration_test/perf_baseline_test.dart
 want=org.kaspaverse.app.dev
 built=build/app/outputs/flutter-apk/app-profile.apk
-apk=build/perf_harness/perf-harness-dev.apk
 
 aapt2=""
 for d in "${ANDROID_HOME:-/nonexistent}"/build-tools/*/ \
@@ -46,16 +48,24 @@ if [ -z "$aapt2" ]; then
   exit 1
 fi
 
-KV_DEV_INSTALL=1 flutter build apk --profile --target-platform android-arm64 \
+flutter pub get --enforce-lockfile || exit 1
+KV_DEV_INSTALL=1 flutter build apk --no-pub --profile --target-platform android-arm64 \
   --target="$target" || exit 1
-mkdir -p "$(dirname "$apk")" && cp "$built" "$apk" || exit 1
+mkdir -p build/perf_harness || exit 1
+apk="$(mktemp --suffix=.apk build/perf_harness/perf-harness-dev.XXXXXX)" || exit 1
+if ! cp "$built" "$apk"; then
+  rm -f "$apk"
+  exit 1
+fi
 pkg="$("$aapt2" dump packagename "$apk" 2>/dev/null)"
 if [ "$pkg" != "$want" ]; then
+  rm -f "$apk"
   echo "frame_traces: the harness APK is ${pkg:-unreadable}, not $want; nothing was installed"
   exit 1
 fi
+echo "frame_traces: driving $apk ($pkg, sha256 $(sha256sum < "$apk" | cut -c1-16))"
 
-KV_DEV_INSTALL=1 flutter drive --profile --no-dds --keep-app-running \
+KV_DEV_INSTALL=1 flutter drive --no-pub --profile --no-dds --keep-app-running \
   --driver=test_driver/perf_driver.dart \
   --target="$target" \
   --use-application-binary="$apk" \

@@ -99,15 +99,22 @@ AAPT2="$(dirname "$APKSIGNER")/aapt2"
 
 # ── Build ───────────────────────────────────────────────────────
 echo "── release: building $TAG ($COMMIT) — arm64-v8a, release profile"
+# The Dart graph comes from the committed lock: Flutter's own pub get does not
+# enforce it, and pub rewrites a lock entry whose content hash moved and exits 0,
+# so the lock is enforced once and the build does not resolve again.
+flutter pub get --enforce-lockfile \
+  || die "the Dart dependencies do not resolve to the committed pubspec.lock"
 # Pin the platform set: flutter's release default is arm+arm64+x64, and
 # cargokit compiles EVERY requested platform — abiFilters only governs
 # packaging, it does not trim cargokit's build matrix. kaspa-hashes can't
 # build x86_64-android at the pinned rev (L18/L25), so an unpinned release
 # build dies mid-compile after minutes of wasted armv7 work.
-flutter build apk --release --target-platform android-arm64
+flutter build apk --no-pub --release --target-platform android-arm64
 
 APK="build/app/outputs/flutter-apk/app-release.apk"
 [ -f "$APK" ] || die "expected output missing: $APK"
+[ -z "$(git status --porcelain)" ] \
+  || die "the build changed the working tree, so the APK may not be the committed state: $(git status --porcelain | head -3 | tr '\n' ' ')"
 
 # ── Verify the artifact's compiler, not the build's config ──────
 # The native library must name the pinned rustc in its own bytes (INV-7): the
