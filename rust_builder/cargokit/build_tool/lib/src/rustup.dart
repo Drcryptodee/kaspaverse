@@ -79,7 +79,11 @@ class Rustup {
 
     // To list all non-custom toolchains, we need to filter out lines that
     // don't start with "stable", "beta", or "nightly".
-    Pattern nonCustom = RegExp(r"^(stable|beta|nightly)");
+    // KaspaVerse patch: a version toolchain ("1.94.0-x86_64-...") counts too,
+    // so an installed pin is found here. Unlisted, it was handed to
+    // `rustup toolchain install`, which syncs the channel over the network on
+    // every build and fails offline.
+    Pattern nonCustom = RegExp(r"^(stable|beta|nightly|\d+\.\d+(\.\d+)?-)");
     final lines = res.stdout
         .toString()
         .split('\n')

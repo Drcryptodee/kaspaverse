@@ -1,9 +1,12 @@
 /// This is copied from Cargokit (which is the official way to use it currently)
 /// Details: https://fzyzcjy.github.io/flutter_rust_bridge/manual/integrate/builtin
 
+import 'dart:io';
+
 import 'package:collection/collection.dart';
 import 'package:logging/logging.dart';
 import 'package:path/path.dart' as path;
+import 'package:toml/toml.dart';
 
 import 'android_environment.dart';
 import 'cargo.dart';
@@ -139,12 +142,21 @@ class RustBuilder {
   CargoBuildOptions? get _buildOptions =>
       environment.crateOptions.cargo[environment.configuration];
 
-  String get _toolchain => _buildOptions?.toolchain.name ?? 'stable';
+  // KaspaVerse patch: the toolchain is the crate's rust-toolchain.toml pin,
+  // the same one every other build of the workspace uses. Upstream ran
+  // `rustup run stable`, and an explicit `rustup run` outranks the toolchain
+  // file, so the shipped library was compiled by whatever `stable` the build
+  // machine had installed. Without a toolchain file the upstream choice stands.
+  String get _toolchain =>
+      pinnedToolchain(environment.manifestDir) ??
+      _buildOptions?.toolchain.name ??
+      'stable';
 
   /// Returns the path of directory containing build artifacts.
   Future<String> build() async {
     final extraArgs = _buildOptions?.flags ?? [];
     final manifestPath = path.join(environment.manifestDir, 'Cargo.toml');
+    _log.info('Building with Rust toolchain $_toolchain');
     runCommand(
       'rustup',
       [
@@ -154,6 +166,9 @@ class RustBuilder {
         (target.android == null && environment.glibcVersion != null)
             ? 'zigbuild'
             : 'build',
+        // KaspaVerse patch: build the committed Cargo.lock or fail, never a
+        // dependency graph re-resolved on the build machine.
+        '--locked',
         ...extraArgs,
         '--manifest-path',
         manifestPath,
@@ -205,5 +220,29 @@ class RustBuilder {
       }
       return env.buildEnvironment();
     }
+  }
+}
+
+// KaspaVerse patch: reads the pin the way rustup finds it, from the nearest
+// rust-toolchain.toml at or above [manifestDir]. Returns null when there is no
+// such file. A file that names no channel is an error rather than a quiet
+// fallback to `stable`, which is the behaviour this patch removes.
+String? pinnedToolchain(String manifestDir) {
+  var dir = Directory(manifestDir).absolute;
+  while (true) {
+    final file = File(path.join(dir.path, 'rust-toolchain.toml'));
+    if (file.existsSync()) {
+      final table = TomlDocument.parse(file.readAsStringSync())
+          .toMap()['toolchain'];
+      final channel = table is Map ? table['channel'] : null;
+      if (channel is! String || channel.isEmpty) {
+        throw BuildException('${file.path} names no [toolchain] channel');
+      }
+      return channel;
+    }
+    if (dir.parent.path == dir.path) {
+      return null;
+    }
+    dir = dir.parent;
   }
 }
