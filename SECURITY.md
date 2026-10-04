@@ -55,7 +55,8 @@ These are enforced invariants, numbered so a review can cite them. The security-
   pinned certificate. Each release publishes the checksums and the signer fingerprint needed
   to verify provenance yourself.
 - **Supply-chain custody (INV-7).** Dependencies are pinned; `cargo-deny` (advisories,
-  licenses, sources) runs in the gate on every push and twice a week (Monday and Thursday);
+  licenses, sources) runs in the gate on every push and twice a week (Monday and Thursday),
+  and the same gate fails on any security advisory pub reports against the Dart packages;
   GitHub's dependency alerts watch the Rust, Dart and GitHub Actions graphs as well; every
   new dependency is a recorded decision.
 

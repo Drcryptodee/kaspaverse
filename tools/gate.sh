@@ -102,7 +102,7 @@ else
   expect_lane "rust workspace"
 fi
 if [ -f "$ROOT/pubspec.yaml" ]; then
-  expect_lane "pub lockfile (INV-7)"
+  expect_lane "pub lock and advisories (INV-7)"
   expect_lane "dart format"; expect_lane "flutter analyze"; expect_lane "flutter test"
   [ -d "$ROOT/assets/fonts" ] && expect_lane "bundled fonts (INV-7)"
 else
@@ -346,7 +346,35 @@ if [ -f "$ROOT/pubspec.yaml" ]; then
   # The committed pubspec.lock, or red. `flutter analyze` and `flutter test` run
   # an implicit `pub get` when pubspec.yaml is newer than the package config, and
   # that one re-resolves; enforcing the lock first leaves them nothing to do.
-  run_check "pub lockfile (INV-7)" flutter pub get --enforce-lockfile
+  #
+  # And pub's own security advisories (the GitHub Advisory Database, served by
+  # pub.dev), which `pub get` prints and exits 0 on; cargo-deny never sees a Dart
+  # package. Silence is only evidence once the lookup has shown it can see: a
+  # throwaway package pinned to dio 4.0.0, which carries GHSA-9324-jv53-9cc8, must
+  # be reported first. It is resolved in a temporary directory, never built.
+  pub_locked() {
+    local out probe rc=0
+    out="$(flutter pub get --enforce-lockfile 2>&1)" || {
+      printf '%s\n' "$out" | tail -20 | sed 's/^/   /'
+      return 1
+    }
+    probe="$(mktemp -d)" || return 1
+    printf 'name: advisory_probe\npublish_to: none\nenvironment:\n  sdk: ">=3.0.0 <4.0.0"\ndependencies:\n  dio: 4.0.0\n' \
+      > "$probe/pubspec.yaml"
+    if ! (cd "$probe" && dart pub get 2>&1) | grep -q "GHSA-9324-jv53-9cc8"; then
+      echo "   pub reported no advisory for the control (dio 4.0.0), so its silence"
+      echo "   about this app's packages is not evidence"
+      rc=1
+    fi
+    rm -rf "$probe"
+    if printf '%s\n' "$out" | grep -q "affected by security advisories"; then
+      echo "   pub reports security advisories against locked packages:"
+      printf '%s\n' "$out" | grep -E "affected by advisories|\[\^[0-9]+\]: " | sed 's/^/     /'
+      rc=1
+    fi
+    return $rc
+  }
+  run_check "pub lock and advisories (INV-7)" pub_locked
   # Hand-written Dart only — generated bindings (lib/src/rust/) are formatted
   # by FRB codegen and vendored cargokit is excluded like in analysis_options.
   # Enumerated by find, not a hardcoded dir list: a future lib/ subdir must not
