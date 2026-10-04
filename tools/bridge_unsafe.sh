@@ -22,12 +22,13 @@
 # call, so `register_native`/`RegisterNatives` is pinned everywhere. A macro from a
 # path crate the bridge compiles (`#[macro_export]` or a procedural macro) would
 # bring code in with no lint at all, so none of them, by cargo's own resolution,
-# may define one, or pull in a file by `#[path]` or `include!` that the search,
-# which follows symlinks, would not read. And because a source scan cannot see
-# what a dependency's macro emits, the built library's exported JNI symbols are
-# read too: exactly the five the Kotlin side declares. Every Kotlin line with the
-# word `external` is pinned, so a sixth native method in any spelling fails, and
-# no Java line may say `native`.
+# may define one, or pull in a file by `#[path]` or `include!`. That search reads
+# text, line by line (following symlinks), so it refuses the usual spellings
+# only. And because a source scan cannot see what a dependency's macro emits, the
+# built library's exported JNI symbols are read too: exactly the five the Kotlin
+# side declares. Every Kotlin line with the word `external` is pinned, so a sixth
+# native method fails however it is laid out, and no Java line may say `native`
+# in plain text.
 #
 # Usage: tools/bridge_unsafe.sh <dep-info>
 #   the gate passes the arm64 debug build's, rust/target/aarch64-linux-android/
