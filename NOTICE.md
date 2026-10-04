@@ -32,10 +32,14 @@ terms, its own copyright statements are unchanged, and nothing here relicenses a
 | BIP-39 English wordlist | `assets/bip39/english.txt` | the BIP-39 authors | see **Wordlist** below |
 | Icon geometry transcribed from Lucide | `lib/src/ui/widgets/kv_glyph.dart` | Lucide Icons and Contributors; Feather icons, Cole Bemis | ISC (Lucide); MIT for the Feather-derived subset |
 
-The vendored copy of `tokio-tungstenite` is the crates.io tarball verbatim save for one
-patched function; `rust/vendor/PROVENANCE.md` records the file-level digests and the gate
-checks them on every run. Font digests and upstream sources are recorded in
-`assets/fonts/PROVENANCE.md`, likewise machine-checked.
+The vendored copy of `tokio-tungstenite` is the crates.io tarball verbatim except three
+files, which carry two changes: the dial races IPv4 and IPv6, and every dialed socket sets
+`TCP_NODELAY`. `rust/vendor/PROVENANCE.md` names each change and records the file-level
+digests, and the gate checks them on every run. Cargokit is the copy shipped inside
+`flutter_rust_bridge_codegen` 2.12.0, verbatim except three named files (among them, the
+native library is compiled by the pinned Rust toolchain), recorded and machine-checked the
+same way in `rust_builder/cargokit/PROVENANCE.md`. Font digests and upstream sources are
+recorded in `assets/fonts/PROVENANCE.md`, likewise machine-checked.
 
 **Wordlist.** `assets/bip39/english.txt` is the canonical BIP-39 English wordlist (2048
 words, sha256 `2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda`),

@@ -11,10 +11,14 @@ You need:
 | Tool | Version |
 |:--|:--|
 | Flutter | 3.41.5 |
-| Rust | 1.94.0 (pinned in `rust/rust-toolchain.toml`) |
-| cargo-ndk | with the `aarch64-linux-android` target |
-| cargo-deny | current |
-| JDK | 17 |
+| Rust | 1.94.0 (pinned in `rust/rust-toolchain.toml`), with the `aarch64-linux-android` target |
+| cargo-ndk | 4.1.2 |
+| cargo-deny | 0.19.8 |
+| flutter_rust_bridge_codegen | 2.12.0 |
+| JDK | 21 |
+
+These are the versions CI installs (`.github/workflows/gate.yml`). `tools/gate.sh` compares
+yours against them and warns on any difference, which CI treats as a failure.
 
 Android only, arm64 only, on a physical device. x86_64 emulators cannot run the upstream
 hashing crate at the pinned revision.
