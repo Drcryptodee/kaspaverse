@@ -5,29 +5,21 @@
 // under build/perf_baseline/ — the machine-readable artifacts the baseline
 // table in the internal performance budget cites.
 //
-// Run (the internal perf-harness recipe carries the full walk-through):
-//   KV_DEV_INSTALL=1 flutter drive --profile --no-dds \
-//     --driver=test_driver/perf_driver.dart \
-//     --target=integration_test/perf_baseline_test.dart \
-//     --keep-app-running \
-//     -d <device>
+// Run it only through the script, never with `flutter drive` typed by hand:
+//   tools/perf/frame_traces.sh <device-serial>
 //
-// --keep-app-running IS MANDATORY, and it is not a convenience flag. Without it
-// `flutter drive` tears the app down when the run ends, and that teardown is
-// `stopApp` FOLLOWED BY `uninstallApp` — unconditional, whenever the application
-// package is known, which it always is on Android (flutter_tools' drive service,
-// verified against the pinned Flutter 3.41.5). Uninstalling wipes app data, and
-// app data is the vault: an unrecoverable wallet unless the seed was written
-// down. Run it against the `.dev` package only (`KV_DEV_INSTALL=1`): when an
-// install fails, Flutter's installer uninstalls the app it is replacing, and on
-// the funded package that is the wallet. The flag stays mandatory there too,
-// because drive picks the package it tears down from the APK on disk before it
-// builds, and that APK can be the funded one.
-//
-// The flag is spelled out here rather than cited, deliberately. It was cited
-// once and the citation was later reworded away for pointing at a file that
-// public clones do not have — which left this exact command, copy-pasteable and
-// one flag short of destructive, with nothing left to explain the omission.
+// Two of drive's own paths uninstall an app, and an uninstall wipes its data,
+// which is the vault: an unrecoverable wallet unless the seed was written down.
+// Without --keep-app-running, drive's teardown runs `stopApp` and then
+// `uninstallApp` when the run ends, pass or fail. And when an install fails,
+// Flutter's installer uninstalls the package it was given; drive retries a
+// failed launch with the package it resolved before building (the APK left on
+// disk by the last build, else the Gradle namespace), which can be the funded
+// one even when the build itself is the `.dev` package. The script builds the
+// `.dev` APK, refuses unless the APK's own package is org.kaspaverse.app.dev,
+// and hands drive that APK with --keep-app-running, so every attempt and the
+// teardown name the `.dev` package (verified against the pinned Flutter
+// 3.41.5).
 import 'package:flutter_driver/flutter_driver.dart' as driver;
 import 'package:integration_test/integration_test_driver.dart';
 
