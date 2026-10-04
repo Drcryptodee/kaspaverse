@@ -94,6 +94,8 @@ if [ -z "$APKSIGNER" ]; then
   done
 fi
 [ -n "${APKSIGNER:-}" ] || die "apksigner not found (Android SDK build-tools)"
+AAPT2="$(dirname "$APKSIGNER")/aapt2"
+[ -x "$AAPT2" ] || die "aapt2 not found beside apksigner (Android SDK build-tools)"
 
 # ── Build ───────────────────────────────────────────────────────
 echo "── release: building $TAG ($COMMIT) — arm64-v8a, release profile"
@@ -113,6 +115,13 @@ APK="build/app/outputs/flutter-apk/app-release.apk"
 SHIPPED="$(tools/shipped_toolchain.sh "$APK")" \
   || { printf '%s\n' "$SHIPPED" >&2; die "the native library was not compiled by the pinned toolchain"; }
 printf '%s\n' "$SHIPPED"
+
+# The versionCode must be the commit count the build was meant to stamp: a lower
+# one is refused as an update on every phone that has a newer build, and the
+# usual way past that refusal, an uninstall, loses the wallet without its words.
+VERSION_CODE="$("$AAPT2" dump badging "$APK" | sed -n "s/.*versionCode='\([0-9]*\)'.*/\1/p" | head -1)"
+[ "$VERSION_CODE" = "$(git rev-list --count HEAD)" ] \
+  || die "the APK's versionCode is ${VERSION_CODE:-unreadable}, but HEAD counts $(git rev-list --count HEAD) commits"
 
 # ── Verify the artifact's signer, not the config ────────────────
 CERTS="$("$APKSIGNER" verify --print-certs "$APK")" \
@@ -151,6 +160,7 @@ cp "$APK" "dist/$OUT"
 {
   echo "tag:     $TAG"
   echo "commit:  $(git rev-parse HEAD)"
+  echo "versionCode: $VERSION_CODE"
   echo "flutter: $(flutter --version | head -1)"
   # Read from the library itself: `rustc -V` here would name the repo root's
   # default toolchain, not the one that compiled the shipped code.
