@@ -308,7 +308,9 @@ if [ -f "$ROOT/rust/Cargo.toml" ]; then
     }
   fi
   if command -v cargo-deny >/dev/null 2>&1; then
-    run_check "cargo deny (INV-7)" cargo deny --locked check
+    # `-D advisory-not-detected`: an ignore whose advisory no longer matches the
+    # tree fails, so an ignore goes when the lock moves past the fix.
+    run_check "cargo deny (INV-7)" cargo deny --locked check -D advisory-not-detected
   else
     skip_check "cargo deny (INV-7)" "cargo-deny not installed — REQUIRED from P0-D4"
   fi
@@ -938,8 +940,13 @@ if [ -f "$ROOT/flutter_rust_bridge.yaml" ]; then
       fi
       flutter_rust_bridge_codegen generate >/dev/null 2>&1 || gen_rc=1
       if ! cmp -s "$lock" "$snap"; then
-        cp "$snap" "$lock"; rm -f "$snap"
-        echo "   the code generator rewrote rust/Cargo.lock (restored): the committed lock is stale"
+        if cp "$snap" "$lock" && cmp -s "$snap" "$lock"; then
+          rm -f "$snap"
+          echo "   the code generator rewrote rust/Cargo.lock (restored): the committed lock is stale"
+        else
+          echo "   the code generator rewrote rust/Cargo.lock and restoring it failed;"
+          echo "   the committed bytes are at $snap"
+        fi
         return 1
       fi
       rm -f "$snap"
