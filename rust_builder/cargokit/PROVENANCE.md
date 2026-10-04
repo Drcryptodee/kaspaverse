@@ -43,12 +43,12 @@ source paths (`/rustc/<commit>/`), both compared against `rustup run <pin> rustc
 ## Known gap: the build tool's own Dart dependencies are not locked
 
 `run_build_tool.sh` writes a small runner package into the build directory and runs
-`dart pub get` there, so `build_tool`'s dependencies are resolved on the build machine
-each time `build_tool`'s files change (the runner caches on a hash of the directory
-listing). `build_tool/pubspec.lock` is not used by that resolution. Upstream pins the
-direct dependencies exactly in `pubspec.yaml` for this reason; the transitive ones
-float within their ranges, and pub verifies each download against pub.dev's published
-hash.
+`dart pub get` there whenever `build_tool`'s files change. `build_tool/pubspec.lock` is
+not used by that resolution: the versions in force are whatever the runner's own,
+untracked `pubspec.lock` under `build/` recorded the first time it resolved, and
+`flutter clean` or a new machine resolves them fresh. Upstream pins the direct
+dependencies exactly in `pubspec.yaml` for this reason; the transitive ones float within
+their ranges, and pub verifies each download against pub.dev's published hash.
 
 ## Verify it yourself
 
