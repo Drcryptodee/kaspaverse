@@ -931,7 +931,11 @@ if [ -f "$ROOT/flutter_rust_bridge.yaml" ]; then
       # lock is snapshotted, restored if the generator moved it, and that fails.
       local lock="$ROOT/rust/Cargo.lock" snap gen_rc=0
       snap="$(mktemp)" || return 1
-      cp "$lock" "$snap"
+      if ! { [ -f "$lock" ] && cp "$lock" "$snap" && cmp -s "$lock" "$snap"; }; then
+        rm -f "$snap"
+        echo "   rust/Cargo.lock could not be snapshotted, so the generator cannot run safely"
+        return 1
+      fi
       flutter_rust_bridge_codegen generate >/dev/null 2>&1 || gen_rc=1
       if ! cmp -s "$lock" "$snap"; then
         cp "$snap" "$lock"; rm -f "$snap"
