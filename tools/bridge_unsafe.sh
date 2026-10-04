@@ -14,14 +14,17 @@
 # file under another configuration (a `path = "..."` attribute, an `include!`, a
 # `debug_assertions` cfg) are pinned too, and so is any `macro_rules!`, whose
 # expansion inside an allowed item would carry what the scan never sees written.
-# In the two files whose allows cover whole items (the seed lane's exports, the
-# socket witness's module), anything the lint would report or that exports a
-# symbol is pinned: an `unsafe` token, the edition-2021 attributes that carry none
-# (`no_mangle`, `export_name`, `link_section`), and the `global_asm!` macro.
-# A `#[macro_export]` macro from the workspace's other crates would bring code in
-# with no lint at all, so core and chain must define none. And because a source
-# scan cannot see what a dependency's macro emits, the built library's exported
-# JNI symbols are read too: exactly the five the Kotlin side declares.
+# In the files whose allows cover whole items (the seed lane's exports, the
+# socket witness's module and any file under it), anything the lint would report
+# or that exports a symbol is pinned: an `unsafe` token, the edition-2021
+# attributes that carry none (`no_mangle`, `export_name`, `link_section`), and the
+# `global_asm!` macro. A native method can also be bound by a safe registration
+# call, so `register_native`/`RegisterNatives` is pinned everywhere. A
+# `#[macro_export]` macro from a path crate the bridge compiles would bring code in
+# with no lint at all, so none of them, by cargo's own resolution, may define one.
+# And because a source scan cannot see what a dependency's macro emits, the built
+# library's exported JNI symbols are read too: exactly the five the Kotlin side
+# declares, and the app declares no other native method.
 #
 # Usage: tools/bridge_unsafe.sh <dep-info>
 #   the gate passes the arm64 debug build's, rust/target/aarch64-linux-android/
@@ -55,8 +58,8 @@ fi
 got="$(cd "$ROOT" && printf '%s\n' "$compiled" | xargs awk '
   pending != "" { print pending " " $0; pending = ""; next }
   /^#\[allow\(unsafe_code\)\]$/ { pending = FILENAME ":" $0; next }
-  /unsafe_code|(^|[^[:alnum:]_])path[[:space:]]*=[[:space:]]*r?#*"|include[[:space:]]*!|debug_assertions|macro_rules/ { print FILENAME ":" $0; next }
-  FILENAME ~ /(jni_seed|sockstat)\.rs$/ && /unsafe|no_mangle|export_name|link_section|global_asm/ { print FILENAME ":" $0 }')"
+  /unsafe_code|(^|[^[:alnum:]_])path[[:space:]]*=[[:space:]]*r?#*"|include[[:space:]]*!|debug_assertions|macro_rules|register_native|RegisterNatives/ { print FILENAME ":" $0; next }
+  FILENAME ~ /\/(jni_seed|sockstat)(\.rs$|\/)/ && /unsafe|no_mangle|export_name|link_section|global_asm/ { print FILENAME ":" $0 }')"
 want='rust/bridge/src/jni_seed.rs:#[no_mangle]
 rust/bridge/src/jni_seed.rs:#[allow(unsafe_code)] pub extern "system" fn Java_org_kaspaverse_app_VaultBridge_nativeUnlockWithSeed(
 rust/bridge/src/jni_seed.rs:#[no_mangle]
@@ -81,13 +84,27 @@ if [ "$got" != "$want" ]; then
   exit 1
 fi
 
-exported="$(grep -rln 'macro_export' "$ROOT/rust/core/src" "$ROOT/rust/chain/src")"
+# Every path crate in the bridge's dependency graph, as cargo resolves it.
+if ! tree="$(cd "$ROOT/rust" && cargo tree --locked --offline -p kaspaverse_bridge \
+    --target all -e normal,build --prefix none 2>&1)"; then
+  echo "   cargo could not list the bridge's dependencies:"
+  printf '%s\n' "$tree" | head -3 | sed 's/^/     /'
+  exit 1
+fi
+mapfile -t crates < <(printf '%s\n' "$tree" | sed -n 's|.*(\(/[^)]*\)).*|\1|p' | sort -u)
+for need in "$ROOT/rust/core" "$ROOT/rust/chain"; do
+  if ! printf '%s\n' "${crates[@]}" | grep -qxF "$need"; then
+    echo "   cargo's dependency list does not name ${need#"$ROOT"/}, so it was not read as expected"
+    exit 1
+  fi
+done
+exported="$(grep -rln --include='*.rs' 'macro_export' "${crates[@]}")"
 if [ $? -gt 1 ]; then
-  echo "   rust/core/src and rust/chain/src could not be searched for exported macros"
+  echo "   the bridge's path crates could not be searched for exported macros"
   exit 1
 fi
 if [ -n "$exported" ]; then
-  echo "   a workspace crate exports a macro, which would bring code into the bridge unlinted:"
+  echo "   a path crate the bridge compiles exports a macro, which would bring code into it unlinted:"
   printf '%s\n' "$exported" | sed "s|^$ROOT/|     |"
   exit 1
 fi
@@ -104,7 +121,8 @@ if ! dynsyms="$(readelf --dyn-syms -W "$so" 2>&1)"; then
   exit 1
 fi
 symbols="$(printf '%s\n' "$dynsyms" \
-  | awk '$7 != "UND" && ($8 ~ /^Java_/ || $8 ~ /^JNI_On/) { print $8 }' | sort -u)"
+  | awk '$1 ~ /^[0-9]+:$/ && $0 !~ /[[:space:]]UND([[:space:]]|$)/ && $NF ~ /^(Java_|JNI_On)/ { print $NF }' \
+  | sort -u)"
 want_symbols='Java_org_kaspaverse_app_VaultBridge_nativeExportSeedForKeystore
 Java_org_kaspaverse_app_VaultBridge_nativeInstallVaultPepper
 Java_org_kaspaverse_app_VaultBridge_nativeRegenerateCeremony
@@ -113,5 +131,29 @@ Java_org_kaspaverse_app_VaultBridge_nativeUnlockWithSeed'
 if [ "$symbols" != "$want_symbols" ]; then
   echo "   the library's exported JNI symbols are not the five the Kotlin side declares:"
   diff <(echo "$want_symbols") <(echo "$symbols") | sed 's/^/     /'
+  exit 1
+fi
+
+# The app declares exactly those five native methods: a sixth could be bound
+# without an export, by a registration call from code the scans above miss.
+declared="$(grep -rhoE --include='*.kt' 'external[[:space:]]+fun[[:space:]]+[A-Za-z0-9_]+' "$ROOT/android/app/src")"
+if [ $? -gt 1 ]; then
+  echo "   android/app/src could not be searched for native method declarations"
+  exit 1
+fi
+declared="$(printf '%s\n' "$declared" | awk 'NF { print $NF }' | sort -u)"
+if [ "$declared" != "$(printf '%s\n' "$want_symbols" | sed 's/^Java_org_kaspaverse_app_VaultBridge_//')" ]; then
+  echo "   the app's Kotlin native methods are not the five the library exports:"
+  printf '%s\n' "${declared:-(none)}" | sed 's/^/     /'
+  exit 1
+fi
+java_natives="$(grep -rlE --include='*.java' '(^|[[:space:]])native[[:space:]]+[^=;]*\(' "$ROOT/android/app/src")"
+if [ $? -gt 1 ]; then
+  echo "   android/app/src could not be searched for Java native methods"
+  exit 1
+fi
+if [ -n "$java_natives" ]; then
+  echo "   a Java file declares a native method:"
+  printf '%s\n' "$java_natives" | sed "s|^$ROOT/|     |"
   exit 1
 fi
