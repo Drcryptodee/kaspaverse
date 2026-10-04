@@ -17,10 +17,11 @@
 // surface while the founder authenticates (biometric system sheet — the
 // harness never touches secret material, INV-1/2/3).
 //
-// Do not invent a `flutter drive` line for this file. The one invocation that is
-// safe to run against a device holding a real vault lives in
-// test_driver/perf_driver.dart, and the reason it needs --keep-app-running is
-// written out there.
+// Do not invent a `flutter drive` line for this file. Its one invocation lives in
+// test_driver/perf_driver.dart and runs against the `.dev` package only: when an
+// install fails, Flutter's installer uninstalls the app it replaces, which on the
+// funded package is the wallet. Why it also needs --keep-app-running is written
+// out there.
 //
 // Home carries ambient period animations (status-beacon pulse keyed to the
 // wall clock), so this harness NEVER calls pumpAndSettle — real-time dwells

@@ -6,7 +6,7 @@
 // table in the internal performance budget cites.
 //
 // Run (the internal perf-harness recipe carries the full walk-through):
-//   flutter drive --profile \
+//   KV_DEV_INSTALL=1 flutter drive --profile --no-dds \
 //     --driver=test_driver/perf_driver.dart \
 //     --target=integration_test/perf_baseline_test.dart \
 //     --keep-app-running \
@@ -18,7 +18,11 @@
 // package is known, which it always is on Android (flutter_tools' drive service,
 // verified against the pinned Flutter 3.41.5). Uninstalling wipes app data, and
 // app data is the vault: an unrecoverable wallet unless the seed was written
-// down. This harness runs against a real device with a real vault on it.
+// down. Run it against the `.dev` package only (`KV_DEV_INSTALL=1`): when an
+// install fails, Flutter's installer uninstalls the app it is replacing, and on
+// the funded package that is the wallet. The flag stays mandatory there too,
+// because drive picks the package it tears down from the APK on disk before it
+// builds, and that APK can be the funded one.
 //
 // The flag is spelled out here rather than cited, deliberately. It was cited
 // once and the citation was later reworded away for pointing at a file that
