@@ -353,6 +353,9 @@ if [ -f "$ROOT/pubspec.yaml" ]; then
   # package. Silence is only evidence once the lookup has shown it can see: a
   # throwaway package pinned to dio 4.0.0, which carries GHSA-9324-jv53-9cc8, must
   # be reported first. It is resolved in a temporary directory, never built.
+  # One detector serves the control and the app, so a change in pub's wording
+  # that blinds it also fails the control.
+  pub_advisories() { grep -E 'affected by (security )?advisories|github\.com/advisories/GHSA-'; }
   pub_locked() {
     local out probe rc=0
     out="$(flutter pub get --enforce-lockfile 2>&1)" || {
@@ -362,15 +365,15 @@ if [ -f "$ROOT/pubspec.yaml" ]; then
     probe="$(mktemp -d)" || return 1
     printf 'name: advisory_probe\npublish_to: none\nenvironment:\n  sdk: ">=3.0.0 <4.0.0"\ndependencies:\n  dio: 4.0.0\n' \
       > "$probe/pubspec.yaml"
-    if ! (cd "$probe" && dart pub get 2>&1) | grep -q "GHSA-9324-jv53-9cc8"; then
+    if ! (cd "$probe" && dart pub get 2>&1) | pub_advisories | grep -q "GHSA-9324-jv53-9cc8"; then
       echo "   pub reported no advisory for the control (dio 4.0.0), so its silence"
       echo "   about this app's packages is not evidence"
       rc=1
     fi
     rm -rf "$probe"
-    if printf '%s\n' "$out" | grep -q "affected by security advisories"; then
+    if printf '%s\n' "$out" | pub_advisories | grep -q .; then
       echo "   pub reports security advisories against locked packages:"
-      printf '%s\n' "$out" | grep -E "affected by advisories|\[\^[0-9]+\]: " | sed 's/^/     /'
+      printf '%s\n' "$out" | pub_advisories | sed 's/^/     /'
       rc=1
     fi
     return $rc
