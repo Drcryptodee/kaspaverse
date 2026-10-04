@@ -27,9 +27,15 @@ hashing crate at the pinned revision.
 ```bash
 flutter pub get
 tools/preflight.sh
-flutter build apk --debug --target-platform android-arm64
-flutter install
+KV_DEV_INSTALL=1 flutter build apk --debug --target-platform android-arm64
+adb install -r build/app/outputs/flutter-apk/app-debug.apk
 ```
+
+`KV_DEV_INSTALL=1` builds `org.kaspaverse.app.dev`, which installs beside a real wallet
+instead of over it. Never point `flutter install`, `flutter run` or `flutter drive` at a
+phone whose `org.kaspaverse.app` holds a wallet: when an install fails, Flutter uninstalls
+the app, and with it the Android Keystore key the wallet is sealed to, so only the recovery
+words bring that wallet back.
 
 If you change a type in `rust/bridge`, regenerate the bindings and never edit them by hand:
 
