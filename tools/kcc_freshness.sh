@@ -9,15 +9,18 @@
 # tool is the internal record's own freshness probe); the table is duplicated inline so the
 # script still works in the public clone, which carries code and tooling only.
 set -uo pipefail
-REV=c0bb8f3babbb6a93dbddac900121e5046c1ec388   # kaspanet/kccs main @ 2026-09-21T13:31:53Z; re-pinned 2026-09-24 (kcc-rediff; was 54f4f9c, re-pinned 2026-09-02; before that ea5176a)
+REV=3fbec524abfbc20e87652eb938db218f8c17db17   # kaspanet/kccs main @ 2026-10-07T20:38:08Z; re-pinned 2026-10-11 (kcc-rediff; was c0bb8f3, re-pinned 2026-09-24; 54f4f9c, 2026-09-02; before that ea5176a)
 PINNED='b17b9b81d55ea51dce633c9b992287cabcd85edf LICENSE.md
-94d9965319f4bb2b26bdc7f5b8a91357f109e274 README.md
+be6e0c7dc04fd593db68963e7c870e4b39ba928f README.md
 aeb1e37dce1efb2dd2588abe3e9551e8f0ee3e04 kcc-0000.md
-a1d3f1725d869f63b3b4304662dfe0b2c42e7dc0 kcc-0001.md
-e6b1b5362b7ee54791799c9db410ce7370799102 kcc-0002.md
-e6e96f39a15b0e8bf6a319152a8fa0e54b3c93ab kcc-0002/reference-code.md
-58c359a393868789e82431d911065cd7c79db9d6 kcc-0020.md
-8810f111ebeba86b276e0cced167df5712e6621d kcc-0020/borrowed-receive-authorization.md
+9399895904c4f652ae544b855d4b3b660b6703e4 kcc-0001.md
+c55d6a8dbce3c0191af97f1d43ae44a34c5a9df1 kcc-0001/vectors/conformance.json
+b9e6e2706834b844fddcf91f3a450bc3055501ad kcc-0002.md
+865bff52ecc43b420e0faf46c7725567d9767d0c kcc-0002/reference-code.md
+6db2925ae5d54f1ab29dcc0f0c403e078d6bcafb kcc-0002/vectors/authority-schemes.json
+9d6e5c1a7e0f4d17c226b71834d8f326a2b37930 kcc-0020.md
+81430832a5075b259b463f22844c2b4bfe46300c kcc-0020/borrowed-receive-authorization.md
+5432a8a060b70fec6e19a9b28f56dd93992ab60f kcc-0020/vectors/conformance.json
 092c27277d16c2c10566701b80a5d3be95898e8a kcc-template.md'
 TREE=$(curl -fsS --max-time 12 -H 'Accept: application/vnd.github+json' \
   'https://api.github.com/repos/kaspanet/kccs/git/trees/main?recursive=1' 2>/dev/null) || {
