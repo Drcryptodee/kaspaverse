@@ -9,6 +9,7 @@ import 'package:kaspaverse/src/rust/api/vault.dart' as vault_api;
 import 'package:kaspaverse/src/ui/biometric_copy.dart';
 import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/unlock_surface.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_chrome.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_loader.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_lock_mark.dart';
 
@@ -173,15 +174,13 @@ void main() {
     expect(find.text('Unlock'), findsNothing);
   });
 
-  testWidgets('a probe that NEVER answers still states the way out', (
+  testWidgets('a probe that never answers holds the loader alone', (
     tester,
   ) async {
-    // `wallet-security-auditor`, UX-R7. `_probe()`'s `catch (_)` cannot reach
-    // this one: a MethodChannel reply that never arrives is swallowed by
-    // `DartMessenger`, so the future stays pending and `_biometricReady` stays
-    // null for ever. The foot's early return used to render nothing but a
-    // spinner — no pill, no hand-off, no recovery — on the one screen standing
-    // between a user and their funds (INV-6's liveness shadow).
+    // A MethodChannel reply that never arrives leaves `_biometricReady` null,
+    // and `_probe()`'s `catch (_)` never runs. The door then holds the pill's
+    // seat with a loader and offers no way to the passphrase door. The state
+    // is not reachable at the pinned engine; this pins what it would show.
     final wedged = Completer<bool>();
     await tester.pumpWidget(
       MaterialApp(
@@ -202,6 +201,7 @@ void main() {
     expect(find.byType(KvLoader), findsOneWidget);
     expect(find.text('Unlock'), findsNothing);
     expect(find.text('Enter passphrase'), findsNothing);
+    expect(find.byType(KvTextAction), findsNothing);
   });
 
   group("the render's ONE text action, and no recovery sheet", () {

@@ -160,10 +160,8 @@ class _UnlockSurfaceState extends State<UnlockSurface> {
       if (mounted) setState(() => _biometricReady = ready);
     } catch (_) {
       // `catch (_)`, not `on PlatformException`: a `MissingPluginException` is
-      // not one, and an uncaught throw here leaves `_biometricReady` null — a
-      // permanent spinner on the one screen standing between the user and their
-      // funds, with the "Unlock with passphrase" escape never rendered. INV-6's
-      // liveness shadow (wallet-security-auditor).
+      // not one. An uncaught throw would leave `_biometricReady` null, and the
+      // foot would hold its loader with no way to the passphrase door.
       if (mounted) setState(() => _biometricReady = false);
     }
   }
@@ -217,13 +215,11 @@ class _UnlockSurfaceState extends State<UnlockSurface> {
         }
       });
     } catch (_) {
-      // NOT `on PlatformException` alone. A MissingPluginException is not one,
-      // and neither is a channel reply that never arrives at all — which is
-      // exactly what an unguarded platform throw produced, because Flutter's
-      // DartMessenger swallows it and simply never replies. Uncaught, that left
-      // `_unlocking` true forever: a disabled button reading "Unlocking…" on the
-      // one screen standing between the user and their funds (run 1, F4). Same
-      // reasoning as `_probe()` above — solved one method up, never carried down.
+      // Not `on PlatformException` alone. A checked exception thrown by the
+      // platform handler reaches Dart as an empty reply, which becomes a
+      // `MissingPluginException`; uncaught, it would leave `_unlocking` true
+      // and the button reading "Unlocking..." for good. Same reasoning as
+      // `_probe()` above.
       if (!mounted) return;
       setState(
         () =>
@@ -290,13 +286,8 @@ class _UnlockSurfaceState extends State<UnlockSurface> {
           // take the slack and the composition is the render's; where it does
           // not, they collapse to zero and the column scrolls instead of
           // overflowing. No breakpoint is read (BG-33).
-          // **And it says so when there is more below** (`ux-auditor`,
-          // UX-R7). At 915 x 412 with the key-invalidated notice up, the
-          // pill's ink ends at y=408 of 412 and the recovery escape is
-          // entirely off-screen — the one state that most needs it, at the
-          // geometry the founder actually holds this phone in second-most
-          // often, with nothing on the glass saying to scroll. The app owns
-          // the fade; the door was not using it.
+          // The fade says when there is more below, at the geometries where
+          // the foot scrolls.
           child: KvScrollEdge(
             ground: KvColor.abyss,
             child: LayoutBuilder(
@@ -358,20 +349,17 @@ class _UnlockSurfaceState extends State<UnlockSurface> {
   List<Widget> _foot() {
     final ready = _biometricReady;
     if (ready == null) {
-      // Probing. The pill's seat is HELD rather than left empty, so the foot
-      // does not jump 56 dp the instant the probe answers (BG-24).
+      // Probing. The pill's seat is held rather than left empty, so the foot
+      // does not jump 56 dp when the probe answers (BG-24).
       //
-      // **And the recovery escape renders anyway**, outside this early
-      // return. `_probe()`'s `catch (_)` cannot reach the one failure that
-      // matters here: a MethodChannel reply that never arrives at all, which
-      // `DartMessenger` swallows, so the future simply stays pending. That is
-      // live rather than theoretical — a `java.lang.Error` escaping the
-      // platform handler is not caught by a `catch (Exception)` — and it is
-      // run 1's F4 scar one state over. Without this the door would sit on a
-      // spinner for ever with no pill, no hand-off and no way out stated:
-      // INV-6's liveness shadow on the one screen between a user and their
-      // funds (`wallet-security-auditor`, UX-R7, proven against a wedged
-      // probe).
+      // Nothing else renders until the probe answers, so a platform reply that
+      // never arrived would hold the door on this loader with no way to the
+      // passphrase door. It is not reachable today: the probe's handlers reply
+      // synchronously; a `RuntimeException` arrives as a `PlatformException`
+      // and any other `Exception` as a `MissingPluginException`, and
+      // `_probe()`'s `catch (_)` takes both; an `Error` ends the process. The
+      // widget test 'a probe that never answers holds the loader alone' pins
+      // what the door would show.
       return [
         const SizedBox(
           height: KvSpace.control,
@@ -414,10 +402,8 @@ class _UnlockSurfaceState extends State<UnlockSurface> {
         const SizedBox(height: KvSpace.m),
       ],
       _pill(ready),
-      // **9.5 dp in the render, and it is a custody number here.** The first
-      // cut left 4 dp under the pill and 0 between the two actions, so a thumb
-      // a hair low on the unlock hand-off landed on the sheet that tells the
-      // user to clear the app's storage (`ux-auditor` BLOCK, item 21/BG-12).
+      // 9.5 dp in the render. BG-12 needs at least 8 dp between the pill and
+      // the text action below it, or a thumb a hair low lands on the wrong one.
       const SizedBox(height: KvSpace.s10),
       // **The render's one text action, and only that** (founder, on glass
       // 2026-09-10: *"remove the whole info icon and remove the lost

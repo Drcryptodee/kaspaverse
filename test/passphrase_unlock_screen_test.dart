@@ -33,9 +33,8 @@ void main() {
     expect(find.byType(SecretKeyboard), findsOneWidget);
     // The house pill since UX-R7 — the screen no longer speaks Material.
     expect(find.widgetWithText(KvAction, 'Unlock'), findsOneWidget);
-    // The recovery escape is NOT here: it lives on the unguarded door, so it
-    // survives the accessibility refusal this screen sits behind (F6,
-    // `ffi-leak-auditor` UX-R7). One act, one seat (BG-21).
+    // No recovery sheet: the app has none since it left the unlock door. One
+    // act, one seat (BG-21).
     expect(find.text('Lost your passphrase?'), findsNothing);
   });
 
