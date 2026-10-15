@@ -31,6 +31,7 @@ import 'package:kaspaverse/src/ui/widgets/kv_coming_soon.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_contact.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_drawer.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_glyph.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_hold.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_rows.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_mark.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_keypad.dart';
@@ -99,6 +100,7 @@ SendOutcomeDto _sent() => SendOutcomeDto(
   submitted: 1,
   total: 1,
   partial: false,
+  unanswered: false,
 );
 
 /// The address book the previews are drawn against (`S6a`'s own three names).
@@ -800,6 +802,55 @@ Widget _ceremonyOverSend({bool book = true}) => Stack(
     ),
   ],
 );
+
+/// The ceremony over the page it was built on, answering with [commit] and
+/// asking [status] for the network's word: one composition for every face the
+/// wait and the receipt can take.
+Widget _ceremonyAnswering(
+  Future<SendOutcomeDto> Function(BigInt) commit, {
+  Future<TxStatusDto?> Function(String txid)? status,
+  SignableKind kind = SignableKind.payment,
+}) => Stack(
+  children: [
+    _sendScreen(),
+    SigningCeremony(
+      summary: _summary(kind: kind),
+      commit: commit,
+      abandon: () async {},
+      contacts: _contacts(),
+      fiat: _fiat(),
+      explorerUrl: (txid) async => 'https://explorer.kaspa.org/txs/$txid',
+      openUrl: (_) async => true,
+      acceptanceStatus: status ?? (_) async => null,
+    ),
+  ],
+);
+
+/// The hold completed and the broadcast answered, the network not yet heard
+/// from: the wait on its last stage. Bounded pumps: its loader never rests.
+Future<void> _completeAndWait(WidgetTester tester) async {
+  final gesture = await tester.startGesture(
+    tester.getCenter(find.byType(KvHold)),
+  );
+  await tester.pump();
+  await tester.pump(KvMotion.deliberate + const Duration(milliseconds: 20));
+  await gesture.up();
+  await tester.pump(const Duration(milliseconds: 220));
+  await tester.pump(KvMotion.calm);
+  await tester.pump(const Duration(milliseconds: 500));
+}
+
+/// The hold completed and the outcome settled into its receipt, for any kind
+/// of send (the hold's own words differ by kind).
+Future<void> _completeToReceipt(WidgetTester tester) async {
+  final gesture = await tester.startGesture(
+    tester.getCenter(find.byType(KvHold)),
+  );
+  await tester.pump();
+  await tester.pump(KvMotion.deliberate + const Duration(milliseconds: 20));
+  await gesture.up();
+  await tester.pumpAndSettle();
+}
 
 /// **The MESSAGE sending sheet** — the same ceremony over the thread, carrying
 /// the founder's signing toggle (2026-09-08).
@@ -1961,6 +2012,71 @@ void main() {
       'ceremony__sent_nobook',
       () => _ceremonyOverSend(book: false),
       act: _completeASend,
+    );
+    // The wait on its last stage: broadcast, the network not yet heard from.
+    framedSurface(
+      'ceremony__waiting',
+      () => _ceremonyAnswering((_) async => _sent()),
+      act: _completeAndWait,
+    );
+    // Stopped before anything left, with the cause beneath.
+    framedSurface(
+      'ceremony__not_sent',
+      () => _ceremonyAnswering(
+        (_) async => SendOutcomeDto(
+          submitted: 0,
+          total: 1,
+          partial: false,
+          error: 'The wallet reconnected during the send. Try again.',
+          unanswered: false,
+        ),
+      ),
+      act: _completeToReceipt,
+    );
+    // No answer: it may still land.
+    framedSurface(
+      'ceremony__not_confirmed',
+      () => _ceremonyAnswering(
+        (_) async => SendOutcomeDto(
+          submitted: 0,
+          total: 1,
+          partial: false,
+          error: 'WebSocket disconnected',
+          unanswered: true,
+        ),
+      ),
+      act: _completeToReceipt,
+    );
+    // A chained payment that stopped before its payment leg.
+    framedSurface(
+      'ceremony__chain_not_sent',
+      () => _ceremonyAnswering(
+        (_) async => SendOutcomeDto(
+          finalTxid: 'b' * 64,
+          submitted: 1,
+          total: 3,
+          partial: true,
+          error: 'WebSocket disconnected',
+          unanswered: true,
+        ),
+      ),
+      act: _completeToReceipt,
+    );
+    // A merge that stopped part-way: the wallet's own legs, partly sent.
+    framedSurface(
+      'ceremony__partly_merged',
+      () => _ceremonyAnswering(
+        (_) async => SendOutcomeDto(
+          finalTxid: 'b' * 64,
+          submitted: 1,
+          total: 3,
+          partial: true,
+          error: 'WebSocket disconnected',
+          unanswered: true,
+        ),
+        kind: SignableKind.consolidate,
+      ),
+      act: _completeToReceipt,
     );
 
     // ── UX-R6 · onboarding, create and restore (`O1`–`O7`) ───────────────

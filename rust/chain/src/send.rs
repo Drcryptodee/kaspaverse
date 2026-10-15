@@ -40,7 +40,8 @@ use kaspa_wallet_core::utxo::{OutgoingTransaction, UtxoEntryReference};
 
 use crate::error::{ChainError, Result};
 use crate::spend_policy;
-use crate::wallet_sync::WalletEngine;
+use crate::wallet_lane::{Lane, NotAdmitted, LANE_HOLD_WITHIN};
+use crate::wallet_sync::{take_out, WalletEngine};
 use crate::Rpc;
 
 /// What crosses to the confirm screen — Rust's decode of the built transaction
@@ -120,6 +121,17 @@ pub struct SendOutcome {
     /// partial outcome (they are on-chain and must be acceptance-tracked; V1
     /// feeds these to the tracker's watch-set).
     pub submitted_txids: Vec<String>,
+    /// The txid of the leg whose submit failed after its request may have
+    /// left (a timeout, a dropped socket, a node's error): it may be on the
+    /// network, so the caller watches for it. `None` beside an `error` means
+    /// nothing of that leg left the wallet: it was refused before the
+    /// request ([`may_have_reached_a_node`]).
+    ///
+    /// Its signed bytes are not handed to [`SubmitHook`], whose caller keeps
+    /// an acknowledged leg's bytes for the stall lane's resend. For a leg
+    /// that may never have reached a node, a resend after the user has sent
+    /// again with other coins would pay twice.
+    pub unanswered: Option<String>,
 }
 
 /// Per-leg submit hook: fires with the acked txid and the leg's signed wire
@@ -136,6 +148,9 @@ pub struct PreparedSend {
     pending: Vec<PendingTransaction>,
     summary: SendSummary,
     rpc: Rpc,
+    /// The wallet lane whose context the transactions were built on. Every
+    /// leg is admitted by it before its broadcast ([`Lane::admit_submit`]).
+    lane: Arc<Lane>,
     /// The live [`UtxoContext`], carried ONLY for a drain built on the
     /// `ReceiverPays` arm — see [`PreparedSend::commit`] for why that arm alone
     /// needs it. `None` for every ordinary payment and for the `Change`-
@@ -209,6 +224,8 @@ impl PreparedSend {
         let mut submitted = 0u32;
         let mut final_txid = None;
         let mut submitted_txids = Vec::new();
+        // This send's legs so far: a later leg spends their outputs.
+        let mut earlier: HashSet<kaspa_consensus_core::tx::TransactionId> = HashSet::new();
         for pt in &self.pending {
             if let Err(e) = pt.try_sign() {
                 return SendOutcome {
@@ -218,8 +235,27 @@ impl PreparedSend {
                     partial: submitted > 0,
                     error: Some(e.to_string()),
                     submitted_txids,
+                    unanswered: None,
                 };
             }
+            // Before the broadcast, and so before anything leaves the wallet:
+            // the lane must be able to take the submit. The guard holds a
+            // close of the processor back until this leg's submit returns.
+            let _fence = match self.lane.admit_submit(LANE_HOLD_WITHIN).await {
+                Ok(fence) => fence,
+                Err(why) => {
+                    log::info!("send: a leg was not sent ({why:?}); nothing left for it");
+                    return SendOutcome {
+                        final_txid,
+                        submitted,
+                        total,
+                        partial: submitted > 0,
+                        error: Some(not_admitted_message(why).to_string()),
+                        submitted_txids,
+                        unanswered: None,
+                    };
+                }
+            };
             // Its pair is `submit_ok` below: together they time the submit's
             // round trip, the hold that bounds `LANE_HOLD_WITHIN` (PRE3-LANE;
             // until now only probes stood in for it). Public txid only, INV-3.
@@ -231,6 +267,7 @@ impl PreparedSend {
                     // below needs it, and it must run AFTER the acceptance hook.
                     let tx_id = txid;
                     let txid = tx_id.to_string();
+                    self.note_taken(pt);
                     // V1 span: the node acked this submit RPC — the anchor
                     // that decomposes broadcast-lag from chain-lag in the
                     // submit→accepted baseline (public txid only, INV-3).
@@ -243,6 +280,8 @@ impl PreparedSend {
                     }
                     final_txid = Some(txid.clone());
                     submitted_txids.push(txid);
+                    self.drop_filed_earlier_outputs(pt, &earlier).await;
+                    earlier.insert(tx_id);
                     // Discharge the pin's outgoing record for a `ReceiverPays`
                     // EXIT drain, the moment `try_submit` has registered it
                     // (pending.rs:214-219 @ `01b532e`).
@@ -318,14 +357,30 @@ impl PreparedSend {
                     // The other end of `submit_start`: a submit that failed
                     // still held the lock until here, so the soak counts its
                     // round trip too, apart from one never answered.
-                    crate::spans::mark_with("submit_err", &pt.id().to_string());
+                    let txid = pt.id().to_string();
+                    crate::spans::mark_with("submit_err", &txid);
+                    let unanswered = may_have_reached_a_node(&e);
+                    if self.note_failed(pt, &e) {
+                        self.take_back_earlier_outputs(pt, &earlier).await;
+                    } else if self.lane.processor.outgoing().contains_key(&pt.id()) {
+                        self.drop_filed_earlier_outputs(pt, &earlier).await;
+                    }
                     return SendOutcome {
                         final_txid,
                         submitted,
                         total,
                         partial: submitted > 0,
-                        error: Some(e.to_string()),
+                        // A refusal before the request is the wallet's own
+                        // (no socket, no DAA score): said in words. Anything
+                        // else can carry a node's own words (the pinned client
+                        // wraps them verbatim): filtered where it is made.
+                        error: Some(if unanswered {
+                            crate::link::sanitize_node_text(&e.to_string())
+                        } else {
+                            not_admitted_message(NotAdmitted::NotReady).to_string()
+                        }),
                         submitted_txids,
+                        unanswered: unanswered.then_some(txid),
                     };
                 }
             }
@@ -337,6 +392,144 @@ impl PreparedSend {
             partial: false,
             error: None,
             submitted_txids,
+            unanswered: None,
+        }
+    }
+}
+
+/// **Whether a failed `try_submit` may still have put the transaction on
+/// the network.** Only a refusal made before the request proves it did not:
+/// the pinned wallet had no DAA score to register the transaction with
+/// (`register_outgoing_transaction()`, pin `utxo/context.rs:250` @ `01b532e`,
+/// which runs before the request, `tx/generator/pending.rs:219`), or no
+/// socket was bound (our stable handle's own answer). Everything else counts
+/// as possibly sent, a node's error included: the pinned client wraps every
+/// wire error alike (`RpcError::RpcSubsystem`, `rpc/macros/src/wrpc/client.rs:73-74`),
+/// and a node refuses a transaction it already holds or has accepted
+/// (`RejectDuplicate`, `RejectAlreadyAccepted`, `mining/errors/src/mempool.rs:24-28`).
+/// The other `MissingDaaScore` sites run after the broadcast (the record built
+/// in `notify_outgoing_transaction`), so only the register step's refusal
+/// proves the request never left.
+fn may_have_reached_a_node(e: &kaspa_wallet_core::error::Error) -> bool {
+    use kaspa_wallet_core::error::Error as WalletError;
+    match e {
+        WalletError::MissingDaaScore(site) => *site != "register_outgoing_transaction()",
+        WalletError::KaspaRpcClientResult(kaspa_wrpc_client::prelude::RpcError::General(text)) => {
+            text != crate::link_rpc::NO_BOUND_SOCKET
+        }
+        _ => true,
+    }
+}
+
+impl PreparedSend {
+    /// Keep on the lane the pin's record of a leg it kept after the submit,
+    /// so the reopen after a close can hand it back
+    /// (`WalletEngine::resume_sends`). Called with the fence held, so no close
+    /// has cleared it. Whether the pin kept it.
+    fn note_taken(&self, pt: &PendingTransaction) -> bool {
+        let Some(record) = self
+            .lane
+            .processor
+            .outgoing()
+            .get(&pt.id())
+            .map(|entry| entry.value().clone())
+        else {
+            return false;
+        };
+        self.lane
+            .in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .note_taken(record);
+        true
+    }
+
+    /// After a failed `try_submit`, keep what it left in the pin's maps: its
+    /// record when the failure came after the broadcast (the pin keeps it,
+    /// `tx/generator/pending.rs:223-227`), or the leg's coins when the pin
+    /// cancelled it (`:228-232`). A refusal at the register step touched
+    /// nothing.
+    /// Whether the pin cancelled the leg.
+    fn note_failed(&self, pt: &PendingTransaction, e: &kaspa_wallet_core::error::Error) -> bool {
+        if self.note_taken(pt) {
+            return false;
+        }
+        if matches!(
+            e,
+            kaspa_wallet_core::error::Error::MissingDaaScore("register_outgoing_transaction()")
+        ) {
+            return false;
+        }
+        self.lane
+            .in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .note_cancelled(pt.id(), pt.utxo_entries().values().cloned().collect());
+        true
+    }
+
+    /// A leg the pin kept spends this send's earlier legs' outputs. The map
+    /// never held one unless a read filed it meanwhile (any read that found
+    /// the earlier leg landed: the reopen's, a pull's, a prepare's); the
+    /// register clears only the mature list (`utxo/context.rs:254`), so a
+    /// pending copy would count beside the leg's own record, and turn
+    /// spendable at its maturity while the leg may land. Removed through the
+    /// map, which is a no-op for an output never filed.
+    async fn drop_filed_earlier_outputs(
+        &self,
+        pt: &PendingTransaction,
+        earlier: &HashSet<kaspa_consensus_core::tx::TransactionId>,
+    ) {
+        let coins: Vec<UtxoEntryReference> = pt
+            .utxo_entries()
+            .values()
+            .filter(|coin| earlier.contains(&coin.id().transaction_id))
+            .cloned()
+            .collect();
+        if coins.is_empty() {
+            return;
+        }
+        if let Err(e) = self.lane.context.remove(coins).await {
+            log::warn!("send: a filed copy of an earlier leg's output was not removed ({e})");
+        }
+    }
+
+    /// After the pin cancels a leg, its inputs are back on the mature list
+    /// (`utxo/context.rs:280-291`), this send's earlier legs' outputs among
+    /// them. The map never held such an output unless a read filed it since
+    /// (the pin inserts no batch output, `:593-602`), so the cancel's copy can
+    /// sit beside a pending one, or alone with no map entry. Spendable there
+    /// before its leg is accepted, and spent if the cancelled leg lands after
+    /// all, it is taken out ([`take_out`]). Its value still counts as unsettled
+    /// while its leg is in flight; once that leg is accepted it is in no figure
+    /// until the next read of the node files it, which errs low, never high.
+    async fn take_back_earlier_outputs(
+        &self,
+        pt: &PendingTransaction,
+        earlier: &HashSet<kaspa_consensus_core::tx::TransactionId>,
+    ) {
+        let coins: Vec<UtxoEntryReference> = pt
+            .utxo_entries()
+            .values()
+            .filter(|coin| earlier.contains(&coin.id().transaction_id))
+            .cloned()
+            .collect();
+        if coins.is_empty() {
+            return;
+        }
+        if let Err(e) = take_out(&self.lane.context, coins).await {
+            log::warn!("send: an earlier leg's output was not taken back ({e})");
+        }
+    }
+}
+
+/// The cause shown beneath the receipt when a leg was refused before its
+/// broadcast (the receipt itself says what left: nothing, or the legs before).
+fn not_admitted_message(why: NotAdmitted) -> &'static str {
+    match why {
+        NotAdmitted::Retired => "The wallet reconnected during the send. Try again.",
+        NotAdmitted::NotReady => {
+            "The wallet could not reach the network in time. Try again in a moment."
         }
     }
 }
@@ -672,15 +865,16 @@ impl WalletEngine {
         payload: Option<Vec<u8>>,
         exclude: &[Address],
     ) -> Result<PreparedSend> {
-        let context = self.context();
+        // The lane and its context are read once, together: the send is
+        // built on this context and admitted by this lane.
+        let lane = self.lane();
+        let context = lane.context.clone();
         // (ii) Watch the change address so the change UTXO this send returns is
         // visible + spendable (else it would be stranded). Idempotent for an
         // already-watched address (the pinned source is always in the window).
         // BEFORE the snapshot below, so a coin this scan surfaces is in the
         // policy's pool.
-        context
-            .scan_and_register_addresses(vec![change.clone()], None)
-            .await?;
+        self.file_from_node(&lane, vec![change.clone()]).await?;
 
         // The spend order is wallet policy (spend_policy.rs): the pinned block
         // wholly first (D-067 — input[0] identity), then up to RIDER_LIMIT of
@@ -739,6 +933,7 @@ impl WalletEngine {
             exclude,
             &destination,
             rpc,
+            lane,
         ))
     }
 }
@@ -777,6 +972,7 @@ fn reserved_coins_drawn(
         .count()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finish_prepared_send(
     pending: Vec<PendingTransaction>,
     summary: &GeneratorSummary,
@@ -785,6 +981,7 @@ fn finish_prepared_send(
     exclude: &[Address],
     destination: &Address,
     rpc: Rpc,
+    lane: Arc<Lane>,
 ) -> PreparedSend {
     // Observability for the one outcome the demotion cannot prevent: the free
     // coins did not cover the payment, so it reached into ANOTHER conversation's
@@ -809,6 +1006,7 @@ fn finish_prepared_send(
         pending,
         summary,
         rpc,
+        lane,
         // An ordinary payment's outgoing record is LOAD-BEARING while the
         // change is unconfirmed: the pin adds it back so the user sees their
         // money immediately. Never discharge it here.
@@ -1611,7 +1809,8 @@ impl WalletEngine {
         signer: Arc<dyn SignerT>,
         rpc: Rpc,
     ) -> Result<PreparedSend> {
-        let context = self.context();
+        let lane = self.lane();
+        let context = lane.context.clone();
         let mature: Vec<UtxoEntryReference> = context
             .get_utxos(None, None)
             .await?
@@ -1756,6 +1955,7 @@ impl WalletEngine {
                         pending,
                         summary,
                         rpc,
+                        lane,
                         discharge_outgoing: discharge.then(|| context.clone()),
                     });
                 }
@@ -1791,6 +1991,7 @@ impl WalletEngine {
             pending,
             summary,
             rpc,
+            lane,
             discharge_outgoing: discharge.then(|| context.clone()),
         })
     }
@@ -6052,6 +6253,87 @@ mod tests {
         assert!(
             Generator::try_new(settings, None, None).is_err(),
             "a cross-network change must be rejected (INV-9 backstop)"
+        );
+    }
+
+    /// Only a refusal made before the request reads as never sent: the pin's
+    /// register step with no DAA score, and no bound socket. A DAA refusal
+    /// from a step after the broadcast, any other client error, and a node's
+    /// wrapped answer may all follow a request that reached a node.
+    #[test]
+    fn a_failed_submit_is_unanswered_unless_refused_before_the_request() {
+        use kaspa_wallet_core::error::Error as WalletError;
+        use kaspa_wrpc_client::prelude::RpcError;
+        let refused_before = [
+            WalletError::MissingDaaScore("register_outgoing_transaction()"),
+            WalletError::KaspaRpcClientResult(RpcError::General(
+                crate::link_rpc::NO_BOUND_SOCKET.to_string(),
+            )),
+        ];
+        for e in &refused_before {
+            assert!(!super::may_have_reached_a_node(e), "{e} read as unanswered");
+        }
+        let may_have_left = [
+            WalletError::MissingDaaScore("TransactionRecord::new_outgoing()"),
+            WalletError::MissingDaaScore("TransactionRecord::new_batch()"),
+            WalletError::KaspaRpcClientResult(RpcError::General("timeout".to_string())),
+            WalletError::KaspaRpcClientResult(RpcError::RpcSubsystem(
+                "RPC response error: transaction already in the mempool".to_string(),
+            )),
+        ];
+        for e in &may_have_left {
+            assert!(super::may_have_reached_a_node(e), "{e} read as never sent");
+        }
+    }
+
+    /// **The pin still names its register step's refusal as the classifier
+    /// expects.** Built on the pin's own path rather than a remembered string:
+    /// a transaction from a context whose processor has never connected is
+    /// refused at the register step (pin `utxo/context.rs:250` @ `01b532e`,
+    /// before the request, `tx/generator/pending.rs:219`), and that refusal
+    /// must read as never sent. A pin that rewords the site fails here.
+    #[tokio::test]
+    async fn the_pins_register_refusal_reads_as_never_sent() {
+        use kaspa_wallet_core::rpc::DynRpcApi;
+        use kaspa_wallet_core::utxo::{UtxoContext, UtxoContextBinding, UtxoProcessor};
+        let processor = UtxoProcessor::new(None, Some(mainnet()), None, None);
+        let context = UtxoContext::new(&processor, UtxoContextBinding::default());
+        let entries = vec![UtxoEntryReference::simulated(kaspa_to_sompi(10.0))];
+        let payment: PaymentDestination =
+            PaymentOutputs::from((addr(DEST), kaspa_to_sompi(1.0))).into();
+        let mut settings = GeneratorSettings::try_new_with_iterator(
+            mainnet(),
+            Box::new(entries.into_iter()),
+            None,
+            addr(CHANGE),
+            1,
+            1,
+            payment,
+            None,
+            Fees::SenderPays(0),
+            None,
+            None,
+        )
+        .unwrap();
+        settings.source_utxo_context = Some(context);
+        let generator = Generator::try_new(settings, None, None).unwrap();
+        let pending = generator
+            .iter()
+            .next()
+            .expect("a transaction")
+            .expect("built");
+        let rpc = crate::link_rpc::LinkRpc::new() as std::sync::Arc<DynRpcApi>;
+        let refused = pending
+            .try_submit(&rpc)
+            .await
+            .expect_err("no DAA score to register with");
+        assert!(
+            matches!(refused, kaspa_wallet_core::error::Error::MissingDaaScore(_)),
+            "{refused}"
+        );
+        assert!(
+            !super::may_have_reached_a_node(&refused),
+            "{refused} read as possibly sent"
         );
     }
 }

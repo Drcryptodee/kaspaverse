@@ -46,6 +46,11 @@ class WalletService {
   final ValueNotifier<BigInt?> pending = ValueNotifier(null);
   final ValueNotifier<BigInt?> outgoing = ValueNotifier(null);
 
+  /// Ours, on its way back in a send of ours still in flight, and in none of
+  /// the three above. A merge to our own address reads zero in all three until
+  /// its acceptance and carries the merged amount here.
+  final ValueNotifier<BigInt?> unsettled = ValueNotifier(null);
+
   /// **THE seam every surface that prints a balance listens to** — bumped once
   /// per snapshot in which anything that can move a figure moved.
   ///
@@ -291,10 +296,12 @@ class WalletService {
     final moved =
         mature.value != snapshot.matureSompi ||
         pending.value != snapshot.pendingSompi ||
-        outgoing.value != snapshot.outgoingSompi;
+        outgoing.value != snapshot.outgoingSompi ||
+        unsettled.value != snapshot.unsettledSompi;
     mature.value = snapshot.matureSompi;
     pending.value = snapshot.pendingSompi;
     outgoing.value = snapshot.outgoingSompi;
+    unsettled.value = snapshot.unsettledSompi;
     activity.value = snapshot.activity;
     error.value = snapshot.error;
     lane.value = snapshot.lane;
@@ -328,6 +335,7 @@ class WalletService {
     mature.value = null;
     pending.value = null;
     outgoing.value = null;
+    unsettled.value = null;
     activity.value = const [];
     error.value = null;
     lane.value = WalletLaneState.live;

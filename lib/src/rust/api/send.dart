@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `commit_and_advance`, `fully_broadcast`, `kas_exact`, `map_drain_error`, `next_nonce`, `payment_change_address`, `project_signable`, `shortfall_message`, `spend_exclusions`, `storage_mass_message`, `take_stashed`, `validate_mainnet_address`
+// These functions are ignored because they are not marked as `pub`: `commit_and_advance`, `fully_broadcast`, `kas_exact`, `map_drain_error`, `next_nonce`, `payment_change_address`, `project_signable`, `shortfall_buckets`, `shortfall_message`, `spend_exclusions`, `storage_mass_message`, `take_stashed`, `validate_mainnet_address`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// The smallest amount currently sendable from this wallet's coins (the KIP-9
@@ -167,12 +167,19 @@ class SendOutcomeDto {
   final bool partial;
   final String? error;
 
+  /// The leg that failed may be on the network: its submit failed after the
+  /// request could have left (a timeout, a dropped socket, a node's error),
+  /// and it is watched like a sent one. `false` beside an `error` means
+  /// nothing of that leg left the wallet: it was refused before the request.
+  final bool unanswered;
+
   const SendOutcomeDto({
     this.finalTxid,
     required this.submitted,
     required this.total,
     required this.partial,
     this.error,
+    required this.unanswered,
   });
 
   @override
@@ -181,7 +188,8 @@ class SendOutcomeDto {
       submitted.hashCode ^
       total.hashCode ^
       partial.hashCode ^
-      error.hashCode;
+      error.hashCode ^
+      unanswered.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -192,7 +200,8 @@ class SendOutcomeDto {
           submitted == other.submitted &&
           total == other.total &&
           partial == other.partial &&
-          error == other.error;
+          error == other.error &&
+          unanswered == other.unanswered;
 }
 
 /// Which send-like flow a signable summary describes — set by RUST from its

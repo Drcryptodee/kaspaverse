@@ -609,6 +609,52 @@ void main() {
     await tester.pumpWidget(const SizedBox());
   });
 
+  testWidgets('a merge in flight is in flight, not gone', (tester) async {
+    // A merge to our own address has no payment value, so the pin's balance
+    // reads zero in mature, pending AND outgoing until its acceptance: the
+    // in-flight line had nothing to read. The amount on its way back arrives
+    // as `unsettled`, and the line carries it.
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: kvDarkTheme(),
+        builder: (context, page) => KvWindow(child: page!),
+        home: HomeScreen(
+          chain: ChainScope(
+            connected: ValueNotifier(true),
+            virtualDaaScore: ValueNotifier(BigInt.from(2000)),
+            error: ValueNotifier(null),
+            lastUpdate: ValueNotifier(DateTime(2026, 8, 24)),
+          ),
+          wallet: WalletScope(
+            maturity: kTestMaturity,
+            mature: ValueNotifier(BigInt.zero),
+            pending: ValueNotifier(BigInt.zero),
+            outgoing: ValueNotifier(BigInt.zero),
+            unsettled: ValueNotifier(BigInt.parse('1999791234')),
+            activity: ValueNotifier(const []),
+            syncing: ValueNotifier(false),
+            utxoIndexMissing: ValueNotifier(false),
+          ),
+          clock: () => DateTime(2026, 8, 24),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expectFigure('0', '00');
+    expect(
+      findCapsLabel('in flight'),
+      findsOneWidget,
+      reason: 'a merge mid-flight reads as an empty wallet without it',
+    );
+    expect(
+      find.text('.99791234'),
+      findsOneWidget,
+      reason: 'the in-flight amount keeps every digit, it is money',
+    );
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets('the in-flight line is a memo, never a second subtraction', (
     tester,
   ) async {

@@ -4125,14 +4125,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   SendOutcomeDto dco_decode_send_outcome_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 5)
-      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
     return SendOutcomeDto(
       finalTxid: dco_decode_opt_String(arr[0]),
       submitted: dco_decode_u_32(arr[1]),
       total: dco_decode_u_32(arr[2]),
       partial: dco_decode_bool(arr[3]),
       error: dco_decode_opt_String(arr[4]),
+      unanswered: dco_decode_bool(arr[5]),
     );
   }
 
@@ -4346,8 +4347,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   WalletSnapshot dco_decode_wallet_snapshot(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 10)
-      throw Exception('unexpected arr length: expect 10 but see ${arr.length}');
+    if (arr.length != 11)
+      throw Exception('unexpected arr length: expect 11 but see ${arr.length}');
     return WalletSnapshot(
       connected: dco_decode_bool(arr[0]),
       syncing: dco_decode_bool(arr[1]),
@@ -4356,9 +4357,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       matureSompi: dco_decode_opt_box_autoadd_u_64(arr[4]),
       pendingSompi: dco_decode_opt_box_autoadd_u_64(arr[5]),
       outgoingSompi: dco_decode_opt_box_autoadd_u_64(arr[6]),
-      activity: dco_decode_list_activity_record(arr[7]),
-      error: dco_decode_opt_String(arr[8]),
-      lane: dco_decode_wallet_lane_state(arr[9]),
+      unsettledSompi: dco_decode_opt_box_autoadd_u_64(arr[7]),
+      activity: dco_decode_list_activity_record(arr[8]),
+      error: dco_decode_opt_String(arr[9]),
+      lane: dco_decode_wallet_lane_state(arr[10]),
     );
   }
 
@@ -5263,12 +5265,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_total = sse_decode_u_32(deserializer);
     var var_partial = sse_decode_bool(deserializer);
     var var_error = sse_decode_opt_String(deserializer);
+    var var_unanswered = sse_decode_bool(deserializer);
     return SendOutcomeDto(
       finalTxid: var_finalTxid,
       submitted: var_submitted,
       total: var_total,
       partial: var_partial,
       error: var_error,
+      unanswered: var_unanswered,
     );
   }
 
@@ -5524,6 +5528,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_matureSompi = sse_decode_opt_box_autoadd_u_64(deserializer);
     var var_pendingSompi = sse_decode_opt_box_autoadd_u_64(deserializer);
     var var_outgoingSompi = sse_decode_opt_box_autoadd_u_64(deserializer);
+    var var_unsettledSompi = sse_decode_opt_box_autoadd_u_64(deserializer);
     var var_activity = sse_decode_list_activity_record(deserializer);
     var var_error = sse_decode_opt_String(deserializer);
     var var_lane = sse_decode_wallet_lane_state(deserializer);
@@ -5535,6 +5540,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       matureSompi: var_matureSompi,
       pendingSompi: var_pendingSompi,
       outgoingSompi: var_outgoingSompi,
+      unsettledSompi: var_unsettledSompi,
       activity: var_activity,
       error: var_error,
       lane: var_lane,
@@ -6380,6 +6386,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_32(self.total, serializer);
     sse_encode_bool(self.partial, serializer);
     sse_encode_opt_String(self.error, serializer);
+    sse_encode_bool(self.unanswered, serializer);
   }
 
   @protected
@@ -6580,6 +6587,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_opt_box_autoadd_u_64(self.matureSompi, serializer);
     sse_encode_opt_box_autoadd_u_64(self.pendingSompi, serializer);
     sse_encode_opt_box_autoadd_u_64(self.outgoingSompi, serializer);
+    sse_encode_opt_box_autoadd_u_64(self.unsettledSompi, serializer);
     sse_encode_list_activity_record(self.activity, serializer);
     sse_encode_opt_String(self.error, serializer);
     sse_encode_wallet_lane_state(self.lane, serializer);

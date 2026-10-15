@@ -5856,18 +5856,10 @@ async fn prepare_transport_send(
         )
         .await
         .map_err(|e| {
-            // Live buckets for the shortfall classifier (same read as the
-            // payment path, send.rs — INV-8 honesty over node-read balance).
-            let (mature, pending, outgoing) = wallet::latest_snapshot()
-                .map(|s| {
-                    (
-                        s.mature_sompi.unwrap_or(0),
-                        s.pending_sompi.unwrap_or(0),
-                        s.outgoing_sompi.unwrap_or(0),
-                    )
-                })
-                .unwrap_or((0, 0, 0));
-            friendly_prepare_error(e, amount_sompi, mature, pending, outgoing)
+            // Live buckets for the shortfall classifier (the payment path's
+            // own read — INV-8 honesty over node-read balance).
+            let (mature, pending, outgoing, unsettled) = crate::api::send::shortfall_buckets();
+            friendly_prepare_error(e, amount_sompi, mature, pending, outgoing, unsettled)
         })?;
 
     // SOURCE CONFINEMENT — only for the owner-attributable lane.
@@ -5949,6 +5941,7 @@ fn friendly_prepare_error(
     mature_sompi: u64,
     pending_sompi: u64,
     outgoing_sompi: u64,
+    unsettled_sompi: u64,
 ) -> AppError {
     match e {
         ChainError::TransactionTooHeavy => AppError::msg(
@@ -5959,6 +5952,7 @@ fn friendly_prepare_error(
             mature_sompi,
             pending_sompi,
             outgoing_sompi,
+            unsettled_sompi,
         )),
         ChainError::StorageMassExceeded { .. } => AppError::msg(
             "this send is too small for your current coins — the network anti-dust \
@@ -9884,6 +9878,7 @@ mod tests {
                 mature,
                 pending,
                 outgoing,
+                0,
             )
             .message
         };
@@ -9895,13 +9890,14 @@ mod tests {
         assert!(funds(10, 5, 5).contains("insufficient funds"));
         // Non-funds arms keep their own compose-surface copy.
         assert!(
-            friendly_prepare_error(ChainError::TransactionTooHeavy, 50, 0, 0, 0)
+            friendly_prepare_error(ChainError::TransactionTooHeavy, 50, 0, 0, 0, 0)
                 .message
                 .contains("too large for one transaction")
         );
         assert!(friendly_prepare_error(
             ChainError::StorageMassExceeded { storage_mass: 9 },
             50,
+            0,
             0,
             0,
             0

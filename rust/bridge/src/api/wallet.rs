@@ -1036,6 +1036,12 @@ pub struct WalletSnapshot {
     pub mature_sompi: Option<u64>,
     pub pending_sompi: Option<u64>,
     pub outgoing_sompi: Option<u64>,
+    /// Ours, on its way back to us in a send of ours still in flight, and in
+    /// none of the three figures above. A merge to our own address moves the
+    /// whole wallet this way: for the second or so before its acceptance the
+    /// three read zero and this carries the amount. `None` before the first
+    /// balance, like them.
+    pub unsettled_sompi: Option<u64>,
     /// Newest-first, capped by the chain layer.
     pub activity: Vec<ActivityRecord>,
     pub error: Option<String>,
@@ -1180,12 +1186,14 @@ fn fold(snapshot: &mut WalletSnapshot, event: WalletEvent) {
             mature,
             pending,
             outgoing,
+            unsettled,
         } => {
             // A real balance arrived (even all-zero): sync resolved. An empty
             // wallet becomes a live `Some(0)`, never unknown / skeleton-forever.
             snapshot.mature_sompi = Some(mature);
             snapshot.pending_sompi = Some(pending);
             snapshot.outgoing_sompi = Some(outgoing);
+            snapshot.unsettled_sompi = Some(unsettled);
             snapshot.syncing = false;
             // We computed a balance, so the node's index works — clear any
             // stale degrade flag from a previous (bad) node.
@@ -1941,6 +1949,7 @@ mod tests {
                 mature: 0,
                 pending: 0,
                 outgoing: 0,
+                unsettled: 0,
             },
         );
         // The critical bar: a synced empty wallet is Some(0) (live zero), not
@@ -1948,6 +1957,37 @@ mod tests {
         assert_eq!(snapshot.mature_sompi, Some(0));
         assert_eq!(snapshot.pending_sompi, Some(0));
         assert!(!snapshot.syncing);
+    }
+
+    /// A merge in flight reads zero in all three of the pin's figures; the
+    /// amount on its way back crosses as `unsettled_sompi`, and leaves it in
+    /// the balance that brings the coin home.
+    #[test]
+    fn a_merge_in_flight_folds_as_unsettled_and_settles() {
+        let mut snapshot = WalletSnapshot::default();
+        assert_eq!(snapshot.unsettled_sompi, None, "unknown before a balance");
+        fold(
+            &mut snapshot,
+            WalletEvent::Balance {
+                mature: 0,
+                pending: 0,
+                outgoing: 0,
+                unsettled: 1_999_791_000,
+            },
+        );
+        assert_eq!(snapshot.mature_sompi, Some(0));
+        assert_eq!(snapshot.unsettled_sompi, Some(1_999_791_000));
+        fold(
+            &mut snapshot,
+            WalletEvent::Balance {
+                mature: 1_999_791_000,
+                pending: 0,
+                outgoing: 0,
+                unsettled: 0,
+            },
+        );
+        assert_eq!(snapshot.mature_sompi, Some(1_999_791_000));
+        assert_eq!(snapshot.unsettled_sompi, Some(0));
     }
 
     #[test]
@@ -1960,6 +2000,7 @@ mod tests {
                 mature: 12_300_000_000,
                 pending: 5_000_000,
                 outgoing: 0,
+                unsettled: 0,
             },
         );
         assert!(snapshot.connected);
@@ -1989,6 +2030,7 @@ mod tests {
                 mature: 1,
                 pending: 0,
                 outgoing: 0,
+                unsettled: 0,
             },
         );
         assert!(!snapshot.utxo_index_missing);

@@ -240,6 +240,7 @@ class WalletScope {
     required this.utxoIndexMissing,
     required this.maturity,
     this.outgoing,
+    this.unsettled,
     this.discoveryIncomplete,
     this.lane,
     this.lastUpdate,
@@ -258,6 +259,12 @@ class WalletScope {
   /// wallet mid-send rendered a confident `0.00000000 KAS` with no hint that
   /// its own money was in flight.
   final ValueListenable<BigInt?>? outgoing;
+
+  /// Ours, on its way back in a send of ours still in flight, and in none of
+  /// [mature], [pending] or [outgoing]: a merge to our own address reads zero
+  /// in all three until its acceptance and carries the merged amount here.
+  /// Optional like [outgoing]: absent reads as nothing in flight.
+  final ValueListenable<BigInt?>? unsettled;
   final ValueListenable<List<ActivityRecord>> activity;
   final ValueListenable<bool> syncing;
   final ValueListenable<bool> utxoIndexMissing;
@@ -336,7 +343,12 @@ typedef _BalanceView = ({
   BigInt? mature,
   BigInt? pending,
   BigInt? outgoing,
+  BigInt? unsettled,
   bool stale,
+
+  /// The figures may not be the chain's now, on the lamp's own clock: the
+  /// link not live (its hold, not the data's shorter one) or the lane down.
+  bool unproven,
   bool utxoIndexMissing,
   bool discoveryIncomplete,
 });
@@ -440,16 +452,20 @@ class _HomeScreenState extends State<HomeScreen> {
         widget.wallet.mature,
         widget.wallet.pending,
         if (widget.wallet.outgoing != null) widget.wallet.outgoing!,
+        if (widget.wallet.unsettled != null) widget.wallet.unsettled!,
         widget.wallet.utxoIndexMissing,
         if (widget.wallet.discoveryIncomplete != null)
           widget.wallet.discoveryIncomplete!,
         _dimmed,
+        _lampLive,
       ],
       () => (
         mature: widget.wallet.mature.value,
         pending: widget.wallet.pending.value,
         outgoing: widget.wallet.outgoing?.value,
+        unsettled: widget.wallet.unsettled?.value,
         stale: _dimmed.value,
+        unproven: !_lampLive.value || _laneDown(),
         utxoIndexMissing: widget.wallet.utxoIndexMissing.value,
         discoveryIncomplete: widget.wallet.discoveryIncomplete?.value ?? false,
       ),
@@ -1136,11 +1152,20 @@ class _HomeScreenState extends State<HomeScreen> {
   /// confidently-wrong number those flags exist to mark. Without these terms
   /// the plate said "this may not be your whole balance" and "Nothing to send
   /// yet" in the same frame (`consensus-auditor`, UX-2).
+  ///
+  /// Two more zeros are not proven. One read while the link is not live or the
+  /// lane is down: nothing that arrives is folded, so its last zero is only
+  /// the last thing it knew. It reads the lamp's clock, not the data's shorter
+  /// one, so a quiet spell on a weak link does not flip the door back and
+  /// forth. And one with value on its way back: a merge reads zero in every
+  /// figure until its acceptance.
   String? _sendBlocked(_BalanceView b) {
     final mature = b.mature;
     final nothing =
         mature != null &&
         mature == BigInt.zero &&
+        (b.unsettled ?? BigInt.zero) == BigInt.zero &&
+        !b.unproven &&
         !b.utxoIndexMissing &&
         !b.discoveryIncomplete;
     return nothing ? 'Nothing to send yet' : null;
@@ -2237,7 +2262,12 @@ class _StatusStrip extends StatelessWidget {
         valueListenable: trust,
         builder: (context, t, _) {
           final pending = b.pending;
-          final outgoing = b.outgoing;
+          // Both memos of money in transit on our own sends: what is leaving
+          // (`outgoing`) and what is coming back that no figure shows yet
+          // (`unsettled`, a merge before its acceptance).
+          final inFlight = b.outgoing == null && b.unsettled == null
+              ? null
+              : (b.outgoing ?? BigInt.zero) + (b.unsettled ?? BigInt.zero);
           final rows = <Widget>[
             // Money ARRIVING that the hero does not yet contain: at the pin
             // `pending` is a set disjoint from `mature`.
@@ -2266,12 +2296,12 @@ class _StatusStrip extends StatelessWidget {
             // 100 would read `70.00 KAS` over `− 30.00000000`. It would also
             // be a lie outright on `SignableKind::SelfSendFrame`. So it is a
             // memo, not a term in a sum.
-            if (outgoing != null && outgoing > BigInt.zero)
+            if (inFlight != null && inFlight > BigInt.zero)
               _StatusRow(
                 tone: KvLampTone.warn,
                 label: 'in flight',
                 trailing: KvAmount(
-                  outgoing,
+                  inFlight,
                   role: KvAmountRole.row,
                   direction: KvMoneyDirection.internal,
                   emphasis: KvAmountEmphasis.significant,
@@ -2375,33 +2405,46 @@ class _StatusRow extends StatelessWidget {
           children: [
             KvLamp(tone),
             const SizedBox(width: KvSpace.s),
-            // **The label yields; the figure never does.** A `Spacer` beside
-            // an intrinsically-sized caps label overflowed this row by 43 dp
-            // at 320 dp / 1.3×, and the thing that would have been cut is an
-            // amount — which BG-5 forbids outright. `Expanded` gives the
-            // label the remainder and lets it ellipsize instead.
+            // **Neither the label nor the figure is cut.** Each is offered a
+            // share of the room, the label a third and the figure two, and
+            // each keeps only what it needs; the rest sits between them, so
+            // the figure stays hard right. A figure wider than its share
+            // scales down inside its own fit rather than run off the row
+            // (BG-5): a merge's eight-decimal figure overflowed this row by
+            // 17 dp at 320 dp / 1.3× when the label alone yielded, and left
+            // the label no room at all before that.
             if (words != null)
               Expanded(
-                child: Text(
-                  words.toUpperCase(),
-                  // Two lines before it gives up: at 320 dp / 1.3x a one-line
-                  // cap turned `PENDING` into `PEN…` beside a figure it was
-                  // supposed to name. A label wraps (BG-14); the row's own
-                  // height is measured, so growing costs nothing.
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontFamily: KvFont.ui,
-                    fontSize: 11,
-                    height: 16 / 11,
-                    fontWeight: FontWeight.w600,
-                    fontVariations: KvWeight.w600,
-                    letterSpacing: 1.1,
-                    color: KvColor.inkMeta,
-                  ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Flexible(
+                      child: Text(
+                        words.toUpperCase(),
+                        // Two lines before it gives up: at 320 dp / 1.3x a
+                        // one-line cap turned `PENDING` into `PEN…` beside a
+                        // figure it was supposed to name. A label wraps
+                        // (BG-14); the row's own height is measured, so
+                        // growing costs nothing.
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontFamily: KvFont.ui,
+                          fontSize: 11,
+                          height: 16 / 11,
+                          fontWeight: FontWeight.w600,
+                          fontVariations: KvWeight.w600,
+                          letterSpacing: 1.1,
+                          color: KvColor.inkMeta,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: KvSpace.s),
+                    Flexible(flex: 2, child: trailing),
+                  ],
                 ),
               )
-            else
+            else ...[
               Expanded(
                 child: Text(
                   sentence!,
@@ -2413,8 +2456,9 @@ class _StatusRow extends StatelessWidget {
                   ),
                 ),
               ),
-            const SizedBox(width: KvSpace.s),
-            trailing,
+              const SizedBox(width: KvSpace.s),
+              trailing,
+            ],
           ],
         ),
       ),

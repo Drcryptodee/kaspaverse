@@ -178,6 +178,11 @@ pub struct SendOutcomeDto {
     pub total: u32,
     pub partial: bool,
     pub error: Option<String>,
+    /// The leg that failed may be on the network: its submit failed after the
+    /// request could have left (a timeout, a dropped socket, a node's error),
+    /// and it is watched like a sent one. `false` beside an `error` means
+    /// nothing of that leg left the wallet: it was refused before the request.
+    pub unanswered: bool,
 }
 
 /// The single-slot stash of the built-but-unsigned send, between confirm and
@@ -335,17 +340,24 @@ pub(crate) fn storage_mass_message(
 /// the fee can still push a fitting retry over, and that retry then reads
 /// the honest refusal). Shared with the transport prepare path (V5 — the
 /// finding-7 fix must not fork per surface). Pure; tested.
+///
+/// `unsettled_sompi` is ours on its way back in a send of ours still in
+/// flight, in none of the other three: a merge to our own address reads zero
+/// in all three until its acceptance, and a send inside that second is still
+/// settling, never short.
 pub(crate) fn shortfall_message(
     amount_sompi: u64,
     mature_sompi: u64,
     pending_sompi: u64,
     outgoing_sompi: u64,
+    unsettled_sompi: u64,
 ) -> &'static str {
     let ever_settles = amount_sompi
         <= mature_sompi
             .saturating_add(pending_sompi)
-            .saturating_add(outgoing_sompi);
-    if ever_settles && outgoing_sompi > 0 {
+            .saturating_add(outgoing_sompi)
+            .saturating_add(unsettled_sompi);
+    if ever_settles && (outgoing_sompi > 0 || unsettled_sompi > 0) {
         "still settling from your last send — your change is on its way back. \
          Try again in a few seconds."
     } else if ever_settles && pending_sompi > 0 {
@@ -353,6 +365,22 @@ pub(crate) fn shortfall_message(
     } else {
         "insufficient funds — the amount plus the network fee is more than your spendable balance."
     }
+}
+
+/// The live balance figures the shortfall classifier reads, in its argument
+/// order: mature, pending, outgoing, unsettled. One read for the payment and
+/// the messaging surfaces alike, so they cannot classify one refusal two ways.
+pub(crate) fn shortfall_buckets() -> (u64, u64, u64, u64) {
+    wallet::latest_snapshot()
+        .map(|s| {
+            (
+                s.mature_sompi.unwrap_or(0),
+                s.pending_sompi.unwrap_or(0),
+                s.outgoing_sompi.unwrap_or(0),
+                s.unsettled_sompi.unwrap_or(0),
+            )
+        })
+        .unwrap_or((0, 0, 0, 0))
 }
 
 /// A sompi amount as KAS with all 8 decimals — display-only, never consensus
@@ -529,20 +557,13 @@ pub async fn send_prepare(
             // our own settling change (finding 7: the classifier used to read
             // only `pending`, so a send minutes after a send said
             // "insufficient" at ample balance).
-            let (mature, pending, outgoing) = wallet::latest_snapshot()
-                .map(|s| {
-                    (
-                        s.mature_sompi.unwrap_or(0),
-                        s.pending_sompi.unwrap_or(0),
-                        s.outgoing_sompi.unwrap_or(0),
-                    )
-                })
-                .unwrap_or((0, 0, 0));
+            let (mature, pending, outgoing, unsettled) = shortfall_buckets();
             return Err(AppError::msg(shortfall_message(
                 amount_sompi,
                 mature,
                 pending,
                 outgoing,
+                unsettled,
             )));
         }
         Err(ChainError::StorageMassExceeded { .. }) => {
@@ -864,6 +885,7 @@ pub(crate) async fn commit_and_advance(prepared: PreparedSend) -> SendOutcomeDto
             None
         }
     };
+    let watcher = tracker.clone();
     let mut hook = tracker.map(|tracker| {
         move |txid: &str, signed_tx: kaspaverse_chain::RpcTransaction| {
             tracker.watch(txid, kaspaverse_chain::WatchSource::Send);
@@ -892,12 +914,23 @@ pub(crate) async fn commit_and_advance(prepared: PreparedSend) -> SendOutcomeDto
         let _ = vault::set_change_cursor(used_cursor.saturating_add(1));
     }
 
+    // A leg sent with no answer back may be on the network: watched, so the
+    // tracker records whether it lands. Nothing shows that yet: the receipt
+    // follows only a fully broadcast send's final txid, and the pin files a
+    // cancelled leg that lands as change coming in, not as the payment. Its
+    // bytes are not kept for the stall lane's resend (see
+    // `SendOutcome::unanswered`), so its stall resends nothing.
+    if let (Some(tracker), Some(txid)) = (&watcher, &outcome.unanswered) {
+        tracker.watch(txid, kaspaverse_chain::WatchSource::Send);
+    }
+
     SendOutcomeDto {
         final_txid: outcome.final_txid,
         submitted: outcome.submitted,
         total: outcome.total,
         partial: outcome.partial,
         error: outcome.error,
+        unanswered: outcome.unanswered.is_some(),
     }
 }
 
@@ -1243,6 +1276,7 @@ mod tests {
             partial: false,
             error: None,
             submitted_txids: vec!["b".repeat(64), "a".repeat(64)],
+            unanswered: None,
         };
         assert!(fully_broadcast(&clean));
 
@@ -1260,6 +1294,7 @@ mod tests {
             error: Some("boom".into()),
             final_txid: None,
             submitted_txids: Vec::new(),
+            unanswered: None,
         }));
         // Degenerate zero-leg — never advances.
         assert!(!fully_broadcast(&SendOutcome {
@@ -1269,6 +1304,7 @@ mod tests {
             error: None,
             final_txid: None,
             submitted_txids: Vec::new(),
+            unanswered: None,
         }));
     }
 
@@ -1277,19 +1313,31 @@ mod tests {
         // Our own settling change (outgoing bucket) — never "insufficient",
         // and outgoing wins even while incoming value is also maturing
         // (finding 7: the observed refusal minutes after a send).
-        assert!(shortfall_message(1, 0, 0, 1).contains("still settling from your last send"));
-        assert!(shortfall_message(10, 5, 5, 5).contains("still settling from your last send"));
+        assert!(shortfall_message(1, 0, 0, 1, 0).contains("still settling from your last send"));
+        assert!(shortfall_message(10, 5, 5, 5, 0).contains("still settling from your last send"));
         // Incoming value maturing — "not yet spendable".
-        assert!(shortfall_message(1, 0, 1, 0).contains("not yet spendable"));
+        assert!(shortfall_message(1, 0, 1, 0, 0).contains("not yet spendable"));
         // A true shortfall stays a true shortfall.
-        assert!(shortfall_message(1, 0, 0, 0).contains("insufficient funds"));
+        assert!(shortfall_message(1, 0, 0, 0, 0).contains("insufficient funds"));
         // An amount NOTHING in flight could ever cover is a true shortfall,
         // never a "try again in a few seconds" (consensus-audit V2 finding 2).
-        assert!(shortfall_message(100, 10, 20, 30).contains("insufficient funds"));
-        assert!(shortfall_message(100, 0, 0, 99).contains("insufficient funds"));
+        assert!(shortfall_message(100, 10, 20, 30, 0).contains("insufficient funds"));
+        assert!(shortfall_message(100, 0, 0, 99, 0).contains("insufficient funds"));
         // At the exact boundary the funds could settle — the transient
         // message stands (the fee may still refuse the retry, honestly).
-        assert!(shortfall_message(60, 10, 20, 30).contains("still settling"));
+        assert!(shortfall_message(60, 10, 20, 30, 0).contains("still settling"));
+    }
+
+    /// **A send inside a merge's settling second is still settling.** The
+    /// merge reads zero in mature, pending and outgoing until its acceptance;
+    /// the amount on its way back is unsettled, and an amount it covers waits,
+    /// never reads short. One it could not cover is still a true shortfall.
+    #[test]
+    fn a_send_inside_a_merges_window_is_still_settling() {
+        let merged = 1_999_791_000;
+        assert!(shortfall_message(100_000_000, 0, 0, 0, merged).contains("still settling"));
+        assert!(shortfall_message(merged, 0, 0, 0, merged).contains("still settling"));
+        assert!(shortfall_message(merged + 1, 0, 0, 0, merged).contains("insufficient funds"));
     }
 
     /// The floor is rendered with all 8 decimals, matching the minimum line

@@ -11,6 +11,7 @@ import 'package:kaspaverse/src/ui/home_screen.dart';
 import 'package:kaspaverse/src/ui/theme/kv_theme.dart';
 import 'package:kaspaverse/src/ui/theme/kv_window.dart';
 import 'package:kaspaverse/src/ui/theme/tokens.dart';
+import 'package:kaspaverse/src/ui/widgets/kv_amount.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_loader.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_money_plate.dart';
 import 'package:kaspaverse/src/ui/widgets/kv_tabs.dart';
@@ -104,6 +105,8 @@ void main() {
     BigInt? mature,
     BigInt? pending,
     BigInt? outgoing,
+    BigInt? unsettled,
+    WalletLaneState lane = WalletLaneState.live,
     bool connected = true,
     bool syncing = false,
     bool utxoIndexMissing = false,
@@ -139,10 +142,12 @@ void main() {
         mature: ValueNotifier<BigInt?>(mature),
         pending: ValueNotifier<BigInt?>(pending),
         outgoing: ValueNotifier<BigInt?>(outgoing),
+        unsettled: ValueNotifier<BigInt?>(unsettled),
         activity: ValueNotifier<List<ActivityRecord>>(activity),
         syncing: ValueNotifier(syncing),
         utxoIndexMissing: ValueNotifier(utxoIndexMissing),
         discoveryIncomplete: ValueNotifier(discoveryIncomplete),
+        lane: ValueNotifier<WalletLaneState>(lane),
         onRefreshActivity: onRefresh,
       ),
       clock: clock ?? () => now ?? t0,
@@ -283,6 +288,43 @@ void main() {
         );
         expect(find.text('Nothing to send yet'), findsNothing, reason: label);
       }
+      // A zero folded by a wallet lane that is down is only the last thing
+      // that lane knew: deposits since then were never folded.
+      for (final lane in const [
+        WalletLaneState.recovering,
+        WalletLaneState.dark,
+      ]) {
+        await pump(tester, money(mature: BigInt.zero, lane: lane));
+        expect(find.text('Nothing to send yet'), findsNothing, reason: '$lane');
+      }
+      // A merge before its acceptance reads zero in every figure, with the
+      // wallet's whole value on its way back.
+      await pump(
+        tester,
+        money(
+          mature: BigInt.zero,
+          pending: BigInt.zero,
+          outgoing: BigInt.zero,
+          unsettled: BigInt.parse('1999791000'),
+        ),
+      );
+      expect(find.text('Nothing to send yet'), findsNothing, reason: 'merge');
+      // A quiet spell inside the lamp's hold: the data's shorter clock has
+      // lapsed, but the link is live by the lamp, so a weak link's pauses do
+      // not flip the door open and shut.
+      await pump(
+        tester,
+        money(
+          mature: BigInt.zero,
+          lastUpdate: t0.subtract(const Duration(seconds: 8)),
+          now: t0,
+        ),
+      );
+      expect(
+        find.text('Nothing to send yet'),
+        findsOneWidget,
+        reason: 'a pause inside the lamp hold',
+      );
       // The control: a zero nothing disputes really does close the door.
       await pump(tester, money(mature: BigInt.zero));
       expect(find.text('Nothing to send yet'), findsOneWidget);
@@ -1095,6 +1137,44 @@ void main() {
         );
         await tester.pumpWidget(const SizedBox());
       }
+    });
+  });
+
+  group('a merge settling at the floor', () {
+    testWidgets('names its figure and keeps it whole at 320dp / 1.3x (BG-5)', (
+      tester,
+    ) async {
+      // A merge always ends in eight decimals (the pin pays the inputs less
+      // the fee), so its in-flight figure is the longest the plate shows.
+      await pump(
+        tester,
+        money(mature: BigInt.zero, unsettled: BigInt.parse('12345678901234')),
+        width: 320,
+        textScale: 1.3,
+      );
+      expect(tester.takeException(), isNull, reason: 'the row overflowed');
+      final label = find.text('IN FLIGHT');
+      expect(label, findsOneWidget);
+      final row = find
+          .ancestor(of: label, matching: find.byType(MergeSemantics))
+          .first;
+      final figure = find.descendant(of: row, matching: find.byType(KvAmount));
+      expect(
+        tester.getSize(label).width,
+        greaterThan(24),
+        reason: 'unlabelled',
+      );
+      expect(
+        tester.getRect(figure).right,
+        lessThanOrEqualTo(tester.getRect(row).right + 0.5),
+        reason: 'the figure runs past its row',
+      );
+      expect(
+        tester.getRect(label).right,
+        lessThanOrEqualTo(tester.getRect(figure).left + 0.5),
+        reason: 'the label and the figure overlap',
+      );
+      await tester.pumpWidget(const SizedBox());
     });
   });
 

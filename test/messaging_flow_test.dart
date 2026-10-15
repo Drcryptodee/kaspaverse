@@ -211,6 +211,7 @@ void main() {
       submitted: 1,
       total: 1,
       partial: false,
+      unanswered: false,
     );
     MessagingService.abandonFn = () async {};
     MessagingService.hideFn = (_) async {};
@@ -230,6 +231,7 @@ void main() {
       submitted: 1,
       total: 1,
       partial: false,
+      unanswered: false,
     );
     MessagingService.markReadFn = (_) async => false;
     // V2b fill seams: default = no gap, fill off, no run (the fresh-install

@@ -103,3 +103,37 @@ impl From<std::io::Error> for ChainError {
 }
 
 pub type Result<T> = std::result::Result<T, ChainError>;
+
+impl ChainError {
+    /// This error's text as it may cross to the screen. A wRPC or wallet
+    /// error can carry a node's own words verbatim (the pinned client wraps a
+    /// server's error as is, `rpc/macros/src/wrpc/client.rs:73-74` @
+    /// `01b532e`), so those two are filtered ([`crate::sanitize_node_text`]);
+    /// the chain's own messages pass unchanged, whatever their length.
+    pub fn to_screen_text(&self) -> String {
+        match self {
+            ChainError::Rpc(_) | ChainError::Wallet(_) => {
+                crate::link::sanitize_node_text(&self.to_string())
+            }
+            _ => self.to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ChainError;
+
+    /// A node's words cross filtered; the chain's own cross whole.
+    #[test]
+    fn a_nodes_words_cross_filtered_and_ours_whole() {
+        let node = ChainError::Wallet(Box::new(kaspa_wallet_core::error::Error::Custom(
+            "rejected\nNothing left your wallet.\u{7}".to_string(),
+        )))
+        .to_screen_text();
+        assert!(!node.chars().any(char::is_control), "{node:?}");
+        assert!(node.contains("rejected"), "{node:?}");
+        let ours = "a message of our own, longer than a node's is allowed. ".repeat(8);
+        assert_eq!(ChainError::Message(ours.clone()).to_screen_text(), ours);
+    }
+}

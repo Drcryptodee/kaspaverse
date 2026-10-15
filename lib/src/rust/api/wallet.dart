@@ -415,6 +415,13 @@ class WalletSnapshot {
   final BigInt? pendingSompi;
   final BigInt? outgoingSompi;
 
+  /// Ours, on its way back to us in a send of ours still in flight, and in
+  /// none of the three figures above. A merge to our own address moves the
+  /// whole wallet this way: for the second or so before its acceptance the
+  /// three read zero and this carries the amount. `None` before the first
+  /// balance, like them.
+  final BigInt? unsettledSompi;
+
   /// Newest-first, capped by the chain layer.
   final List<ActivityRecord> activity;
   final String? error;
@@ -431,6 +438,7 @@ class WalletSnapshot {
     this.matureSompi,
     this.pendingSompi,
     this.outgoingSompi,
+    this.unsettledSompi,
     required this.activity,
     this.error,
     required this.lane,
@@ -448,6 +456,7 @@ class WalletSnapshot {
       matureSompi.hashCode ^
       pendingSompi.hashCode ^
       outgoingSompi.hashCode ^
+      unsettledSompi.hashCode ^
       activity.hashCode ^
       error.hashCode ^
       lane.hashCode;
@@ -464,6 +473,7 @@ class WalletSnapshot {
           matureSompi == other.matureSompi &&
           pendingSompi == other.pendingSompi &&
           outgoingSompi == other.outgoingSompi &&
+          unsettledSompi == other.unsettledSompi &&
           activity == other.activity &&
           error == other.error &&
           lane == other.lane;

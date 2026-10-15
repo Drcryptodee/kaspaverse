@@ -38,7 +38,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -89,6 +89,11 @@ const WATCH_CAP: usize = 512;
 
 /// Window/stall tick cadence.
 const TICK: Duration = Duration::from_secs(10);
+
+/// The longest a held cursor waits between its tick walks. Each walk that
+/// leaves the hold in place doubles the wait from one tick, so a disk or a node
+/// that keeps refusing costs a walk every five minutes, not every tick.
+const HOLD_WALK_BACKOFF_MAX: Duration = Duration::from_secs(300);
 
 /// Reopen catch-up page budget. Each node page covers `mergeset_size_limit
 /// × 10` merged blocks (≈2480 at 10 bps ≈ ~4 min of chain), so 16 pages
@@ -247,6 +252,39 @@ pub enum AcceptanceEvent {
     Stalled { txid: String, waited_ms: u64 },
 }
 
+/// What one fold of a chain batch persisted: the events of every transition
+/// whose write landed, and the first write that failed, if one did.
+///
+/// A transition whose write fails is applied nowhere: the log changes its
+/// records only after the disk does, and the accepting-block index follows
+/// the log. So the batch can be folded again later and the transition lands
+/// then, which is what keeps `vcc.cursor` behind it (the write-ahead rule:
+/// a cursor moves only past facts that are durable).
+#[derive(Default)]
+struct Fold {
+    events: Vec<AcceptanceEvent>,
+    failed: Option<crate::error::ChainError>,
+}
+
+impl Fold {
+    /// The single-transition callers' view: the events, or the failure.
+    fn into_result(self) -> Result<Vec<AcceptanceEvent>> {
+        match self.failed {
+            Some(e) => Err(e),
+            None => Ok(self.events),
+        }
+    }
+}
+
+/// What folding one chain batch did, for the cursor.
+struct BatchFold {
+    /// Every fact it carried for a watched txid is on disk.
+    complete: bool,
+    /// One of its added blocks is a block the log holds an acceptance at: a
+    /// cursor left behind it could never see it leave the chain.
+    accepted: bool,
+}
+
 /// The pure fold: watch-set + VCC facts in, events out. No RPC, no clock of
 /// its own (every method takes `now_ms`) — fully unit-testable; the async
 /// shell owns I/O.
@@ -261,6 +299,10 @@ struct TrackerState {
     confirmed_emitted: HashSet<String>,
     /// Latest sink blue score seen (node-read; 0 = none yet).
     sink_blue: u64,
+    /// While `vcc.cursor` holds behind a batch it could not fold, an
+    /// acceptance may be missing its removal: no depth is claimed (nothing
+    /// reads Confirmed, nothing is finalized) until the hold is released.
+    depth_held: bool,
     /// What the live stream took off the chain (LINK-Q3): see [`OffChain`].
     off_chain: OffChain,
 }
@@ -302,8 +344,15 @@ impl TrackerState {
             elapse_emitted: HashSet::new(),
             confirmed_emitted: HashSet::new(),
             sink_blue: 0,
+            depth_held: false,
             off_chain: OffChain::default(),
         })
+    }
+
+    /// Whether the log holds an acceptance at `block` (one a removal of
+    /// `block` would displace).
+    fn holds_acceptance_at(&self, block: &str) -> bool {
+        self.by_accepting_block.contains_key(block)
     }
 
     fn is_watched(&self, txid: &str) -> bool {
@@ -389,6 +438,7 @@ impl TrackerState {
                 if record.source == WatchSource::Transport && !self.off_chain.contains(block) =>
             {
                 self.on_accepted(block, blue_score, &[txid.to_string()], accepted_unix_ms)
+                    .into_result()
             }
             _ => Ok(Vec::new()),
         }
@@ -423,7 +473,9 @@ impl TrackerState {
                 blue_score,
                 accepted_unix_ms,
                 ..
-            } => self.on_accepted(&block, blue_score, &[txid.to_string()], accepted_unix_ms),
+            } => self
+                .on_accepted(&block, blue_score, &[txid.to_string()], accepted_unix_ms)
+                .into_result(),
             Remembered::Displaced {
                 since_unix_ms,
                 prior_block,
@@ -477,14 +529,18 @@ impl TrackerState {
     /// blocks it is wrong by hours, and on a device with a skewed clock it is
     /// simply false. A receipt prints this under the label **Accepted**, so it
     /// has to be the chain's number or no number (`ffi-leak-auditor`, UX-4B).
+    ///
+    /// Each txid's write lands before anything else moves: a txid whose write
+    /// fails keeps its old record and its old index entry, and the fold goes
+    /// on with the rest ([`Fold`]).
     fn on_accepted(
         &mut self,
         accepting_block: &str,
         accepting_blue_score: u64,
         txids: &[String],
         accepted_unix_ms: u64,
-    ) -> Result<Vec<AcceptanceEvent>> {
-        let mut events = Vec::new();
+    ) -> Fold {
+        let mut fold = Fold::default();
         for txid in txids {
             let Some(record) = self.log.records.get(txid).cloned() else {
                 continue;
@@ -494,30 +550,36 @@ impl TrackerState {
             {
                 continue;
             }
-            // A→B re-acceptance: drop the txid from A's index entry, or a
-            // later (possibly out-of-order) removal of A would falsely
-            // displace a tx currently accepted by B (consensus-audit
-            // finding 2 — the same cleanup drop_watch does).
-            if let PersistedStatus::Accepted {
-                accepting_block: old,
-                ..
-            } = &record.status
-            {
-                if let Some(txids_in_old) = self.by_accepting_block.get_mut(old) {
-                    txids_in_old.retain(|t| t != txid);
-                    if txids_in_old.is_empty() {
-                        let old = old.clone();
-                        self.by_accepting_block.remove(&old);
-                    }
-                }
-            }
+            let previous = match &record.status {
+                PersistedStatus::Accepted {
+                    accepting_block: old,
+                    ..
+                } => Some(old.clone()),
+                _ => None,
+            };
             let mut updated = record;
             updated.status = PersistedStatus::Accepted {
                 accepting_block: accepting_block.to_string(),
                 accepting_blue_score,
                 accepted_unix_ms,
             };
-            self.log.upsert(txid.clone(), updated)?;
+            if let Err(e) = self.log.upsert(txid.clone(), updated) {
+                fold.failed.get_or_insert(e);
+                continue;
+            }
+            // A→B re-acceptance: drop the txid from A's index entry, or a
+            // later (possibly out-of-order) removal of A would falsely
+            // displace a tx currently accepted by B (the same cleanup
+            // drop_watch does). Only now that B is on disk: while the log
+            // still says A, a removal of A must still find it.
+            if let Some(old) = previous {
+                if let Some(txids_in_old) = self.by_accepting_block.get_mut(&old) {
+                    txids_in_old.retain(|t| t != txid);
+                    if txids_in_old.is_empty() {
+                        self.by_accepting_block.remove(&old);
+                    }
+                }
+            }
             self.by_accepting_block
                 .entry(accepting_block.to_string())
                 .or_default()
@@ -527,26 +589,28 @@ impl TrackerState {
             self.stall_emitted.remove(txid);
             self.elapse_emitted.remove(txid);
             spans::mark_with("accepted", txid);
-            events.push(AcceptanceEvent::Accepted { txid: txid.clone() });
+            fold.events
+                .push(AcceptanceEvent::Accepted { txid: txid.clone() });
         }
-        Ok(events)
+        fold
     }
 
     /// Fold removed chain blocks: any watched txid whose accepting block is
     /// among them becomes Displaced (window starts at `now_ms`).
-    fn on_removed(
-        &mut self,
-        removed_blocks: &[String],
-        now_ms: u64,
-    ) -> Result<Vec<AcceptanceEvent>> {
-        let mut events = Vec::new();
+    ///
+    /// A txid leaves its block's index entry only once its Displaced record
+    /// is on disk. One whose write fails stays indexed under the block, as
+    /// its record still says, so folding the removal again displaces it.
+    fn on_removed(&mut self, removed_blocks: &[String], now_ms: u64) -> Fold {
+        let mut fold = Fold::default();
         for block in removed_blocks {
             // The ordered stream's word: only its removals reach here since
             // LINK-Q3 (the walk's never touch the log; see `fold_walk`).
             self.off_chain.removed(block);
-            let Some(txids) = self.by_accepting_block.remove(block) else {
+            let Some(txids) = self.by_accepting_block.get(block).cloned() else {
                 continue;
             };
+            let mut kept = Vec::new();
             for txid in txids {
                 let Some(record) = self.log.records.get(&txid).cloned() else {
                     continue;
@@ -556,15 +620,24 @@ impl TrackerState {
                     since_unix_ms: now_ms,
                     prior_block: block.clone(),
                 };
-                self.log.upsert(txid.clone(), updated)?;
+                if let Err(e) = self.log.upsert(txid.clone(), updated) {
+                    fold.failed.get_or_insert(e);
+                    kept.push(txid);
+                    continue;
+                }
                 self.confirmed_emitted.remove(&txid);
                 // Observe-before-tuning: every displacement is a logged data
                 // point for the V6 window review (public data).
                 log::info!("acceptance: {txid} displaced (accepting block {block} left the chain)");
-                events.push(AcceptanceEvent::Displaced { txid });
+                fold.events.push(AcceptanceEvent::Displaced { txid });
+            }
+            if kept.is_empty() {
+                self.by_accepting_block.remove(block);
+            } else {
+                self.by_accepting_block.insert(block.clone(), kept);
             }
         }
-        Ok(events)
+        fold
     }
 
     /// Fold a sink blue score update: emit Confirmed crossings and FINALIZE
@@ -575,6 +648,10 @@ impl TrackerState {
     /// log only via the horizon/cap prune.
     fn on_sink_blue(&mut self, sink_blue: u64, now_ms: u64) -> Result<Vec<AcceptanceEvent>> {
         self.sink_blue = sink_blue;
+        if self.depth_held {
+            self.prune_beyond_horizon(now_ms)?;
+            return Ok(Vec::new());
+        }
         let mut events = Vec::new();
         let mut to_finalize = Vec::new();
         for record in self.log.records.values() {
@@ -598,10 +675,16 @@ impl TrackerState {
                 to_finalize.push(record.txid.clone());
             }
         }
+        // A finalization whose write fails is tried again at the next score:
+        // its record stays Accepted and indexed. The events stand either way.
         for txid in to_finalize {
-            self.finalize_watch(&txid)?;
+            if let Err(e) = self.finalize_watch(&txid) {
+                log::warn!("acceptance: finalize persist failed: {e}");
+            }
         }
-        self.prune_beyond_horizon(now_ms)?;
+        if let Err(e) = self.prune_beyond_horizon(now_ms) {
+            log::warn!("acceptance: horizon prune persist failed: {e}");
+        }
         Ok(events)
     }
 
@@ -620,19 +703,21 @@ impl TrackerState {
         else {
             return Ok(());
         };
+        let mut updated = record;
+        updated.status = PersistedStatus::Finalized {
+            accepting_block: accepting_block.clone(),
+            accepting_blue_score,
+            accepted_unix_ms,
+        };
+        // The write first: a finalization that did not land keeps its index
+        // entry, so a removal of its block still displaces it.
+        self.log.upsert(txid.to_string(), updated)?;
         if let Some(txids) = self.by_accepting_block.get_mut(&accepting_block) {
             txids.retain(|t| t != txid);
             if txids.is_empty() {
                 self.by_accepting_block.remove(&accepting_block);
             }
         }
-        let mut updated = record;
-        updated.status = PersistedStatus::Finalized {
-            accepting_block,
-            accepting_blue_score,
-            accepted_unix_ms,
-        };
-        self.log.upsert(txid.to_string(), updated)?;
         Ok(())
     }
 
@@ -721,7 +806,7 @@ impl TrackerState {
                 ..
             } => {
                 let blue_depth = self.sink_blue.saturating_sub(*accepting_blue_score);
-                if blue_depth >= CONFIRMED_DEPTH_BLUE {
+                if blue_depth >= CONFIRMED_DEPTH_BLUE && !self.depth_held {
                     TxStatus::Confirmed {
                         blue_depth,
                         accepted_unix_ms: *accepted_unix_ms,
@@ -757,6 +842,17 @@ pub struct AcceptanceTracker {
     events: broadcast::Sender<AcceptanceEvent>,
     cursor_path: PathBuf,
     cursor_written: AtomicU64,
+    /// A chain batch has not folded completely since `vcc.cursor` last moved,
+    /// so the cursor holds where it is ([`Self::freeze_cursor`]).
+    frozen: AtomicBool,
+    /// When the hold began (unix ms; 0 while there is none).
+    frozen_since_ms: AtomicU64,
+    /// Holds begun so far: the run loop's walk backoff belongs to one hold,
+    /// and a new hold walks at its first tick.
+    holds: AtomicU64,
+    /// A forced cursor write failed: the next live batch writes past the
+    /// throttle, so the cursor is not left behind an accepting block.
+    force_owed: AtomicBool,
     /// Txids awaiting SENDER resolution — deliberately NOT the watch log.
     ///
     /// The watch log is persisted and capacity-shared with real in-flight
@@ -968,6 +1064,10 @@ impl AcceptanceTracker {
             events,
             cursor_path: dir.join("vcc.cursor"),
             cursor_written: AtomicU64::new(0),
+            frozen: AtomicBool::new(false),
+            frozen_since_ms: AtomicU64::new(0),
+            holds: AtomicU64::new(0),
+            force_owed: AtomicBool::new(false),
             sender_interest: Mutex::new(VecDeque::new()),
             matched: Mutex::new(MatchedMemory::default()),
         }))
@@ -1191,6 +1291,9 @@ impl AcceptanceTracker {
         // first run.
         if let Err(e) = atomic_write(&self.cursor_path, hash.to_string().as_bytes()) {
             log::warn!("acceptance: cursor write failed: {e}");
+            if force {
+                self.force_owed.store(true, Ordering::SeqCst);
+            }
         }
     }
 
@@ -1199,8 +1302,15 @@ impl AcceptanceTracker {
     /// re-acceptance must land AFTER the displacement so the final state is
     /// Accepted. Accepting-block blue scores are resolved via `get_block`
     /// (one call per accepting block that carries a watched txid — sparse).
-    async fn fold_batch(&self, rpc: &Rpc, batch: &VccBatch) {
+    ///
+    /// Answers whether every fact the batch carried for a watched txid is now
+    /// on disk, and whether it recorded an acceptance. The caller moves
+    /// `vcc.cursor` past the batch only when it is complete: a failed write,
+    /// or an acceptance whose block could not be read, leaves a fact a later
+    /// fold from the same point must still apply.
+    async fn fold_batch(&self, rpc: &Rpc, batch: &VccBatch) -> BatchFold {
         let now_ms = now_unix_ms();
+        let mut complete = true;
         // Removals: cheap map lookups, no RPC.
         let removed: Vec<String> = batch
             .removed_chain_block_hashes
@@ -1208,17 +1318,16 @@ impl AcceptanceTracker {
             .map(|h| h.to_string())
             .collect();
         if !removed.is_empty() {
-            let events = {
-                let mut state = self
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                state.on_removed(&removed, now_ms).unwrap_or_else(|e| {
-                    log::warn!("acceptance: removal fold persist failed: {e}");
-                    Vec::new()
-                })
-            };
-            self.broadcast(events);
+            let fold = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .on_removed(&removed, now_ms);
+            if let Some(e) = &fold.failed {
+                log::warn!("acceptance: removal fold persist failed: {e}");
+                complete = false;
+            }
+            self.broadcast(fold.events);
         }
         // Blocks this batch put (back) on the chain leave the off-chain set, so
         // a walk acceptance onto them is admitted again (LINK-Q3).
@@ -1314,6 +1423,12 @@ impl AcceptanceTracker {
                                     crate::link::sanitize_node_text(&e2.to_string()),
                                     txids.len()
                                 );
+                                // Skipped is not folded: the cursor must stay
+                                // behind this acceptance until a later fold
+                                // can read its block.
+                                if !txids.is_empty() {
+                                    complete = false;
+                                }
                                 continue;
                             }
                         }
@@ -1341,29 +1456,100 @@ impl AcceptanceTracker {
             if txids.is_empty() {
                 continue;
             }
-            let events = {
-                let mut state = self
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                state
-                    .on_accepted(
-                        &accepting_block.to_string(),
-                        blue_score,
-                        &txids,
-                        accepted_unix_ms,
-                    )
-                    .unwrap_or_else(|e| {
-                        log::warn!("acceptance: acceptance fold persist failed: {e}");
-                        Vec::new()
-                    })
-            };
-            self.broadcast(events);
+            let fold = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .on_accepted(
+                    &accepting_block.to_string(),
+                    blue_score,
+                    &txids,
+                    accepted_unix_ms,
+                );
+            if let Some(e) = &fold.failed {
+                log::warn!("acceptance: acceptance fold persist failed: {e}");
+                complete = false;
+            }
+            self.broadcast(fold.events);
         }
+        // Checked after the fold, so it covers an acceptance this batch
+        // recorded and one already held at a block it carries again.
+        let accepted = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            batch
+                .added_chain_block_hashes
+                .iter()
+                .any(|block| state.holds_acceptance_at(&block.to_string()))
+        };
+        BatchFold { complete, accepted }
+    }
 
-        if let Some(last_added) = batch.added_chain_block_hashes.last() {
-            self.write_cursor(last_added, false);
+    /// Fold one live batch and move `vcc.cursor` past it, which happens only
+    /// when it folded completely and no earlier batch's facts are missing.
+    ///
+    /// A batch carrying a block the log holds an acceptance at moves it at
+    /// once, past the throttle, and so does the batch after a forced write
+    /// that failed. A walk reports as removed only the blocks of its start
+    /// block's own chain (`calculate_chain_path`, pin
+    /// `consensus/src/processes/traversal_manager.rs:34-44` @ `01b532e`), so a
+    /// cursor left behind an accepting block could never see that block leave
+    /// the chain, and a removal lost to a failed write would stay lost.
+    async fn fold_live(&self, rpc: &Rpc, batch: &VccBatch) {
+        let fold = self.fold_batch(rpc, batch).await;
+        if !fold.complete {
+            self.freeze_cursor();
+        } else if !self.frozen.load(Ordering::SeqCst) {
+            if let Some(last_added) = batch.added_chain_block_hashes.last() {
+                let force = fold.accepted | self.force_owed.swap(false, Ordering::SeqCst);
+                self.write_cursor(last_added, force);
+            }
         }
+    }
+
+    /// Hold `vcc.cursor` behind a batch that did not fold completely. The
+    /// next walk from it (every tick while it holds, every reconnect and
+    /// every start) folds the batch again; the walk that reaches the tip
+    /// cleanly releases it. Meanwhile no depth is claimed: an acceptance may
+    /// be missing its removal.
+    fn freeze_cursor(&self) {
+        if !self.frozen.swap(true, Ordering::SeqCst) {
+            self.frozen_since_ms.store(now_unix_ms(), Ordering::SeqCst);
+            self.holds.fetch_add(1, Ordering::SeqCst);
+            self.state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .depth_held = true;
+            log::warn!(
+                "acceptance: a chain batch could not be folded completely; vcc.cursor holds \
+                 until a walk from it folds cleanly"
+            );
+        }
+    }
+
+    /// The cursor reflects every fact again: a clean walk reached the tip, or
+    /// the cursor was re-seeded at the sink (the gap behind it given up).
+    fn release_cursor(&self) {
+        if self.frozen.swap(false, Ordering::SeqCst) {
+            self.frozen_since_ms.store(0, Ordering::SeqCst);
+            self.state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .depth_held = false;
+            log::info!("acceptance: vcc.cursor released");
+        }
+    }
+
+    /// Whether a walk that cannot finish keeps the cursor's hold for the next
+    /// one. Past the pruning horizon no node can serve the walk, so the hold
+    /// is given up like any other gap.
+    fn keeps_hold(&self) -> bool {
+        let since = self.frozen_since_ms.load(Ordering::SeqCst);
+        self.frozen.load(Ordering::SeqCst)
+            && since != 0
+            && now_unix_ms().saturating_sub(since) < pruning_horizon_ms()
     }
 
     /// **Fold one page of the message walk** (LINK-Q3, D-344). The log belongs
@@ -1460,14 +1646,28 @@ impl AcceptanceTracker {
         let Some(mut cursor) = self.read_cursor() else {
             if let Ok(sink) = rpc.rpc_api().get_sink().await {
                 self.write_cursor(&sink.sink, true);
+                self.release_cursor();
             }
             return;
         };
+        // The persisted cursor moves only while every page so far folded
+        // completely; the walk itself goes on, so later facts still land.
+        let mut clean = true;
         for _page in 0..MAX_VCC_CATCHUP_PAGES {
             let Some(resp) = self.catch_up_page(rpc, cursor).await else {
+                // A held cursor waits for the next walk rather than give up
+                // the fact it holds back.
+                if self.keeps_hold() {
+                    log::warn!(
+                        "acceptance: catch-up from {cursor} unanswered; vcc.cursor keeps its \
+                         hold for the next walk"
+                    );
+                    return;
+                }
                 log::warn!("acceptance: catch-up from {cursor} unanswerable — re-seeding at sink");
                 if let Ok(sink) = rpc.rpc_api().get_sink().await {
                     self.write_cursor(&sink.sink, true);
+                    self.release_cursor();
                 }
                 return;
             };
@@ -1489,22 +1689,44 @@ impl AcceptanceTracker {
                         .collect(),
                 ),
             };
-            self.fold_batch(rpc, &batch).await;
+            // A page that did not fold completely holds the cursor at once, so
+            // the rest of this walk keeps the hold too.
+            if !self.fold_batch(rpc, &batch).await.complete {
+                clean = false;
+                self.freeze_cursor();
+            }
             if let Some(last) = batch.added_chain_block_hashes.last() {
                 cursor = *last;
-                self.write_cursor(last, true);
+                if clean {
+                    self.write_cursor(last, true);
+                }
             }
             if done {
+                if clean {
+                    self.release_cursor();
+                } else {
+                    self.freeze_cursor();
+                }
                 return;
             }
         }
-        // Page budget exhausted — a very long gap. Stop honestly at sink.
+        // Page budget exhausted — a very long gap. A held cursor whose walk
+        // has not yet folded cleanly continues from where it stopped at the
+        // next walk; otherwise stop honestly at sink.
+        if !clean && self.keeps_hold() {
+            log::warn!(
+                "acceptance: catch-up page budget ({MAX_VCC_CATCHUP_PAGES}) spent before the \
+                 walk folded cleanly; vcc.cursor keeps its hold for the next walk"
+            );
+            return;
+        }
         log::warn!(
             "acceptance: catch-up page budget ({MAX_VCC_CATCHUP_PAGES}) exhausted — \
              re-seeding at sink; unresolved watches degrade to their consumers' fallbacks"
         );
         if let Ok(sink) = rpc.rpc_api().get_sink().await {
             self.write_cursor(&sink.sink, true);
+            self.release_cursor();
         }
     }
 
@@ -1562,11 +1784,14 @@ impl AcceptanceTracker {
             tracker.catch_up(&rpc).await;
             let mut tick = tokio::time::interval(TICK);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut hold_backoff = TICK;
+            let mut hold_walk_at = tokio::time::Instant::now();
+            let mut hold_seen = 0;
             loop {
                 tokio::select! {
                     feed = vcc_rx.recv() => {
                         match feed {
-                            Some(TrackerFeed::Vcc(batch)) => tracker.fold_batch(&rpc, &batch).await,
+                            Some(TrackerFeed::Vcc(batch)) => tracker.fold_live(&rpc, &batch).await,
                             Some(TrackerFeed::Walk(batch)) => tracker.fold_walk(&batch),
                             None => break, // monitor gone
                         }
@@ -1596,6 +1821,25 @@ impl AcceptanceTracker {
                         }
                     }
                     _ = tick.tick() => {
+                        // A held cursor heals here, not only at the next
+                        // reconnect: on a steady link that can be hours away.
+                        // Each hold walks at its first tick, then backs off.
+                        if tracker.frozen.load(Ordering::SeqCst) {
+                            let hold = tracker.holds.load(Ordering::SeqCst);
+                            if hold != hold_seen {
+                                hold_seen = hold;
+                                hold_backoff = TICK;
+                                hold_walk_at = tokio::time::Instant::now();
+                            }
+                            if tokio::time::Instant::now() >= hold_walk_at {
+                                tracker.catch_up(&rpc).await;
+                                if tracker.frozen.load(Ordering::SeqCst) {
+                                    hold_backoff =
+                                        (hold_backoff * 2).min(HOLD_WALK_BACKOFF_MAX);
+                                    hold_walk_at = tokio::time::Instant::now() + hold_backoff;
+                                }
+                            }
+                        }
                         let events = {
                             let mut state = tracker
                                 .state
@@ -1753,6 +1997,7 @@ mod tests {
         // Acceptance at blue score 5_000.
         let events = state
             .on_accepted(&block(1), 5_000, &[txid(1)], 2_000)
+            .into_result()
             .unwrap();
         assert_eq!(events, vec![AcceptanceEvent::Accepted { txid: txid(1) }]);
         assert_eq!(
@@ -1807,7 +2052,11 @@ mod tests {
             ),
             "finalized watch still answers Confirmed"
         );
-        assert!(state.on_removed(&[block(1)], 5_000).unwrap().is_empty());
+        assert!(state
+            .on_removed(&[block(1)], 5_000)
+            .into_result()
+            .unwrap()
+            .is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1826,6 +2075,7 @@ mod tests {
             state.watch(&txid(1), WatchSource::Send, 1_000).unwrap();
             state
                 .on_accepted(&block(1), 5_000, &[txid(1)], 2_000)
+                .into_result()
                 .unwrap();
             state
                 .on_sink_blue(5_000 + TERMINAL_DEPTH_BLUE, 3_000)
@@ -1859,10 +2109,11 @@ mod tests {
             .unwrap();
         state
             .on_accepted(&block(1), 5_000, &[txid(1)], 2_000)
+            .into_result()
             .unwrap();
 
         // The accepting block leaves the selected chain.
-        let events = state.on_removed(&[block(1)], 10_000).unwrap();
+        let events = state.on_removed(&[block(1)], 10_000).into_result().unwrap();
         assert_eq!(events, vec![AcceptanceEvent::Displaced { txid: txid(1) }]);
         assert_eq!(state.status(&txid(1), 10_000), Some(TxStatus::Displaced));
 
@@ -1883,9 +2134,13 @@ mod tests {
         // FUTURE displacement gets a fresh window + fresh elapse.
         let events = state
             .on_accepted(&block(2), 6_000, &[txid(1)], 200_000)
+            .into_result()
             .unwrap();
         assert_eq!(events, vec![AcceptanceEvent::Accepted { txid: txid(1) }]);
-        state.on_removed(&[block(2)], 300_000).unwrap();
+        state
+            .on_removed(&[block(2)], 300_000)
+            .into_result()
+            .unwrap();
         let events = state.tick(300_000 + TOMBSTONE_WINDOW_MS);
         assert_eq!(
             events,
@@ -1907,15 +2162,17 @@ mod tests {
         state.watch(&txid(1), WatchSource::Send, 1_000).unwrap();
         state
             .on_accepted(&block(1), 5_000, &[txid(1)], 2_000)
+            .into_result()
             .unwrap();
         // Re-accepted by a different chain block WITHOUT a folded removal of
         // block(1) in between (the out-of-order case).
         state
             .on_accepted(&block(2), 6_000, &[txid(1)], 3_000)
+            .into_result()
             .unwrap();
 
         // The stale block's removal arrives late: must be a no-op.
-        let events = state.on_removed(&[block(1)], 10_000).unwrap();
+        let events = state.on_removed(&[block(1)], 10_000).into_result().unwrap();
         assert!(events.is_empty(), "stale removal must not displace");
         assert!(matches!(
             state.status(&txid(1), 10_000),
@@ -1923,7 +2180,7 @@ mod tests {
         ));
 
         // The CURRENT accepting block's removal still displaces.
-        let events = state.on_removed(&[block(2)], 11_000).unwrap();
+        let events = state.on_removed(&[block(2)], 11_000).into_result().unwrap();
         assert_eq!(events, vec![AcceptanceEvent::Displaced { txid: txid(1) }]);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1979,8 +2236,9 @@ mod tests {
                 .unwrap();
             state
                 .on_accepted(&block(2), 5_000, &[txid(2)], 2_000)
+                .into_result()
                 .unwrap();
-            state.on_removed(&[block(2)], 10_000).unwrap();
+            state.on_removed(&[block(2)], 10_000).into_result().unwrap();
         }
         // "Restart": fresh load from disk.
         let mut state = TrackerState::load(path).unwrap();
@@ -1999,8 +2257,12 @@ mod tests {
         // second removal of a re-accepted block.
         state
             .on_accepted(&block(3), 6_000, &[txid(2)], 200_000)
+            .into_result()
             .unwrap();
-        let events = state.on_removed(&[block(3)], 210_000).unwrap();
+        let events = state
+            .on_removed(&[block(3)], 210_000)
+            .into_result()
+            .unwrap();
         assert_eq!(events, vec![AcceptanceEvent::Displaced { txid: txid(2) }]);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -2141,6 +2403,7 @@ mod tests {
             .lock()
             .unwrap()
             .on_removed(&blocks, now_unix_ms())
+            .into_result()
             .unwrap();
         tracker.broadcast(events);
     }
@@ -2151,6 +2414,7 @@ mod tests {
         let txids: Vec<String> = txids.iter().map(|t| t.to_string()).collect();
         state
             .on_accepted(&block.to_string(), 4_100, &txids, 883_612_900_000)
+            .into_result()
             .unwrap();
     }
 
@@ -2347,6 +2611,7 @@ mod tests {
             .lock()
             .unwrap()
             .on_accepted(&x.to_string(), 9_999, &[sent.to_string()], 0)
+            .into_result()
             .unwrap();
         tracker.fold_walk(&walk_batch(&[], x, &[sent], 3));
         assert!(matches!(
@@ -2628,6 +2893,361 @@ mod tests {
 
         assert!(AcceptanceTracker::load(dir.clone()).is_err());
         assert_eq!(std::fs::read(dir.join("acceptance.kvlog")).unwrap(), bytes);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Makes every write to the log at `path` fail in the operating system:
+    /// the file moves aside and a directory takes its name, so the log's own
+    /// open fails, as it would on a disk that refuses it. No seam is involved.
+    /// `restore` puts the same bytes back.
+    struct Unwritable {
+        path: PathBuf,
+        aside: PathBuf,
+    }
+
+    impl Unwritable {
+        fn at(path: &std::path::Path) -> Self {
+            let aside = path.with_extension("aside");
+            std::fs::rename(path, &aside).unwrap();
+            std::fs::create_dir(path).unwrap();
+            Self {
+                path: path.to_path_buf(),
+                aside,
+            }
+        }
+
+        fn restore(self) {
+            std::fs::remove_dir(&self.path).unwrap();
+            std::fs::rename(&self.aside, &self.path).unwrap();
+        }
+    }
+
+    /// **A removal whose write fails is folded again, and lands.** The txid
+    /// keeps its index entry while its record still says the block, so the
+    /// same removal folded later displaces it; leaving the index first would
+    /// leave a displaced send reading Accepted, then Confirmed.
+    #[test]
+    fn a_removal_whose_write_fails_lands_when_folded_again() {
+        let dir = test_dir("removal-write-fails");
+        let path = dir.join("acceptance.kvlog");
+        let mut state = TrackerState::load(path.clone()).unwrap();
+        state.watch(&txid(1), WatchSource::Send, 1_000).unwrap();
+        state
+            .on_accepted(&block(1), 5_000, &[txid(1)], 2_000)
+            .into_result()
+            .unwrap();
+
+        let held = Unwritable::at(&path);
+        let fold = state.on_removed(&[block(1)], 10_000);
+        assert!(fold.failed.is_some(), "the write must really fail");
+        assert!(fold.events.is_empty(), "no event for a transition not made");
+        assert!(
+            matches!(
+                state.status(&txid(1), 10_000),
+                Some(TxStatus::Accepted { .. })
+            ),
+            "a failed write applies nothing"
+        );
+        held.restore();
+
+        let events = state.on_removed(&[block(1)], 10_500).into_result().unwrap();
+        assert_eq!(events, vec![AcceptanceEvent::Displaced { txid: txid(1) }]);
+        let state = TrackerState::load(path).unwrap();
+        assert_eq!(state.status(&txid(1), 11_000), Some(TxStatus::Displaced));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A re-acceptance whose write fails keeps the old block's index
+    /// entry.** The log still says block 1, so a removal of block 1 must
+    /// still displace the txid; dropping it from the index before the write
+    /// left it Accepted by a block that is no longer on the chain.
+    #[test]
+    fn a_moved_acceptance_whose_write_fails_stays_under_its_old_block() {
+        let dir = test_dir("move-write-fails");
+        let path = dir.join("acceptance.kvlog");
+        let mut state = TrackerState::load(path.clone()).unwrap();
+        state.watch(&txid(1), WatchSource::Send, 1_000).unwrap();
+        state
+            .on_accepted(&block(1), 5_000, &[txid(1)], 2_000)
+            .into_result()
+            .unwrap();
+
+        let held = Unwritable::at(&path);
+        let fold = state.on_accepted(&block(2), 6_000, &[txid(1)], 3_000);
+        assert!(fold.failed.is_some(), "the write must really fail");
+        assert!(fold.events.is_empty());
+        held.restore();
+
+        let events = state.on_removed(&[block(1)], 10_000).into_result().unwrap();
+        assert_eq!(
+            events,
+            vec![AcceptanceEvent::Displaced { txid: txid(1) }],
+            "the removal of the block the log names must reach the txid"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **An acceptance whose block cannot be read is not folded, so the
+    /// cursor holds behind it.** With no `get_block` answer and no sink score
+    /// to bound the depth by, the fold skips the txid (it stays Submitted);
+    /// the cursor must not move past an acceptance it never applied.
+    #[tokio::test]
+    async fn an_acceptance_that_could_not_be_read_holds_the_cursor() {
+        use kaspa_wallet_core::rpc::{DynRpcApi, RpcCtl};
+        let dir = test_dir("cursor-unread");
+        let tracker = AcceptanceTracker::load(dir.clone()).unwrap();
+        let rpc = Rpc::new(
+            crate::link_rpc::LinkRpc::new() as std::sync::Arc<DynRpcApi>,
+            RpcCtl::new(),
+        );
+        let (sent, accepting) = (hb(0x13), hb(0xA3));
+        tracker.watch(&sent.to_string(), WatchSource::Send);
+        let start = hb(0xC0);
+        tracker.write_cursor(&start, true);
+        tracker.cursor_written.store(0, Ordering::Relaxed);
+
+        tracker
+            .fold_live(
+                &rpc,
+                &VccBatch {
+                    removed_chain_block_hashes: Arc::new(Vec::new()),
+                    added_chain_block_hashes: Arc::new(vec![accepting]),
+                    accepted: Arc::new(vec![(accepting, vec![sent])]),
+                },
+            )
+            .await;
+        assert_eq!(tracker.status(&sent.to_string()), Some(TxStatus::Submitted));
+        assert_eq!(
+            tracker.read_cursor(),
+            Some(start),
+            "moved past an acceptance it never applied"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A live batch that does not fold completely holds `vcc.cursor`, and so
+    /// does every batch after it.** The cursor is where the next walk starts;
+    /// moving it past a lost fact skips that fact for good. A removal needs no
+    /// node, so an unbound handle serves as the `Rpc`.
+    #[tokio::test]
+    async fn a_batch_that_does_not_fold_completely_holds_the_cursor() {
+        use kaspa_wallet_core::rpc::{DynRpcApi, RpcCtl};
+        let dir = test_dir("cursor-holds");
+        let tracker = AcceptanceTracker::load(dir.clone()).unwrap();
+        let rpc = Rpc::new(
+            crate::link_rpc::LinkRpc::new() as std::sync::Arc<DynRpcApi>,
+            RpcCtl::new(),
+        );
+        let (sent, accepting) = (hb(0x11), hb(0xA1));
+        tracker.watch(&sent.to_string(), WatchSource::Send);
+        live_accepted(&tracker, accepting, &[sent]);
+        let start = hb(0xC0);
+        tracker.write_cursor(&start, true);
+        let batch = |removed: Vec<Hash>, added: Hash| VccBatch {
+            removed_chain_block_hashes: Arc::new(removed),
+            added_chain_block_hashes: Arc::new(vec![added]),
+            accepted: Arc::new(Vec::new()),
+        };
+        // Each live write below would otherwise wait out the throttle.
+        let unthrottle = || tracker.cursor_written.store(0, Ordering::Relaxed);
+
+        let held = Unwritable::at(&dir.join("acceptance.kvlog"));
+        unthrottle();
+        tracker
+            .fold_live(&rpc, &batch(vec![accepting], hb(0xC1)))
+            .await;
+        assert_eq!(
+            tracker.read_cursor(),
+            Some(start),
+            "moved past the lost removal"
+        );
+        held.restore();
+
+        unthrottle();
+        tracker.fold_live(&rpc, &batch(Vec::new(), hb(0xC2))).await;
+        assert_eq!(
+            tracker.read_cursor(),
+            Some(start),
+            "a later clean batch moved it past the lost one"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **While the cursor holds, no depth is claimed.** An acceptance whose
+    /// removal may be the fact held back reads Accepted however deep it is,
+    /// emits no Confirmed and is not finalized out of the index; once the hold
+    /// is released, the next score does both.
+    #[tokio::test]
+    async fn a_held_cursor_claims_no_depth() {
+        let dir = test_dir("depth-held");
+        let tracker = AcceptanceTracker::load(dir.clone()).unwrap();
+        let (sent, accepting) = (hb(0x11), hb(0xA1));
+        tracker.watch(&sent.to_string(), WatchSource::Send);
+        live_accepted(&tracker, accepting, &[sent]);
+        let deep = 4_100 + TERMINAL_DEPTH_BLUE;
+
+        tracker.freeze_cursor();
+        let events = tracker
+            .state
+            .lock()
+            .unwrap()
+            .on_sink_blue(deep, 3_000)
+            .unwrap();
+        assert!(events.is_empty(), "{events:?}");
+        assert!(
+            matches!(
+                tracker.status(&sent.to_string()),
+                Some(TxStatus::Accepted { .. })
+            ),
+            "an acceptance read Confirmed while a fact was held back"
+        );
+        assert!(
+            tracker
+                .state
+                .lock()
+                .unwrap()
+                .holds_acceptance_at(&accepting.to_string()),
+            "finalized out of the index while a removal may be missing"
+        );
+
+        tracker.release_cursor();
+        let events = tracker
+            .state
+            .lock()
+            .unwrap()
+            .on_sink_blue(deep, 3_100)
+            .unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AcceptanceEvent::Confirmed { .. })),
+            "{events:?}"
+        );
+        assert!(!tracker
+            .state
+            .lock()
+            .unwrap()
+            .holds_acceptance_at(&accepting.to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A finalization whose write fails keeps its index entry, and its
+    /// Confirmed still goes out.** The record still says Accepted, so a
+    /// removal of its block must still displace it; the next score finalizes
+    /// it once the disk takes the write.
+    #[test]
+    fn a_finalization_whose_write_fails_keeps_its_index() {
+        let dir = test_dir("finalize-write-fails");
+        let path = dir.join("acceptance.kvlog");
+        let mut state = TrackerState::load(path.clone()).unwrap();
+        state.watch(&txid(1), WatchSource::Send, 1_000).unwrap();
+        state
+            .on_accepted(&block(1), 5_000, &[txid(1)], 2_000)
+            .into_result()
+            .unwrap();
+
+        let held = Unwritable::at(&path);
+        let events = state
+            .on_sink_blue(5_000 + TERMINAL_DEPTH_BLUE, 3_000)
+            .expect("the events stand when a finalization fails");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AcceptanceEvent::Confirmed { .. })),
+            "{events:?}"
+        );
+        assert!(
+            state.holds_acceptance_at(&block(1)),
+            "left the index before its finalization was written"
+        );
+        held.restore();
+
+        state
+            .on_sink_blue(5_000 + TERMINAL_DEPTH_BLUE + 1, 3_100)
+            .unwrap();
+        assert!(!state.holds_acceptance_at(&block(1)));
+        let reloaded = TrackerState::load(path).unwrap();
+        assert!(matches!(
+            reloaded.log.records.get(&txid(1)).map(|r| &r.status),
+            Some(PersistedStatus::Finalized { .. })
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A batch that carries a block the log holds an acceptance at moves
+    /// the cursor past the throttle**, even when it records nothing new (the
+    /// same acceptance folded again after a walk). A throttled cursor left
+    /// behind that block could never see it leave the chain.
+    #[tokio::test]
+    async fn a_batch_carrying_an_accepting_block_again_moves_the_cursor() {
+        use kaspa_wallet_core::rpc::{DynRpcApi, RpcCtl};
+        let dir = test_dir("cursor-refold");
+        let tracker = AcceptanceTracker::load(dir.clone()).unwrap();
+        let rpc = Rpc::new(
+            crate::link_rpc::LinkRpc::new() as std::sync::Arc<DynRpcApi>,
+            RpcCtl::new(),
+        );
+        let (sent, accepting) = (hb(0x11), hb(0xA1));
+        tracker.watch(&sent.to_string(), WatchSource::Send);
+        live_accepted(&tracker, accepting, &[sent]);
+        let earlier = hb(0xC0);
+        tracker.write_cursor(&earlier, true);
+
+        // Just written: a plain write now waits out the throttle.
+        tracker
+            .fold_live(
+                &rpc,
+                &VccBatch {
+                    removed_chain_block_hashes: Arc::new(Vec::new()),
+                    added_chain_block_hashes: Arc::new(vec![accepting]),
+                    accepted: Arc::new(Vec::new()),
+                },
+            )
+            .await;
+        assert_eq!(
+            tracker.read_cursor(),
+            Some(accepting),
+            "the cursor stayed behind a block the log holds an acceptance at"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A forced cursor write that fails is owed to the next batch**, which
+    /// writes past the throttle.
+    #[tokio::test]
+    async fn a_failed_forced_cursor_write_is_owed() {
+        use kaspa_wallet_core::rpc::{DynRpcApi, RpcCtl};
+        let dir = test_dir("cursor-owed");
+        let tracker = AcceptanceTracker::load(dir.clone()).unwrap();
+        let rpc = Rpc::new(
+            crate::link_rpc::LinkRpc::new() as std::sync::Arc<DynRpcApi>,
+            RpcCtl::new(),
+        );
+        let start = hb(0xC0);
+        tracker.write_cursor(&start, true);
+
+        let cursor = dir.join("vcc.cursor");
+        let held = Unwritable::at(&cursor);
+        tracker.write_cursor(&hb(0xC1), true);
+        held.restore();
+        assert_eq!(tracker.read_cursor(), Some(start));
+
+        // Inside the throttle, a plain batch: only the debt moves it.
+        tracker
+            .fold_live(
+                &rpc,
+                &VccBatch {
+                    removed_chain_block_hashes: Arc::new(Vec::new()),
+                    added_chain_block_hashes: Arc::new(vec![hb(0xC2)]),
+                    accepted: Arc::new(Vec::new()),
+                },
+            )
+            .await;
+        assert_eq!(
+            tracker.read_cursor(),
+            Some(hb(0xC2)),
+            "a failed forced write was not owed"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

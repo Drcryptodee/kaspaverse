@@ -76,6 +76,7 @@ class SendScreen extends StatefulWidget {
     required this.commit,
     required this.abandon,
     this.balanceStale,
+    this.unsettled,
     this.feePreview,
     this.acceptanceStatus,
     this.maturity,
@@ -111,6 +112,12 @@ class SendScreen extends StatefulWidget {
   /// as given. BG-8's third state — `—` for unknown — rides [mature] being
   /// null and is independent of this.
   final ValueListenable<bool>? balanceStale;
+
+  /// Ours on its way back in a send of ours still in flight, which [mature]
+  /// does not show: a merge reads zero spendable until its acceptance. While
+  /// any is unsettled the screen claims no shortfall; the build answers
+  /// whether the send fits, and says *still settling* if it does not yet.
+  final ValueListenable<BigInt?>? unsettled;
 
   final Future<SignableSummaryDto> Function(
     String destination,
@@ -237,6 +244,8 @@ class _SendScreenState extends State<SendScreen> {
   /// constant `false`, not a second folding of the link state.
   late final ValueListenable<bool> _stale =
       widget.balanceStale ?? ValueNotifier<bool>(false);
+  late final ValueListenable<BigInt?> _unsettled =
+      widget.unsettled ?? ValueNotifier<BigInt?>(null);
   final _address = TextEditingController();
   final _addressFocus = FocusNode();
   bool _building = false;
@@ -455,7 +464,11 @@ class _SendScreenState extends State<SendScreen> {
   ///    capability taken from exactly the dust-trapped user the floor exists to
   ///    help. So the sentence appears with both figures and the control stays
   ///    live.
-  _Block? _amountBlock(BigInt? mature, {required bool stale}) {
+  _Block? _amountBlock(
+    BigInt? mature, {
+    required bool stale,
+    bool settling = false,
+  }) {
     final amount = _amountSompi;
     final hasAmount = amount != null && amount > BigInt.zero;
     if (!hasAmount) return (reason: 'Enter an amount', notice: null);
@@ -471,7 +484,7 @@ class _SendScreenState extends State<SendScreen> {
               '${_trimmed(min - amount)} KAS short.'
         : null;
 
-    if (!stale && mature != null && amount > mature) {
+    if (!stale && !settling && mature != null && amount > mature) {
       return (
         reason: 'More than you can spend',
         notice:
@@ -582,9 +595,14 @@ class _SendScreenState extends State<SendScreen> {
     });
     try {
       final summary = await prepare();
-      if (!mounted) return;
+      if (!mounted) {
+        // The screen went while Rust built the send, so no ceremony will
+        // open to commit or abandon it: drop the stash here.
+        unawaited(widget.abandon());
+        return;
+      }
       // The ceremony renders Rust's decode (summary), not the form (B7).
-      var leftInFlight = false;
+      var committed = false;
       var another = false;
       final outcome = await showSigningCeremony(
         context,
@@ -593,7 +611,7 @@ class _SendScreenState extends State<SendScreen> {
         abandon: widget.abandon,
         acceptanceStatus: widget.acceptanceStatus,
         maturity: widget.maturity,
-        onLeftInFlight: () => leftInFlight = true,
+        onCommitted: () => committed = true,
         explorerUrl: widget.explorerUrl,
         openUrl: widget.openUrl,
         // The ceremony draws the same price and the same name this screen
@@ -614,18 +632,17 @@ class _SendScreenState extends State<SendScreen> {
       // holding the address and amount of a send that just went out, which is
       // one tap from a duplicate (`wallet-security-auditor`, UX-4).
       if (another) return;
-      // A fully-broadcast send returns to home; the new balance + outgoing row
-      // arrive via the live sync (no manual refresh).
-      //
-      // **So does a send the user walked away from mid-broadcast.** That exit
-      // returns `null` like a dismissal does, and leaving them here would
-      // restore a form still holding the amount and the address — one tap from
-      // a duplicate, right after the ceremony told them to go and check whether
-      // it landed. Home is where that activity is.
-      if (leftInFlight ||
-          (outcome != null && !outcome.partial && outcome.error == null)) {
-        Navigator.of(context).pop();
-      }
+      // **Once the hold has completed, every exit goes home but one**: a send
+      // that landed, one walked away from mid-broadcast, one partly sent, one
+      // with no answer and one that threw. The form still holds the amount
+      // and the address, one hold from a duplicate of a send whose fate the
+      // receipt has just told the user to check, on home's balance. The one
+      // that stays is a send Rust proved never left (refused before its first
+      // request): no duplicate is possible, so the filled form is the quickest
+      // way to try again. A dismissal before the hold keeps the form too.
+      final nothingLeft =
+          outcome != null && outcome.submitted == 0 && !outcome.unanswered;
+      if (committed && !nothingLeft) Navigator.of(context).pop();
     } on AppError catch (e) {
       if (mounted) setState(() => _error = e.message);
     } catch (e) {
@@ -735,7 +752,17 @@ class _SendScreenState extends State<SendScreen> {
                           key: ValueKey<int>(_step),
                           child: _step == 0
                               ? _recipientStep()
-                              : _amountStep(mature, stale: stale),
+                              : ValueListenableBuilder<BigInt?>(
+                                  valueListenable: _unsettled,
+                                  builder: (context, unsettled, _) =>
+                                      _amountStep(
+                                        mature,
+                                        stale: stale,
+                                        settling:
+                                            (unsettled ?? BigInt.zero) >
+                                            BigInt.zero,
+                                      ),
+                                ),
                         ),
                       ),
                     ),
@@ -866,8 +893,12 @@ class _SendScreenState extends State<SendScreen> {
 
   // ── Step 2 · how much ───────────────────────────────────────────────────
 
-  Widget _amountStep(BigInt? mature, {required bool stale}) {
-    final block = _amountBlock(mature, stale: stale);
+  Widget _amountStep(
+    BigInt? mature, {
+    required bool stale,
+    bool settling = false,
+  }) {
+    final block = _amountBlock(mature, stale: stale, settling: settling);
     final gutter = KvWindow.of(context).gutter;
     // **Keyed off the KEYBOARD, not off focus**: Back dismisses the IME without
     // dropping focus, so a `hasFocus` predicate left the pad hidden with the

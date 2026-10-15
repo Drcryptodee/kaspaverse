@@ -49,6 +49,25 @@
 //!    processor polls its ctl first, so it reconnects before it reads the
 //!    frame); alternation removes the reliance on that rescue.
 //!
+//! 4. **A fence around every submit** ([`Lane::admit_submit`]). The pinned
+//!    `try_submit` registers its transaction in the processor's outgoing map,
+//!    broadcasts it, then reads the entry back (`notify_outgoing_transaction`,
+//!    pin `wallet/core/src/utxo/context.rs:265` @ `01b532e`), or on an error
+//!    removes the context's copy (`:285`), and `.expect()`s it either way. A
+//!    close reaches `handle_disconnect`, whose `cleanup()` clears that map
+//!    (`processor.rs:594-615`) without the notification lock the submit
+//!    holds, so a close between the broadcast and the read back panicked the
+//!    send after its transaction had left. A submit now holds the fence's read
+//!    side from just before the pinned call until it returns, and a close or a
+//!    stop of the processor takes the write side first: it waits for the submit,
+//!    and a submit that arrives while it is in progress waits for it.
+//!    A submit is also admitted only once the lane is ready: the processor's
+//!    start has been followed through by the lane's fold (its sends handed back,
+//!    its subscription re-armed, its rescan done). The pin sets `is_connected`
+//!    before it registers its listener and announces `UtxoProcStart`
+//!    (`processor.rs:539-541`), so a submit admitted on that alone could
+//!    register before the reopen's work and miss its own acceptance.
+//!
 //! The monitor's ctl still drives everything — publishes, retirements, D-101's
 //! re-announces — and in the same order; it now reaches the processor through
 //! the relay, a hop that costs a task wake-up. One rule binds the three parts:
@@ -83,6 +102,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
+use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use tokio::time::Instant;
 
 use async_trait::async_trait;
@@ -140,11 +160,12 @@ pub const LANE_STEP_WITHIN: Duration = Duration::from_secs(9);
 /// (`consensus-auditor` delta 3):
 ///
 /// 1. A send's submit holds the processor's notification lock for one round
-///    trip (`pending.rs:216`). It is the only holder in this app: our scans go
-///    through the context's `scan_and_register_addresses`, which takes no lock
-///    (`context.rs:744-755`); only the pin's `Account` scan does (`scan.rs:59`).
-///    The lock is async-lock's write-preferring `RwLock`, so a chained send's
-///    legs do not stack.
+///    trip (`pending.rs:216`). It is the only holder that waits on the node:
+///    a read of the unspent set holds it only while it decides what to file,
+///    never across a call (`WalletEngine::file_from_node`); only the pin's
+///    `Account` scan, which this app does not run, holds it across one
+///    (`scan.rs:59`). The lock is async-lock's write-preferring `RwLock`, so a
+///    chained send's legs do not stack.
 /// 2. Then, on a lane whose node answered unsynced at connect, the handler's
 ///    `track(true)` waits out the pin's sync poll in flight
 ///    (`processor.rs:645-647`, `sync.rs:130-137`) — C-1's healthy twin.
@@ -498,6 +519,31 @@ pub(crate) struct Lane {
     /// The lane's fold task ended (the engine's guard sets it).
     pub(crate) fold_ended: AtomicBool,
     relay: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Part 4 above: a submit holds the read side across the pinned
+    /// `try_submit`; a close or a stop of the processor takes the write side.
+    fence: Arc<RwLock<()>>,
+    /// Ends this lane's fold task. Held on the lane, so a rebuild's new fold
+    /// does not end the old one before the old processor has stopped.
+    pub(crate) fold_shutdown: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// Our own sends this lane's processor has taken and not yet seen
+    /// accepted, kept by the lane's fold.
+    pub(crate) in_flight: Mutex<crate::wallet_sync::InFlightSends>,
+    /// Opens the relay signalled that await the processor's start.
+    opens: AtomicU64,
+    /// Opens that ended in the processor's error instead of a start.
+    opens_failed: AtomicU64,
+    /// Starts the lane's fold has followed through ([`Lane::start_folded`]).
+    starts_folded: AtomicU64,
+}
+
+/// Why a submit was refused before anything was broadcast.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NotAdmitted {
+    /// The lane the send was built on has been replaced.
+    Retired,
+    /// The processor did not become ready to take a submit in time:
+    /// disconnected, or its notification lock held, past the bound.
+    NotReady,
 }
 
 impl Lane {
@@ -536,7 +582,116 @@ impl Lane {
             fault_armed: AtomicBool::new(false),
             fold_ended: AtomicBool::new(false),
             relay: Mutex::new(None),
+            fence: Arc::new(RwLock::new(())),
+            fold_shutdown: Mutex::new(None),
+            in_flight: Mutex::new(Default::default()),
+            opens: AtomicU64::new(0),
+            opens_failed: AtomicU64::new(0),
+            starts_folded: AtomicU64::new(0),
         })
+    }
+
+    /// Whether the lane has been replaced or stopped.
+    pub(crate) fn is_retired(&self) -> bool {
+        self.gate.is_retired()
+    }
+
+    /// Whether a submit may register now: the processor is connected and
+    /// the fold has followed through every start the relay asked for (part 4
+    /// above). Every start comes from a counted open: the lane's ctl reads
+    /// disconnected until the relay signals one, so the pinned `start()`
+    /// connects on nothing of its own (`processor.rs:704-705`). A close that
+    /// has begun is ordered by the fence, not here.
+    pub(crate) fn is_ready(&self) -> bool {
+        if !self.processor.is_connected() {
+            return false;
+        }
+        let opens = self.opens.load(Ordering::SeqCst);
+        self.starts_folded.load(Ordering::SeqCst) + self.opens_failed.load(Ordering::SeqCst)
+            >= opens
+    }
+
+    /// The fold has followed a start through: the sends it holds are handed
+    /// back, the subscription re-armed and the rescan done.
+    pub(crate) fn start_folded(&self) {
+        self.starts_folded.fetch_add(1, Ordering::SeqCst);
+        self.changed.notify_waiters();
+    }
+
+    /// **Admission to a submit** (part 4 above): wait, at most `within`, until
+    /// the lane is ready ([`Lane::is_ready`]) and the processor's notification
+    /// lock is free, then hand back the fence's read guard, to be held until
+    /// the pinned `try_submit` returns.
+    ///
+    /// Everything here happens before the broadcast, so a refusal is final
+    /// and safe: nothing has left the wallet. The submit itself is never
+    /// bounded; a submit that timed out may have landed.
+    ///
+    /// The lock is waited for here because the pinned `try_submit` takes it
+    /// first (`tx/generator/pending.rs:216` @ `01b532e`) and waits forever on
+    /// a processor stuck inside its handler, which a rebuild does not end:
+    /// the send was built on this lane's context and stays with it. It is
+    /// read and released at once, so a writer queued behind it is not held
+    /// up; the window that leaves before the pinned call takes it again is
+    /// the residual.
+    pub(crate) async fn admit_submit(
+        &self,
+        within: Duration,
+    ) -> Result<OwnedRwLockReadGuard<()>, NotAdmitted> {
+        let deadline = Instant::now() + within;
+        loop {
+            // Armed before the state is read, so a transition that lands
+            // between the read and the wait still wakes it.
+            let changed = self.changed.notified();
+            let retired = self.retired.notified();
+            tokio::pin!(changed, retired);
+            changed.as_mut().enable();
+            retired.as_mut().enable();
+            if self.is_retired() {
+                return Err(NotAdmitted::Retired);
+            }
+            if self.is_ready() {
+                // A close in progress holds the write side: this waits for it.
+                let guard = tokio::time::timeout_at(deadline, self.fence.clone().read_owned())
+                    .await
+                    .map_err(|_| NotAdmitted::NotReady)?;
+                if self.is_retired() {
+                    return Err(NotAdmitted::Retired);
+                }
+                if self.is_ready() {
+                    tokio::time::timeout_at(deadline, self.processor.notification_lock())
+                        .await
+                        .map_err(|_| NotAdmitted::NotReady)?;
+                    return Ok(guard);
+                }
+                // The close it waited for disconnected the processor: wait
+                // for the lane to be ready again like any other submit.
+                continue;
+            }
+            tokio::select! {
+                _ = &mut changed => {}
+                _ = &mut retired => {}
+                _ = tokio::time::sleep_until(deadline) => return Err(NotAdmitted::NotReady),
+            }
+        }
+    }
+
+    /// The fence's write side, for a stop of the processor: every submit in
+    /// flight returns first, and none starts until the guard is dropped.
+    pub(crate) async fn fence_out_submits(&self) -> OwnedRwLockWriteGuard<()> {
+        self.fence.clone().write_owned().await
+    }
+
+    /// Queue for the fence's write side without blocking the relay: the
+    /// guard arrives on the channel once every submit in flight has returned.
+    /// Queued, it also holds back a submit that arrives after it.
+    fn queue_for_fence(&self) -> tokio::sync::oneshot::Receiver<OwnedRwLockWriteGuard<()>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let fence = self.fence.clone();
+        tokio::spawn(async move {
+            let _ = tx.send(fence.write_owned().await);
+        });
+        rx
     }
 
     /// Arm the dev fault (`lanefault=1`, the dev install only).
@@ -687,16 +842,33 @@ impl Lane {
         }
         let mut step = Step::Idle;
         let mut upstream_closed = false;
+        // A close's claim on the submit fence: queued when the close begins,
+        // held from its delivery until the processor acknowledges it.
+        let mut fence_queued = None;
+        let mut fence_held: Option<OwnedRwLockWriteGuard<()>> = None;
         loop {
             // Advance as far as the processor's acknowledgements allow.
             loop {
                 match step {
                     Step::Idle => match pending.pop_front() {
                         Some(RpcState::Connected) => step = self.open(),
-                        Some(RpcState::Disconnected) => step = self.close_begin(),
+                        Some(RpcState::Disconnected) => {
+                            step = self.close_begin();
+                            if step == Step::Draining {
+                                fence_queued = Some(self.queue_for_fence());
+                            }
+                        }
                         None => break,
                     },
                     Step::Draining => {
+                        if fence_held.is_none() {
+                            if let Some(queued) = fence_queued.as_mut() {
+                                if let Ok(guard) = queued.try_recv() {
+                                    fence_held = Some(guard);
+                                    fence_queued = None;
+                                }
+                            }
+                        }
                         // A processor whose task is gone holds its queued
                         // frames forever and protects nothing: waiting on
                         // them would poll every `DRAIN_POLL` until the next
@@ -704,7 +876,15 @@ impl Lane {
                         if !self.gate.drained() && !self.processor_ended() {
                             break;
                         }
+                        // A submit in flight returns before its processor can
+                        // read disconnected (part 4).
+                        if fence_held.is_none() {
+                            break;
+                        }
                         step = self.close_deliver();
+                        if step != Step::AwaitingStop {
+                            fence_held = None;
+                        }
                     }
                     Step::AwaitingOpen | Step::AwaitingStop => break,
                 }
@@ -724,6 +904,17 @@ impl Lane {
                                 | (Step::AwaitingStop, Events::UtxoProcStop)
                         );
                         if acknowledged {
+                            if matches!(&*event, Events::UtxoProcError { .. }) {
+                                // An open that ended without a start: the fold
+                                // has nothing to follow through for it.
+                                self.opens_failed.fetch_add(1, Ordering::SeqCst);
+                                self.changed.notify_waiters();
+                            }
+                            if step == Step::AwaitingStop {
+                                // The processor reads disconnected now, so no
+                                // submit can register until the next open.
+                                fence_held = None;
+                            }
                             step = Step::Idle;
                         }
                     }
@@ -762,6 +953,7 @@ impl Lane {
             return Step::Idle;
         }
         self.begin(Transition::Open);
+        self.opens.fetch_add(1, Ordering::SeqCst);
         let _ = self.ctl.try_signal_open();
         Step::AwaitingOpen
     }

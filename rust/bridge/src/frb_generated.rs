@@ -4466,12 +4466,14 @@ impl SseDecode for crate::api::send::SendOutcomeDto {
         let mut var_total = <u32>::sse_decode(deserializer);
         let mut var_partial = <bool>::sse_decode(deserializer);
         let mut var_error = <Option<String>>::sse_decode(deserializer);
+        let mut var_unanswered = <bool>::sse_decode(deserializer);
         return crate::api::send::SendOutcomeDto {
             final_txid: var_finalTxid,
             submitted: var_submitted,
             total: var_total,
             partial: var_partial,
             error: var_error,
+            unanswered: var_unanswered,
         };
     }
 }
@@ -4769,6 +4771,7 @@ impl SseDecode for crate::api::wallet::WalletSnapshot {
         let mut var_matureSompi = <Option<u64>>::sse_decode(deserializer);
         let mut var_pendingSompi = <Option<u64>>::sse_decode(deserializer);
         let mut var_outgoingSompi = <Option<u64>>::sse_decode(deserializer);
+        let mut var_unsettledSompi = <Option<u64>>::sse_decode(deserializer);
         let mut var_activity = <Vec<crate::api::wallet::ActivityRecord>>::sse_decode(deserializer);
         let mut var_error = <Option<String>>::sse_decode(deserializer);
         let mut var_lane = <crate::api::wallet::WalletLaneState>::sse_decode(deserializer);
@@ -4780,6 +4783,7 @@ impl SseDecode for crate::api::wallet::WalletSnapshot {
             mature_sompi: var_matureSompi,
             pending_sompi: var_pendingSompi,
             outgoing_sompi: var_outgoingSompi,
+            unsettled_sompi: var_unsettledSompi,
             activity: var_activity,
             error: var_error,
             lane: var_lane,
@@ -5820,6 +5824,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::send::SendOutcomeDto {
             self.total.into_into_dart().into_dart(),
             self.partial.into_into_dart().into_dart(),
             self.error.into_into_dart().into_dart(),
+            self.unanswered.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -6188,6 +6193,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::wallet::WalletSnapshot {
             self.mature_sompi.into_into_dart().into_dart(),
             self.pending_sompi.into_into_dart().into_dart(),
             self.outgoing_sompi.into_into_dart().into_dart(),
+            self.unsettled_sompi.into_into_dart().into_dart(),
             self.activity.into_into_dart().into_dart(),
             self.error.into_into_dart().into_dart(),
             self.lane.into_into_dart().into_dart(),
@@ -6876,6 +6882,7 @@ impl SseEncode for crate::api::send::SendOutcomeDto {
         <u32>::sse_encode(self.total, serializer);
         <bool>::sse_encode(self.partial, serializer);
         <Option<String>>::sse_encode(self.error, serializer);
+        <bool>::sse_encode(self.unanswered, serializer);
     }
 }
 
@@ -7107,6 +7114,7 @@ impl SseEncode for crate::api::wallet::WalletSnapshot {
         <Option<u64>>::sse_encode(self.mature_sompi, serializer);
         <Option<u64>>::sse_encode(self.pending_sompi, serializer);
         <Option<u64>>::sse_encode(self.outgoing_sompi, serializer);
+        <Option<u64>>::sse_encode(self.unsettled_sompi, serializer);
         <Vec<crate::api::wallet::ActivityRecord>>::sse_encode(self.activity, serializer);
         <Option<String>>::sse_encode(self.error, serializer);
         <crate::api::wallet::WalletLaneState>::sse_encode(self.lane, serializer);

@@ -22,10 +22,12 @@ impl AppError {
         }
     }
 
-    /// Map a chain-layer error.
+    /// Map a chain-layer error. A node's own words that ride it are filtered
+    /// at this one door (`ChainError::to_screen_text`), as every other route
+    /// filters node text.
     pub(crate) fn chain(e: kaspaverse_chain::ChainError) -> Self {
         Self {
-            message: e.to_string(),
+            message: e.to_screen_text(),
         }
     }
 

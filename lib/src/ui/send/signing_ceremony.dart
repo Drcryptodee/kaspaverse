@@ -77,7 +77,7 @@ class SigningCeremony extends StatefulWidget {
     this.maturity,
     this.fiat,
     this.contacts,
-    this.onLeftInFlight,
+    this.onCommitted,
     this.explorerUrl,
     this.openUrl,
     this.onSendAnother,
@@ -145,17 +145,10 @@ class SigningCeremony extends StatefulWidget {
   /// that is not optional (BG-15).
   final ContactsScope? contacts;
 
-  /// Fired when the user leaves **after the hold completed and before the
-  /// outcome landed** — the overrun exit.
-  ///
-  /// It exists because that exit pops `null`, and `null` is the same value a
-  /// dismissal-without-signing returns, which every caller reads as *nothing
-  /// was sent*. On the send screen that restores a form still holding the
-  /// amount and the address: the most re-send-ready state the app can present,
-  /// one tap from a duplicate, immediately after telling the user to go and
-  /// check whether it landed (`wallet-security-auditor`, UX-4). A caller that
-  /// can take them somewhere better says so here.
-  final VoidCallback? onLeftInFlight;
+  /// Fired once, when the hold completes and the commit starts. From then on
+  /// the outcome is the network's to give, whatever the receipt says, so a
+  /// caller must not hand back a form armed with the same send.
+  final VoidCallback? onCommitted;
 
   /// The explorer exit's two seams (UX-5). [explorerUrl] resolves a txid to the
   /// exact URL the user's chosen explorer would open — **built and validated in
@@ -196,7 +189,7 @@ Future<SendOutcomeDto?> showSigningCeremony(
   String? contextNote,
   Future<TxStatusDto?> Function(String txid)? acceptanceStatus,
   KvMaturity? maturity,
-  VoidCallback? onLeftInFlight,
+  VoidCallback? onCommitted,
   Future<String> Function(String txid)? explorerUrl,
   Future<bool> Function(String url)? openUrl,
   VoidCallback? onSendAnother,
@@ -218,7 +211,7 @@ Future<SendOutcomeDto?> showSigningCeremony(
         contextNote: contextNote,
         acceptanceStatus: acceptanceStatus,
         maturity: maturity,
-        onLeftInFlight: onLeftInFlight,
+        onCommitted: onCommitted,
         explorerUrl: explorerUrl,
         openUrl: openUrl,
         onSendAnother: onSendAnother,
@@ -290,7 +283,6 @@ class _SigningCeremonyState extends State<SigningCeremony>
   /// Which named stage the wait is showing. See [_StagedWait].
   int _stage = 0;
   Timer? _stageOne;
-  Timer? _stageTwo;
 
   /// **The beat between the ring completing and the wait appearing** (founder,
   /// on glass 2026-09-04: *"when the mark shows, it goes to the sent screen
@@ -301,9 +293,9 @@ class _SigningCeremonyState extends State<SigningCeremony>
   /// `_commit()` is already awaiting Rust while this runs; what the timer
   /// delays is only the foot swapping the hold pill for the staged wait, so
   /// the check the badge just drew is on screen long enough to be seen.
-  /// Every safety property that keys off `_sending` — the closed exit, the
-  /// in-flight signal, the sealed back gesture — flips at the instant the
-  /// commit starts, exactly as before.
+  /// Every safety property that keys off `_sending` (the closed exit, the
+  /// sealed back gesture) flips at the instant the commit starts, exactly as
+  /// before.
   ///
   /// **And the beat does not lead to the receipt.** The founder's phrasing
   /// describes what a fast send looks like from the outside; between the hold
@@ -512,7 +504,6 @@ class _SigningCeremonyState extends State<SigningCeremony>
     // Left without signing → release the stashed (unsigned) plan in Rust.
     if (!_committed) widget.abandon();
     _stageOne?.cancel();
-    _stageTwo?.cancel();
     _exitTimer?.cancel();
     _signedBeat?.cancel();
     _acceptCeiling?.cancel();
@@ -549,26 +540,29 @@ class _SigningCeremonyState extends State<SigningCeremony>
       _error = null;
       _stage = 0;
     });
+    widget.onCommitted?.call();
     _signedBeat = Timer(_signedBeatFor, () {
       if (mounted) setState(() => _showWait = true);
     });
-    // The named wait (D-189). It runs against the clock because the wallet has
-    // no finer signal to run against — see [_StagedWait], which is where that
-    // limit is written down rather than papered over.
+    // The named wait. Signing gives way to broadcasting on the clock, because
+    // the wallet has no finer signal for that hand-over; the last stage waits
+    // for the broadcast's own answer (below), never the clock, because a send
+    // can wait for its lane to be ready before anything is broadcast.
     _stageOne = Timer(_StagedWait.toBroadcasting, () {
       if (mounted) setState(() => _stage = 1);
-    });
-    _stageTwo = Timer(_StagedWait.toAwaiting, () {
-      if (mounted) setState(() => _stage = 2);
     });
     _exitTimer = Timer(_reopenExitAfter, () {
       if (mounted) setState(() => _mayLeave = true);
     });
     try {
       final outcome = await widget.commit(widget.summary.nonce);
-      // Broadcast accepted — the §6 money moment (fires only for real
-      // acceptance, full or partial; a zero-submitted failure stays silent).
-      if (outcome.submitted > 0) KvHaptic.moneyMoment();
+      // The §6 money moment, for a send fully broadcast only: a partial one,
+      // or one whose last leg got no answer, ends on a warning, not a moment.
+      if (outcome.total > 0 &&
+          outcome.submitted == outcome.total &&
+          outcome.error == null) {
+        KvHaptic.moneyMoment();
+      }
       if (mounted) {
         setState(() => _outcome = outcome);
         _watchDepth();
@@ -579,7 +573,6 @@ class _SigningCeremonyState extends State<SigningCeremony>
       if (mounted) setState(() => _error = displayError(e));
     } finally {
       _stageOne?.cancel();
-      _stageTwo?.cancel();
       // **The exit timer is NOT cancelled here any more.** It is what gives
       // the way out back at 6 s, and the wait it guards now continues past
       // the commit.
@@ -592,11 +585,15 @@ class _SigningCeremonyState extends State<SigningCeremony>
             widget.acceptanceStatus == null) {
           _settle();
         } else {
-          // Otherwise the staged wait stays up, on its last named stage —
-          // *Waiting for a node to accept it* — which is now literally true
-          // rather than a label the screen wore for a beat. A ceiling keeps
-          // it from being a trap: past it the receipt shows whatever is
-          // known, and the exit has been open since 6 s regardless.
+          // Otherwise the staged wait stays up, on its last named stage,
+          // *Waiting for the network to accept it*, which the broadcast's answer
+          // has just made true. The answer moves it there, not the clock: a
+          // node answers in about 160 ms, well inside the first stage's
+          // timer, which the cancel above would otherwise leave showing. A
+          // ceiling keeps it from being a trap: past it the receipt shows
+          // whatever is known, and the exit has been open since 6 s
+          // regardless.
+          setState(() => _stage = _StagedWait.steps.length - 1);
           _acceptCeiling = Timer(_acceptCeilingAfter, () {
             if (mounted) _settle();
           });
@@ -650,10 +647,10 @@ class _SigningCeremonyState extends State<SigningCeremony>
       // dismissal-without-signing returns, so `_reviewWith` did not leave the
       // send screen, and the user landed back on step 2 holding the
       // destination and the amount of the send that had just gone out: one
-      // tap and one hold from a duplicate. The same UX-4 hazard `onLeftInFlight`
-      // exists for, arriving through the exit that bypassed it — and newly
-      // self-contradictory here, because *Send another* deliberately clears
-      // that form while back left it armed.
+      // tap and one hold from a duplicate. The same UX-4 hazard the commit's
+      // `onCommitted` signal answers, arriving through the exit that bypassed
+      // it, and self-contradictory here, because *Send another* deliberately
+      // clears that form while back left it armed.
       //
       // So the route never pops itself. Back runs `_close()`, which is the
       // same call the sheet's Cancel and the receipt's Done make, and the
@@ -713,11 +710,9 @@ class _SigningCeremonyState extends State<SigningCeremony>
 
   /// **The one exit.** Cancel, Done, Send another and the system back gesture
   /// all arrive here, so the outcome reaches the caller whichever door was
-  /// used and the in-flight signal fires exactly once from any of them — the
-  /// "provably complete rather than probably" property the rail's chevron used
-  /// to get from `canPop` and the system gesture never did.
+  /// used: the "provably complete rather than probably" property the rail's
+  /// chevron used to get from `canPop` and the system gesture never did.
   void _close() {
-    if (_sending) widget.onLeftInFlight?.call();
     Navigator.of(context).pop(_outcome);
   }
 
@@ -794,8 +789,11 @@ class _SigningCeremonyState extends State<SigningCeremony>
   /// receipt is a place, not a modal.
   Widget _receipt(BuildContext context) {
     final o = _outcome;
-    final v = _verdictFor(o, _error);
-    final txid = o?.finalTxid;
+    final v = _verdictFor(o, _error, widget.summary.kind);
+    // Only a fully broadcast send has an id to name: a partial chain's last
+    // id is a leg that paid the wallet itself, and on its explorer page it
+    // would read as the send having landed.
+    final txid = _isFullyBroadcast ? o?.finalTxid : null;
     final s = widget.summary;
     final selfSend = s.kind == SignableKind.selfSendFrame;
     final consolidate = s.kind == SignableKind.consolidate;
@@ -910,7 +908,7 @@ class _SigningCeremonyState extends State<SigningCeremony>
                 child: Column(
                   children: [
                     KvAction(label: 'Done', primary: true, onTap: _close),
-                    if (widget.onSendAnother != null && v.landed) ...[
+                    if (widget.onSendAnother != null && _isFullyBroadcast) ...[
                       const SizedBox(height: KvSpace.s),
                       GestureDetector(
                         behavior: HitTestBehavior.opaque,
@@ -1369,32 +1367,33 @@ class _ToHead extends StatelessWidget {
   }
 }
 
-/// The named post-signature wait (D-189): signing → broadcasting → waiting for
+/// The named post-signature wait: signing, broadcasting, waiting for
 /// acceptance. A single spinner for two and a half seconds tells the user
 /// nothing about which half of the operation could still fail.
 ///
-/// **No step is ever marked complete, and that is the design — not an omission.**
-/// `send_commit` is ONE await across the FFI: it signs, broadcasts and collects
-/// the node's answer inside a single call, and the only two events Dart can
-/// actually observe are *the call started* and *the call returned*. The stage
-/// the clock is showing is therefore **where the wallet has got to in the
-/// expected order**, which is true, and never **what has finished**, which
-/// would not be. The case that settles it is the refusal: paint a green tick
-/// beside *Broadcast to the network* and the outcome plate two beats later
-/// says *"Your funds are safe — nothing left your wallet"*, and the screen
-/// contradicts itself on the one surface that must never be wrong.
+/// **No step is ever marked complete, and that is the design, not an
+/// omission.** `send_commit` is ONE await across the FFI: it signs, waits for
+/// its lane to be ready, broadcasts and collects the node's answer inside a
+/// single call, and the only two events Dart observes are *the call started*
+/// and *the call returned*. Signing gives way to broadcasting on the clock, so
+/// that stage is where the send is EXPECTED to be, which is true, and never
+/// what has finished, which would not be: paint a tick beside *Broadcasting*
+/// and a refusal two beats later contradicts the screen on the one surface
+/// that must never be wrong.
+///
+/// The last stage is lit by the broadcast's answer, never by the clock: a node
+/// answers in about 160 ms, and a send can wait seconds for its lane before
+/// anything is broadcast, so a clock that lit *waiting for the network* would
+/// light it before the network had been asked. It holds until the outcome
+/// lands, however long the node takes.
 ///
 /// The copy is present-continuous for the same reason. Each label states what
-/// the wallet is doing, and the cadence marks which one is now.
+/// the wallet is doing, and the emphasis marks which one is now.
 ///
-/// The last stage is open-ended: it holds until the real outcome lands,
-/// however long the node takes. D-189's third figure (800 ms) was the nominal
-/// length of that stage, and the real signal supersedes it — a wait that ran
-/// out of stages would be back to telling the user nothing.
-///
-/// Splitting these into observed facts means a progress signal crossing the
-/// FFI from `commit_and_advance`'s per-txid submit hook, which is a bridge
-/// surface change (T3) and is recorded in the phase register, not faked here.
+/// Splitting the first two into observed facts means a progress signal
+/// crossing the FFI from `commit_and_advance`'s per-txid submit hook, which is
+/// a bridge surface change (T3) and is recorded in the phase register, not
+/// faked here.
 class _StagedWait extends StatelessWidget {
   const _StagedWait({required this.stage, this.mayLeave = false});
 
@@ -1404,39 +1403,28 @@ class _StagedWait extends StatelessWidget {
   /// The wait has outlived its expected shape and the exit is open again.
   final bool mayLeave;
 
-  /// The measured submit→accepted range is 1.3–3.8 s; these are D-189's beats
-  /// inside it, as offsets from the completed hold.
+  /// Signing gives way to broadcasting this long after the completed hold,
+  /// inside the measured submit-to-accepted range of 1.3 to 3.8 s.
   static const Duration toBroadcasting = Duration(milliseconds: 700);
-  static const Duration toAwaiting = Duration(milliseconds: 1600);
 
   static const List<String> steps = [
     'Signing on this device',
     'Broadcasting to the network',
-    'Waiting for a node to accept it',
+    'Waiting for the network to accept it',
   ];
 
-  /// **The disclosure that makes the emphasis honest.** The highlighted row is
-  /// where the send is EXPECTED to be by the clock, not somewhere the wallet
-  /// has watched it arrive — one await covers all three — and a failure at the
-  /// first step still lets the second light up. Saying so once turns the list
-  /// from three claims into an ordered plan with a position marker on it
-  /// (`consensus-auditor`, UX-4).
-  static const String framing =
-      'These run in order, and the wallet hears back only at the end.';
+  /// **The disclosure that makes the emphasis honest:** the steps are an
+  /// ordered plan with a position marker on it, not three claims.
+  static const String framing = 'These run in order.';
 
   /// Shown once the wait has outlived its expected shape, with the exit open
   /// again. It says the two things a held user needs and cannot infer: that
-  /// they may leave, and that leaving costs them nothing.
-  ///
-  /// It claims nothing about where the transaction has GOT to — *"already out
-  /// of the wallet"* is overwhelmingly likely at six seconds and not
-  /// observable from here, which is the reasoning that deleted the funds-safe
-  /// sentence one plate over. What it says instead is provable: leaving
-  /// cancels nothing, because nothing here can cancel a commit that is already
-  /// running in Rust.
+  /// it is slow, and that leaving costs them nothing, which is provable:
+  /// nothing here can cancel a commit already running in Rust. It claims
+  /// nothing about where the transaction has got to, or where its result will
+  /// show (a send refused before it left shows nowhere).
   static const String overrun =
-      'Taking longer than usual. You can leave — leaving cancels nothing, and '
-      'the result lands in your activity either way.';
+      'Taking longer than usual. Leaving now cancels nothing.';
 
   @override
   Widget build(BuildContext context) {
@@ -1508,10 +1496,13 @@ class _StagedWait extends StatelessWidget {
 ///
 /// So the copy names the OUTCOME, `o.error` names the cause, and the third
 /// beat is the action that actually protects them: look in activity before
-/// sending again. **Making the sentence sayable again is a Rust change** — a
-/// discriminator on `SendOutcomeDto` separating *refused before any submit was
-/// attempted* from *submit attempted, answer unknown* — recorded in the phase
-/// register, not inferred here.
+/// sending again.
+///
+/// Rust now separates the two cases (`SendOutcomeDto.unanswered`): a leg
+/// whose request may have left (a timeout, a dropped socket, or a node's
+/// error, since a node refuses a transaction it already holds), and one
+/// refused before the request. Only for the second does the receipt state
+/// the one funds fact it can prove, that nothing left the wallet.
 ///
 /// A thrown call gets the same treatment for the same reason: an exception
 /// says the call did not return a result, not how far it got, and this is not
@@ -1521,55 +1512,43 @@ class _StagedWait extends StatelessWidget {
 typedef _Verdict = ({KvLampTone tone, String head, String body, bool landed});
 
 /// The verdict, derived from Rust's outcome alone.
-_Verdict _verdictFor(SendOutcomeDto? outcome, String? error) {
-  final o = outcome;
-  final partial = o != null && o.partial;
-  final refused = o != null && o.submitted == 0;
-  final threw = o == null;
+/// What the receipt says when the wallet cannot tell whether a send left:
+/// it may still land, and the balance shows it once it does. The activity
+/// does not yet show such a payment as one (the pin files it, if it lands,
+/// as change coming in).
+const _mayStillLand =
+    'It may still go through. Check your balance in a minute before sending '
+    'again.';
 
-  final (KvLampTone tone, String head, String body) = switch ((
-    threw,
-    refused,
-    partial,
-  )) {
-    // Same headline as the arm below, for the same reason: *"the send did
-    // not complete"* is *"it did not go through"* in another tense, and the
-    // third beat two lines later says *"if it did land"* — the copy would
-    // contradict itself. On the Rust side a throw does prove nothing left
-    // (`send_commit` returns `Err` only from `take_stashed`, before any
-    // signing), but that is one caller's guarantee and not this widget's,
-    // and the two arms stay distinguishable in the BODY where the claim is
-    // hedged (`wallet-security-auditor`, UX-4).
-    (true, _, _) => (
-      KvLampTone.warn,
-      'Not confirmed',
-      'The wallet could not finish the send. Check your activity before '
-          'sending again — if it did land, it will appear there.',
-    ),
-    // **`submitted == 0` is the ABSENCE of an answer, not a failure**, and
-    // the headline may not upgrade it into one. `chain::send` returns it for
-    // a local `try_sign` failure — before any node is contacted — and
-    // equally for a `try_submit` error, which covers a request timeout and a
-    // socket dropped after the bytes went out; a node can have accepted and
-    // relayed the transaction while the acknowledgement never came back.
-    // *"It did not go through"* invites the re-send that becomes a double
-    // spend just as surely as the funds-safe sentence this sitting deleted
-    // (`ux-auditor` / `wallet-security-auditor`, UX-4). The headline names
-    // what is known — nothing came back — `o.error` names the cause, and the
-    // third beat is the check that actually protects them.
-    (_, true, _) => (
-      KvLampTone.warn,
-      'Not confirmed',
-      'The wallet never got an answer about this send. Check your activity '
-          'before sending again — if it did land, it will appear there.',
-    ),
-    (_, _, true) => (
-      KvLampTone.risk,
-      'Partly sent',
-      'Broadcast ${o!.submitted} of ${o.total} transactions; the rest did '
-          'not send. Your activity will reflect what landed.',
-    ),
-    _ => (
+/// A chain's legs before its last pay the wallet's own address; only the last
+/// pays anyone else (the pin's generator, `generator.rs:1153-1157`). Sends of
+/// these kinds pay no one else at all.
+bool _paysOut(SignableKind kind) =>
+    kind != SignableKind.selfSendFrame && kind != SignableKind.consolidate;
+
+_Verdict _verdictFor(
+  SendOutcomeDto? outcome,
+  String? error,
+  SignableKind kind,
+) {
+  final o = outcome;
+  // Same headline as a send with no answer, for the same reason: *"the send did
+  // not complete"* is *"it did not go through"* in another tense, and the third
+  // beat says it may still go through; the copy would contradict itself. On
+  // the Rust side a throw does prove nothing left (`send_commit` returns `Err`
+  // only from `take_stashed`, before any signing), but that is one caller's
+  // guarantee and not this widget's, and the two arms stay distinguishable in
+  // the BODY where the claim is hedged.
+  if (o == null) {
+    return (
+      tone: KvLampTone.warn,
+      head: 'Not confirmed',
+      body: 'The wallet could not finish the send. $_mayStillLand',
+      landed: false,
+    );
+  }
+  final (KvLampTone tone, String head, String body) = switch (o) {
+    _ when o.total > 0 && o.submitted == o.total && o.error == null => (
       KvLampTone.ok,
       'Sent',
       // **No waiting language.** It read *"settles over the next few
@@ -1577,14 +1556,56 @@ _Verdict _verdictFor(SendOutcomeDto? outcome, String? error) {
       // the network accepts in about a second and the hundred-confirmation
       // safety mark lands in roughly ten. Telling a user to expect minutes on
       // a chain built for seconds is a false impression assembled out of true
-      // words (founder, 2026-08-30).
+      // words.
       'The network accepted it.',
+    ),
+    // Nothing of it left the wallet, which Rust proves rather than this widget
+    // inferring it: the refusal came before the first leg's request.
+    _ when o.submitted == 0 && !o.unanswered => (
+      KvLampTone.warn,
+      'Not sent',
+      'Nothing left your wallet.',
+    ),
+    // **No answer is the ABSENCE of an answer, not a failure**, and the
+    // headline may not upgrade it into one: a request timeout or a socket
+    // dropped after the bytes went out, and a node can have accepted and
+    // relayed the transaction while the acknowledgement never came back.
+    // The last leg is the send itself; with no answer it may have landed.
+    _ when o.unanswered && o.submitted + 1 == o.total => (
+      KvLampTone.warn,
+      'Not confirmed',
+      'The wallet never got an answer about this send. $_mayStillLand',
+    ),
+    // A send that pays someone else and stopped before its last leg: the
+    // payment never left, whatever the earlier legs (the wallet's own) did.
+    _ when _paysOut(kind) => (
+      KvLampTone.warn,
+      'Not sent',
+      'Nothing reached the recipient. Send it again in a minute.',
+    ),
+    // A merge or a message frame whose first leg got no answer: it may land.
+    _ when o.unanswered && o.submitted == 0 => (
+      KvLampTone.warn,
+      'Not confirmed',
+      'The wallet never got an answer about this send. $_mayStillLand',
+    ),
+    _ when o.unanswered => (
+      KvLampTone.warn,
+      'Partly sent',
+      'Broadcast ${o.submitted} of ${o.total} transactions. The next one got '
+          'no answer, and the rest were not sent.',
+    ),
+    _ => (
+      KvLampTone.warn,
+      'Partly sent',
+      'Broadcast ${o.submitted} of ${o.total} transactions; the rest did not '
+          'send. Your activity will reflect what landed.',
     ),
   };
   // `landed` is the one bit the rest of the screen may act on: something was
-  // submitted. It is NOT "it succeeded" — a partial landed too — and it is
+  // submitted. It is NOT "it succeeded" (a partial landed too), and it is
   // never inferred from the absence of an error.
-  return (tone: tone, head: head, body: body, landed: (o?.submitted ?? 0) > 0);
+  return (tone: tone, head: head, body: body, landed: o.submitted > 0);
 }
 
 /// The `chip` inner card the restatement lives in (`S7`, §5).

@@ -64,6 +64,11 @@ pub enum RecordedCall {
     GetSink { epoch: u64 },
 }
 
+/// Blocks in a full walk page: the tracker's tip threshold
+/// (`VCC_TIP_PAGE_THRESHOLD`, 100), so a walk never reads such a page as the
+/// tip.
+pub const FULL_VCC_PAGE: usize = 100;
+
 pub struct FakeRpc {
     network_id: NetworkId,
     epoch: AtomicU64,
@@ -115,6 +120,54 @@ pub struct FakeRpc {
     node_seen: Mutex<Vec<SubscriptionMessage>>,
     /// This fake's listener id → the notifier's.
     notifier_ids: Mutex<HashMap<ListenerId, ListenerId>>,
+    /// Catch-up pages by the block they start from: a walk asked from a
+    /// keyed block gets that page, any other start the canned one-block page.
+    /// A page keyed to the block it starts from is how a test tells which
+    /// cursor a walk really began at.
+    vcc_pages: Mutex<HashMap<RpcHash, GetVirtualChainFromBlockResponse>>,
+    get_block_calls: AtomicU64,
+    /// The node's UTXO index: what `get_utxos_by_addresses` answers, filtered
+    /// to the addresses asked for.
+    utxos: Mutex<Vec<RpcUtxosByAddressesEntry>>,
+    /// While set, `submit_transaction` waits for a permit after it has the
+    /// transaction: the node has it and its answer is not back yet.
+    hold_submit: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    /// When set, a UTXO-set read is recorded and then waits for a permit.
+    hold_scan: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    /// When set, a timestamp estimate (asked once for each transaction whose
+    /// coins a scan files new) is counted and then waits for a permit.
+    hold_timestamp: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    timestamp_calls: AtomicU64,
+    /// When set, a chain-walk page is recorded and refused.
+    refuse_vcc_pages: AtomicBool,
+    /// When set, a chain-walk page from a start no test keyed is refused.
+    refuse_unkeyed_vcc_pages: AtomicBool,
+    /// When set, a walk page from an unkeyed start is a full one.
+    fill_vcc_pages: AtomicBool,
+    /// The next `n` `get_server_info` calls fail, as a node's error.
+    fail_server_info: AtomicU64,
+    /// How a submit is answered once released.
+    submit_answer: Mutex<SubmitAnswer>,
+    /// Answers for the next submits, one each, ahead of `submit_answer`.
+    answer_queue: Mutex<std::collections::VecDeque<SubmitAnswer>>,
+    /// Every transaction a submit carried, in arrival order.
+    submitted: Mutex<Vec<RpcTransaction>>,
+}
+
+/// The node's answer to a submit.
+#[derive(Clone, Debug)]
+pub enum SubmitAnswer {
+    /// Taken into the mempool: the transaction's id.
+    Accept,
+    /// The call fails after its request left, with this text, wrapped as the
+    /// pinned wRPC client wraps every wire error, a transport failure and a
+    /// node's error alike (`RpcError::RpcSubsystem`,
+    /// `rpc/macros/src/wrpc/client.rs:73-74` @ `01b532e`).
+    Fail(String),
+    /// No socket bound: the app's stable handle refuses before any request,
+    /// with its own text (`link_rpc.rs`, `NO_BOUND_SOCKET`). Nothing reaches
+    /// the node, so nothing is recorded as submitted.
+    Unbound,
 }
 
 impl FakeRpc {
@@ -159,7 +212,125 @@ impl FakeRpc {
             node_rx,
             node_seen: Mutex::new(Vec::new()),
             notifier_ids: Mutex::new(HashMap::new()),
+            vcc_pages: Mutex::new(HashMap::new()),
+            get_block_calls: AtomicU64::new(0),
+            utxos: Mutex::new(Vec::new()),
+            hold_submit: Mutex::new(None),
+            hold_scan: Mutex::new(None),
+            hold_timestamp: Mutex::new(None),
+            timestamp_calls: AtomicU64::new(0),
+            refuse_vcc_pages: AtomicBool::new(false),
+            refuse_unkeyed_vcc_pages: AtomicBool::new(false),
+            fill_vcc_pages: AtomicBool::new(false),
+            fail_server_info: AtomicU64::new(0),
+            submit_answer: Mutex::new(SubmitAnswer::Accept),
+            answer_queue: Mutex::new(std::collections::VecDeque::new()),
+            submitted: Mutex::new(Vec::new()),
         })
+    }
+
+    /// The coins the node's UTXO index holds.
+    pub fn set_utxos(&self, entries: Vec<RpcUtxosByAddressesEntry>) {
+        *self.utxos.lock().unwrap_or_else(PoisonError::into_inner) = entries;
+    }
+
+    /// Hold every submit after the node has its transaction; each permit
+    /// releases one answer.
+    pub fn hold_submits(&self) -> Arc<tokio::sync::Semaphore> {
+        let hold = Arc::new(tokio::sync::Semaphore::new(0));
+        *self
+            .hold_submit
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(hold.clone());
+        hold
+    }
+
+    /// Answer every walk page from an unkeyed start with as many blocks as
+    /// a page can hold, so a walk never reaches the tip (`true`).
+    pub fn fill_vcc_pages(&self, fill: bool) {
+        self.fill_vcc_pages.store(fill, Ordering::SeqCst);
+    }
+
+    /// Fail the next `n` `get_server_info` calls: the processor's open ends in
+    /// its error instead of a start.
+    pub fn fail_server_info(&self, n: u64) {
+        self.fail_server_info.store(n, Ordering::SeqCst);
+    }
+
+    /// Refuse every walk page from a start no test keyed (`true`), or answer
+    /// them again.
+    pub fn refuse_unkeyed_vcc_pages(&self, refuse: bool) {
+        self.refuse_unkeyed_vcc_pages
+            .store(refuse, Ordering::SeqCst);
+    }
+
+    /// Refuse every chain-walk page from now on (`true`), or answer again.
+    pub fn refuse_vcc_pages(&self, refuse: bool) {
+        self.refuse_vcc_pages.store(refuse, Ordering::SeqCst);
+    }
+
+    /// Hold every UTXO-set read from now on until the returned semaphore
+    /// grants it a permit (each read is recorded first).
+    pub fn hold_scans(&self) -> Arc<tokio::sync::Semaphore> {
+        let hold = Arc::new(tokio::sync::Semaphore::new(0));
+        *self
+            .hold_scan
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(hold.clone());
+        hold
+    }
+
+    /// Hold every timestamp estimate from now on until the returned semaphore
+    /// grants it a permit (each is counted first).
+    pub fn hold_timestamps(&self) -> Arc<tokio::sync::Semaphore> {
+        let hold = Arc::new(tokio::sync::Semaphore::new(0));
+        *self
+            .hold_timestamp
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(hold.clone());
+        hold
+    }
+
+    /// The timestamp estimates asked for so far.
+    pub fn timestamp_calls(&self) -> u64 {
+        self.timestamp_calls.load(Ordering::SeqCst)
+    }
+
+    /// Answer the next submits in turn with these, then as `answer_submits`.
+    pub fn queue_submit_answers(&self, answers: Vec<SubmitAnswer>) {
+        self.answer_queue
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend(answers);
+    }
+
+    /// How the next submits are answered.
+    pub fn answer_submits(&self, answer: SubmitAnswer) {
+        *self
+            .submit_answer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = answer;
+    }
+
+    /// The transactions submits carried so far.
+    pub fn submitted(&self) -> Vec<RpcTransaction> {
+        self.submitted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Answer a catch-up walk that starts at `from` with `page`.
+    pub fn set_vcc_page(&self, from: RpcHash, page: GetVirtualChainFromBlockResponse) {
+        self.vcc_pages
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(from, page);
+    }
+
+    /// How many `get_block` calls arrived (every one is refused).
+    pub fn get_block_calls(&self) -> u64 {
+        self.get_block_calls.load(Ordering::SeqCst)
     }
 
     /// Refuse the next `n` `start_notify(UtxosChanged)` calls (see the field).
@@ -399,7 +570,7 @@ impl FakeRpc {
         }
     }
 
-    fn sink_hash() -> RpcHash {
+    pub fn sink_hash() -> RpcHash {
         "1111111111111111111111111111111111111111111111111111111111111111"
             .parse()
             .expect("static sink hash")
@@ -446,6 +617,11 @@ impl RpcApi for FakeRpc {
         self.server_info_calls.fetch_add(1, Ordering::SeqCst);
         self.activity.notify_waiters();
         Self::pass(&self.hold_server_info).await;
+        if Self::take_one(&self.fail_server_info) {
+            return Err(RpcError::RpcSubsystem(
+                "RPC response error: the node is not ready".to_string(),
+            ));
+        }
         let is_synced = !Self::take_one(&self.report_unsynced);
         Ok(GetServerInfoResponse {
             rpc_api_version: 1,
@@ -463,12 +639,22 @@ impl RpcApi for FakeRpc {
         _connection: Option<&DynRpcConnection>,
         request: GetUtxosByAddressesRequest,
     ) -> RpcResult<GetUtxosByAddressesResponse> {
+        let asked = request.addresses.clone();
         self.record(RecordedCall::UtxoScan {
             epoch: self.current_epoch(),
             addresses: request.addresses,
         });
-        // Empty wallet: the scan still completes and folds a live zero.
-        Ok(GetUtxosByAddressesResponse { entries: vec![] })
+        Self::pass(&self.hold_scan).await;
+        // No coins set: the scan still completes and folds a live zero.
+        let entries = self
+            .utxos
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .filter(|entry| entry.address.as_ref().is_some_and(|a| asked.contains(a)))
+            .cloned()
+            .collect();
+        Ok(GetUtxosByAddressesResponse { entries })
     }
 
     /// One short page (1 added block < VCC_TIP_PAGE_THRESHOLD), so the
@@ -476,14 +662,40 @@ impl RpcApi for FakeRpc {
     async fn get_virtual_chain_from_block_call(
         &self,
         _connection: Option<&DynRpcConnection>,
-        _request: GetVirtualChainFromBlockRequest,
+        request: GetVirtualChainFromBlockRequest,
     ) -> RpcResult<GetVirtualChainFromBlockResponse> {
         self.record(RecordedCall::VirtualChainFrom {
             epoch: self.current_epoch(),
         });
+        if self.refuse_vcc_pages.load(Ordering::SeqCst) {
+            // As the pinned client wraps a node's error (`RpcSubsystem`,
+            // `rpc/macros/src/wrpc/client.rs:73-74` @ `01b532e`).
+            return Err(RpcError::RpcSubsystem(
+                "RPC response error: the chain path is unavailable".to_string(),
+            ));
+        }
+        let keyed = self
+            .vcc_pages
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&request.start_hash)
+            .cloned();
+        if let Some(page) = keyed {
+            return Ok(page);
+        }
+        if self.refuse_unkeyed_vcc_pages.load(Ordering::SeqCst) {
+            return Err(RpcError::RpcSubsystem(
+                "RPC response error: the chain path is unavailable".to_string(),
+            ));
+        }
+        let blocks = if self.fill_vcc_pages.load(Ordering::SeqCst) {
+            FULL_VCC_PAGE
+        } else {
+            1
+        };
         Ok(GetVirtualChainFromBlockResponse {
             removed_chain_block_hashes: vec![],
-            added_chain_block_hashes: vec![Self::next_hash()],
+            added_chain_block_hashes: (0..blocks).map(|_| Self::next_hash()).collect(),
             accepted_transaction_ids: vec![],
         })
     }
@@ -631,9 +843,39 @@ impl RpcApi for FakeRpc {
     async fn submit_transaction_call(
         &self,
         _connection: Option<&DynRpcConnection>,
-        _request: SubmitTransactionRequest,
+        request: SubmitTransactionRequest,
     ) -> RpcResult<SubmitTransactionResponse> {
-        Err(RpcError::NotImplemented)
+        let queued = self
+            .answer_queue
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pop_front();
+        let answer = queued.unwrap_or_else(|| {
+            self.submit_answer
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        });
+        if matches!(answer, SubmitAnswer::Unbound) {
+            return Err(RpcError::General("link: no bound socket".to_string()));
+        }
+        self.submitted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(request.transaction.clone());
+        self.activity.notify_waiters();
+        Self::pass(&self.hold_submit).await;
+        match answer {
+            SubmitAnswer::Accept => {
+                let transaction =
+                    kaspa_consensus_core::tx::Transaction::try_from(request.transaction)?;
+                Ok(SubmitTransactionResponse {
+                    transaction_id: transaction.id(),
+                })
+            }
+            SubmitAnswer::Fail(text) => Err(RpcError::RpcSubsystem(text)),
+            SubmitAnswer::Unbound => unreachable!("answered before the request"),
+        }
     }
 
     async fn get_block_call(
@@ -641,6 +883,8 @@ impl RpcApi for FakeRpc {
         _connection: Option<&DynRpcConnection>,
         _request: GetBlockRequest,
     ) -> RpcResult<GetBlockResponse> {
+        self.get_block_calls.fetch_add(1, Ordering::SeqCst);
+        self.activity.notify_waiters();
         Err(RpcError::NotImplemented)
     }
 
@@ -769,6 +1013,9 @@ impl RpcApi for FakeRpc {
         _connection: Option<&DynRpcConnection>,
         _request: GetDaaScoreTimestampEstimateRequest,
     ) -> RpcResult<GetDaaScoreTimestampEstimateResponse> {
+        self.timestamp_calls.fetch_add(1, Ordering::SeqCst);
+        self.activity.notify_waiters();
+        Self::pass(&self.hold_timestamp).await;
         Err(RpcError::NotImplemented)
     }
 

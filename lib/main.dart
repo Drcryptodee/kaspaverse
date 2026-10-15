@@ -376,6 +376,7 @@ class _MoneyShellState extends State<_MoneyShell> {
       utxoIndexMissing: widget.wallet.utxoIndexMissing,
       maturity: _maturity,
       outgoing: widget.wallet.outgoing,
+      unsettled: widget.wallet.unsettled,
       discoveryIncomplete: widget.wallet.discoveryIncomplete,
       lane: widget.wallet.lane,
       lastUpdate: widget.wallet.lastUpdate,
@@ -392,6 +393,7 @@ class _MoneyShellState extends State<_MoneyShell> {
     sendRoute: (_, balanceStale) => SendScreen(
       mature: widget.wallet.mature,
       balanceStale: balanceStale,
+      unsettled: widget.wallet.unsettled,
       // The tracker's live depth for the txid the ceremony just made —
       // node-read, polled once a second while the receipt is up.
       acceptanceStatus: (txid) => txAcceptanceStatus(txid: txid),

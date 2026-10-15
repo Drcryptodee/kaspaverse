@@ -68,7 +68,7 @@ use kaspa_wrpc_client::prelude::*;
 /// What every call answers while no socket is bound (mid-race, paused,
 /// pre-first-connect). A typed error, never a panic and never a silent
 /// success — the callers already treat an RPC error as "ask again later".
-const NO_BOUND_SOCKET: &str = "link: no bound socket";
+pub(crate) const NO_BOUND_SOCKET: &str = "link: no bound socket";
 
 /// The listener id handed back when a registration could not happen. Chosen so
 /// a caller that ignores the warning still cannot subscribe against it: every

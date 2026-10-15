@@ -333,10 +333,13 @@ async fn escalation_task(mut events: broadcast::Receiver<AcceptanceEvent>, monit
         match events.recv().await {
             Ok(AcceptanceEvent::Stalled { txid, waited_ms }) => {
                 let Some((signed_tx, submit_url)) = retention().take(&txid) else {
-                    // Restart between submit and stall, or TTL/cap eviction:
+                    // Restart between submit and stall, TTL/cap eviction, or a
+                    // leg whose submit got no answer (never kept: a resend
+                    // could pay twice after a retry from other coins):
                     // resubmission is impossible and saying so beats guessing.
                     log::warn!(
-                        "escalation: {txid} stalled ({waited_ms} ms) — no retained signed tx (restart?); skipping resubmit"
+                        "escalation: {txid} stalled ({waited_ms} ms); no retained signed tx \
+                         (a restart, an eviction, or a submit that got no answer); skipping resubmit"
                     );
                     continue;
                 };

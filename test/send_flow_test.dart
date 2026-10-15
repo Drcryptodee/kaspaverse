@@ -72,8 +72,13 @@ SignableSummaryDto _summary({
   typicalAfterFeeSompi: typicalAfterFeeSompi,
 );
 
-SendOutcomeDto _ok() =>
-    SendOutcomeDto(finalTxid: 'a' * 64, submitted: 1, total: 1, partial: false);
+SendOutcomeDto _ok() => SendOutcomeDto(
+  finalTxid: 'a' * 64,
+  submitted: 1,
+  total: 1,
+  partial: false,
+  unanswered: false,
+);
 
 /// **`KvWindow` above the `Navigator`**, exactly as `main.dart` mounts it —
 /// the ceremony arrives on a route now, and a sheet reads the window class to
@@ -205,6 +210,7 @@ const Object _unset = Object();
 Widget _sendScreen({
   Object? mature = _unset,
   ValueListenable<bool>? balanceStale,
+  ValueListenable<BigInt?>? unsettled,
   Future<BigInt?> Function(String, BigInt)? feePreview,
   Future<SignableSummaryDto> Function(String, BigInt)? prepare,
   Future<SignableSummaryDto> Function(String)? prepareSweep,
@@ -219,6 +225,7 @@ Widget _sendScreen({
       identical(mature, _unset) ? BigInt.from(100000000000) : mature as BigInt?,
     ),
     balanceStale: balanceStale,
+    unsettled: unsettled,
     feePreview: feePreview,
     prepare: prepare ?? (_, _) async => _summary(),
     commit: commit ?? (_) async => _ok(),
@@ -776,6 +783,29 @@ void main() {
         find.text('You have 10.00 KAS spendable. You are 2.40 KAS short.'),
         findsOneWidget,
       );
+      expect(_reviewReason(tester), 'More than you can spend');
+    });
+
+    testWidgets('a balance still settling from a merge claims no shortfall', (
+      tester,
+    ) async {
+      // A merge reads zero spendable until its acceptance; its value is on
+      // its way back. The form does not say the user is short: the build
+      // answers, and says *still settling* if the coins are not back yet.
+      _phone(tester);
+      final unsettled = ValueNotifier<BigInt?>(BigInt.from(1999791234));
+      addTearDown(unsettled.dispose);
+      await tester.pumpWidget(
+        _sendScreen(mature: BigInt.zero, unsettled: unsettled),
+      );
+      await _address(tester, _addr);
+      await _type(tester, '12.4');
+      expect(find.textContaining('KAS short'), findsNothing);
+      expect(_reviewReason(tester), isNull);
+
+      // Settled: the figure is the whole story again, and quoted as one.
+      unsettled.value = BigInt.zero;
+      await tester.pump();
       expect(_reviewReason(tester), 'More than you can spend');
     });
 
@@ -1735,7 +1765,7 @@ void main() {
       for (final step in [
         'Signing on this device',
         'Broadcasting to the network',
-        'Waiting for a node to accept it',
+        'Waiting for the network to accept it',
       ]) {
         expect(find.text(step), findsOneWidget);
       }
@@ -1750,21 +1780,24 @@ void main() {
       expect(weightOf('Signing on this device'), FontWeight.w400);
       expect(weightOf('Broadcasting to the network'), FontWeight.w600);
 
+      // **The last stage waits for the broadcast's answer, never the clock.**
+      // A send can wait for its lane to be ready before anything is
+      // broadcast; lighting *waiting for the network* at a fixed beat would
+      // light it before the network had been asked.
       await tester.pump(const Duration(milliseconds: 900));
-      expect(weightOf('Broadcasting to the network'), FontWeight.w400);
-      expect(weightOf('Waiting for a node to accept it'), FontWeight.w600);
+      expect(weightOf('Broadcasting to the network'), FontWeight.w600);
+      expect(weightOf('Waiting for the network to accept it'), FontWeight.w400);
+      await tester.pump(const Duration(seconds: 5));
+      expect(weightOf('Broadcasting to the network'), FontWeight.w600);
 
       // A PASSED step reads exactly like a coming one. `send_commit` is one
       // await across the FFI, so the wallet knows the same amount about both,
-      // and a green tick beside "Broadcast to the network" would contradict
+      // and a green tick beside "Signing on this device" would contradict
       // the refusal plate that can still land two beats later.
       expect(
         weightOf('Signing on this device'),
-        weightOf('Broadcasting to the network'),
+        weightOf('Waiting for the network to accept it'),
       );
-      // The last stage is open-ended: the real outcome ends it, not a clock.
-      await tester.pump(const Duration(seconds: 5));
-      expect(weightOf('Waiting for a node to accept it'), FontWeight.w600);
     });
 
     testWidgets('a commit that lands early skips straight to the outcome', (
@@ -1791,6 +1824,50 @@ void main() {
       expect(find.byType(KvSheet), findsNothing);
       expect(find.text('Sent'), findsOneWidget);
     });
+
+    testWidgets(
+      'the broadcast answer moves the wait to its last stage at once',
+      (tester) async {
+        // A node answers a submit in about 160 ms, inside the first stage's
+        // timer. From then on the send waits on the network, and the wait says
+        // so from that instant: the answer moves it, not the clock.
+        _phone(tester);
+        final landed = Completer<SendOutcomeDto>();
+        await tester.pumpWidget(
+          _host(
+            SigningCeremony(
+              summary: _summary(),
+              commit: (_) => landed.future,
+              abandon: () async {},
+              // The network has not accepted it yet, so the wait stays up.
+              acceptanceStatus: (_) async => null,
+            ),
+          ),
+        );
+        final gesture = await tester.startGesture(
+          tester.getCenter(find.text('Hold to send 12.40 KAS')),
+        );
+        await tester.pump();
+        await tester.pump(
+          KvMotion.deliberate + const Duration(milliseconds: 20),
+        );
+        await gesture.up();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 160));
+        landed.complete(_ok());
+        await tester.pump();
+        // Past the completion beat, when the wait first shows.
+        await tester.pump(const Duration(milliseconds: 60));
+        await tester.pump(KvMotion.calm);
+
+        // The variable face's real weight is its variation axis (L150).
+        List<FontVariation>? weightOf(String s) =>
+            tester.widget<Text>(find.text(s)).style!.fontVariations;
+        expect(weightOf('Waiting for the network to accept it'), KvWeight.w600);
+        expect(weightOf('Signing on this device'), KvWeight.w400);
+        expect(weightOf('Broadcasting to the network'), KvWeight.w400);
+      },
+    );
   });
 
   group('the outcome, in three beats', () {
@@ -1799,6 +1876,7 @@ void main() {
       Future<SendOutcomeDto> Function(BigInt) commit, {
       Future<String> Function(String txid)? explorerUrl,
       Future<bool> Function(String url)? openUrl,
+      SignableKind kind = SignableKind.payment,
     }) async {
       await tester.pumpWidget(
         _host(
@@ -1808,7 +1886,7 @@ void main() {
             // settle in one test would have found the screen already settled
             // and no hold control to press.
             key: UniqueKey(),
-            summary: _summary(),
+            summary: _summary(kind: kind),
             commit: commit,
             abandon: () async {},
             explorerUrl: explorerUrl,
@@ -1817,7 +1895,7 @@ void main() {
         ),
       );
       final gesture = await tester.startGesture(
-        tester.getCenter(find.text('Hold to send 12.40 KAS')),
+        tester.getCenter(find.byType(KvHold)),
       );
       await tester.pump();
       await tester.pump(KvMotion.deliberate + const Duration(milliseconds: 20));
@@ -1998,10 +2076,9 @@ void main() {
       // submit, so on a partial broadcast it names the last compounding leg
       // rather than the payment. That leg is accepted within about a second
       // like any other, and the stamp would then have printed a chain-vouched
-      // `Accepted` directly under `Total` — beside an amount that never went
-      // out, and directly above a verdict reading `Partly sent`. The figures
-      // would have contradicted the verdict on a funds surface
-      // (`wallet-security-auditor`, UX-4B).
+      // `Accepted` directly under `Total`, beside an amount that never went
+      // out and directly above a verdict saying it was not sent. The figures
+      // would have contradicted the verdict on a funds surface.
       _phone(tester);
       var asked = 0;
       await tester.pumpWidget(
@@ -2013,6 +2090,7 @@ void main() {
               submitted: 1,
               total: 2,
               partial: true,
+              unanswered: false,
             ),
             abandon: () async {},
             maturity: kTestMaturity,
@@ -2038,11 +2116,10 @@ void main() {
       await tester.pump();
       await tester.pump();
 
-      // The screen really IS in the partial state. Without this the absences
-      // below would pass on a screen that simply never got anywhere. Two
-      // matches, not one: the rail and the outcome head both speak the verdict,
-      // which is the point of deriving both from `_verdictFor`.
-      expect(find.text('Partly sent'), findsOneWidget);
+      // The screen really IS in the partial state (the payment's last leg
+      // never went). Without this the absences below would pass on a screen
+      // that simply never got anywhere.
+      expect(find.text('Not sent'), findsOneWidget);
 
       // Well past the 1 s poll the complete path uses.
       await tester.pump(const Duration(seconds: 2));
@@ -2079,14 +2156,24 @@ void main() {
       // The exceptions keep theirs.
       await settleWith(
         tester,
-        (_) async => SendOutcomeDto(submitted: 1, total: 2, partial: true),
+        (_) async => SendOutcomeDto(
+          submitted: 1,
+          total: 2,
+          partial: true,
+          unanswered: false,
+        ),
       );
       expect(find.byType(KvLamp), findsWidgets);
 
       await settleWith(
         tester,
-        (_) async =>
-            SendOutcomeDto(submitted: 0, total: 1, partial: false, error: 'x'),
+        (_) async => SendOutcomeDto(
+          submitted: 0,
+          total: 1,
+          partial: false,
+          error: 'x',
+          unanswered: true,
+        ),
       );
       expect(find.byType(KvLamp), findsWidgets);
     });
@@ -2138,8 +2225,13 @@ void main() {
       _phone(tester);
       await settleWith(
         tester,
-        (_) async =>
-            SendOutcomeDto(submitted: 0, total: 1, partial: false, error: 'x'),
+        (_) async => SendOutcomeDto(
+          submitted: 0,
+          total: 1,
+          partial: false,
+          error: 'x',
+          unanswered: true,
+        ),
       );
       // The tense lives in the verdict now (`S8`): the receipt's head names
       // what is known, and *"Not confirmed"* claims neither that it went nor
@@ -2149,7 +2241,9 @@ void main() {
       expect(find.byType(KvCheck), findsNothing);
     });
 
-    testWidgets('partial says what landed and what did not', (tester) async {
+    testWidgets('a partial merge says what landed and what did not', (
+      tester,
+    ) async {
       _phone(tester);
       await settleWith(
         tester,
@@ -2158,7 +2252,9 @@ void main() {
           total: 2,
           partial: true,
           finalTxid: 'b' * 64,
+          unanswered: false,
         ),
+        kind: SignableKind.consolidate,
       );
       // One place, unmistakable: the receipt's own head.
       expect(find.text('Partly sent'), findsOneWidget);
@@ -2178,17 +2274,15 @@ void main() {
       expect(find.textContaining('Your funds are safe'), findsNothing);
     });
 
-    testWidgets('a zero-submitted outcome never claims the funds are safe', (
+    testWidgets('an unanswered submit never claims the funds are safe', (
       tester,
     ) async {
-      // **`submitted == 0` does not prove that nothing left the wallet.**
-      // `PreparedSend::commit` signs first and then awaits `try_submit`, and
-      // ANY error on that await returns zero — including a request timeout and
-      // a socket dropped after the bytes went out, either of which can follow
-      // a node that accepted and relayed the transaction. Telling that user
-      // their funds are safe is how they send it a second time
-      // (`wallet-security-auditor`, UX-4). The sentence needs a Rust-set
-      // discriminator before it can be said again; until then it is not said.
+      // **A submit with no answer does not prove that nothing left the
+      // wallet.** A request timeout or a socket dropped after the bytes went
+      // out can follow a node that accepted and relayed the transaction.
+      // Telling that user their funds are safe is how they send it a second
+      // time, so it is not said; the receipt names the outcome and the check
+      // that protects them.
       _phone(tester);
       await settleWith(
         tester,
@@ -2196,24 +2290,160 @@ void main() {
           submitted: 0,
           total: 1,
           partial: false,
-          error: 'orphan transaction rejected by the node',
+          error: 'RPC request timeout',
+          unanswered: true,
         ),
       );
       expect(find.text('Not confirmed'), findsOneWidget);
+      expect(find.text('Nothing left your wallet.'), findsNothing);
       expect(
         find.textContaining('Your funds are safe'),
         findsNothing,
-        reason: 'the wallet cannot prove this from a zero-submitted outcome',
+        reason: 'the wallet cannot prove this from an unanswered submit',
       );
       // The third beat is the action that actually protects them.
       expect(
-        find.textContaining('Check your activity before sending again'),
+        find.textContaining('Check your balance in a minute before sending'),
         findsOneWidget,
       );
+      expect(find.textContaining('it will appear there'), findsNothing);
       // The headline names the OUTCOME; Rust's own reason names the cause,
       // rather than being swallowed into a bare "failed".
+      expect(find.text('RPC request timeout'), findsOneWidget);
+    });
+
+    testWidgets('a send refused before it left says nothing left the wallet', (
+      tester,
+    ) async {
+      // Rust proves this one (`unanswered == false` beside an error): the
+      // wallet refused before the request. It is the one funds fact the
+      // receipt can state, and it states it.
+      _phone(tester);
+      await settleWith(
+        tester,
+        (_) async => SendOutcomeDto(
+          submitted: 0,
+          total: 1,
+          partial: false,
+          error: 'The network did not answer in time. Try again in a moment.',
+          unanswered: false,
+        ),
+      );
+      expect(find.text('Not sent'), findsOneWidget);
+      expect(find.text('Nothing left your wallet.'), findsOneWidget);
+      expect(find.text('Not confirmed'), findsNothing);
+      expect(find.byType(KvCheck), findsNothing, reason: 'nothing landed');
+      expect(find.textContaining('did not answer in time'), findsOneWidget);
+    });
+
+    testWidgets('a chained send whose last leg got no answer is not '
+        'confirmed, not partly sent', (tester) async {
+      // The last leg is the send itself: with no answer it may have landed,
+      // exactly like a one-leg send with no answer.
+      _phone(tester);
+      await settleWith(
+        tester,
+        (_) async => SendOutcomeDto(
+          submitted: 1,
+          total: 2,
+          partial: true,
+          finalTxid: 'b' * 64,
+          error: 'WebSocket disconnected',
+          unanswered: true,
+        ),
+      );
+      expect(find.text('Not confirmed'), findsOneWidget);
+      expect(find.text('Partly sent'), findsNothing);
       expect(
-        find.text('orphan transaction rejected by the node'),
+        find.textContaining('Check your balance in a minute before sending'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a chained payment whose payment never left says not sent, '
+        'in amber, with no id', (tester) async {
+      // A chain's legs before its last pay the wallet's own address; only the
+      // last pays the recipient. Stopped before it, whether a middle leg got
+      // no answer or the last was refused, the payment never left.
+      for (final (label, outcome) in <(String, SendOutcomeDto)>[
+        (
+          'a middle leg with no answer',
+          SendOutcomeDto(
+            submitted: 1,
+            total: 3,
+            partial: true,
+            finalTxid: 'b' * 64,
+            error: 'WebSocket disconnected',
+            unanswered: true,
+          ),
+        ),
+        (
+          'the last leg refused',
+          SendOutcomeDto(
+            submitted: 1,
+            total: 2,
+            partial: true,
+            finalTxid: 'b' * 64,
+            error: 'The wallet reconnected during the send. Try again.',
+            unanswered: false,
+          ),
+        ),
+        (
+          'the first leg with no answer',
+          SendOutcomeDto(
+            submitted: 0,
+            total: 2,
+            partial: false,
+            error: 'WebSocket disconnected',
+            unanswered: true,
+          ),
+        ),
+      ]) {
+        _phone(tester);
+        await settleWith(tester, (_) async => outcome);
+        expect(find.text('Not sent'), findsOneWidget, reason: label);
+        expect(
+          find.text(
+            'Nothing reached the recipient. Send it again in a minute.',
+          ),
+          findsOneWidget,
+          reason: label,
+        );
+        expect(
+          tester.widget<KvLamp>(find.byType(KvLamp)).tone,
+          KvLampTone.warn,
+          reason: '$label: nothing is at risk',
+        );
+        // The last id a partial chain has is a leg that paid the wallet
+        // itself: named here, its explorer page would read as the payment
+        // having landed. The row shows the id middle-elided.
+        expect(find.text('Transaction ID'), findsNothing, reason: label);
+        expect(find.text('bbbbbbbb…bbbbbbbb'), findsNothing, reason: label);
+        expect(find.text('Send another'), findsNothing, reason: label);
+      }
+    });
+
+    testWidgets('a chained merge whose middle leg got no answer says the rest '
+        'were not sent', (tester) async {
+      _phone(tester);
+      await settleWith(
+        tester,
+        (_) async => SendOutcomeDto(
+          submitted: 1,
+          total: 3,
+          partial: true,
+          finalTxid: 'b' * 64,
+          error: 'WebSocket disconnected',
+          unanswered: true,
+        ),
+        kind: SignableKind.consolidate,
+      );
+      expect(find.text('Partly sent'), findsOneWidget);
+      expect(find.textContaining('the rest did not send'), findsNothing);
+      expect(
+        find.textContaining(
+          'The next one got no answer, and the rest were not sent.',
+        ),
         findsOneWidget,
       );
     });
@@ -2267,43 +2497,78 @@ void main() {
       );
     });
 
-    testWidgets('the in-flight exit signals exactly once, from either door, '
-        'and never on a plain dismissal', (tester) async {
-      // `Navigator.pop` reaches `onPopInvokedWithResult` synchronously in the
-      // same call, so a widget that ALSO calls the callback from its own back
-      // target fires it twice on that door and once on the system one — two
-      // exits disagreeing about how many times an event happened. Harmless
-      // for today's caller, which sets a bool; not harmless for the next one
-      // (`wallet-security-auditor`, UX-4).
+    testWidgets('a send built after the screen left is abandoned, not left '
+        'stashed', (tester) async {
+      // Rust keeps a built send in its stash until a commit or an abandon. A
+      // prepare that finishes after the screen has gone opens no ceremony to
+      // do either, so the screen abandons it itself.
       _phone(tester);
-      var fires = 0;
-      // Pushed over a base route through the public entry point, because a
-      // ceremony that IS the navigator's only route cannot be popped at all.
-      Future<void> open(WidgetTester tester) async {
-        late BuildContext ctx;
+      final built = Completer<SignableSummaryDto>();
+      var abandoned = 0;
+      await tester.pumpWidget(
+        _host(
+          SendScreen(
+            mature: ValueNotifier<BigInt?>(BigInt.from(100000000000)),
+            prepare: (_, _) => built.future,
+            commit: (_) async => _ok(),
+            abandon: () async => abandoned++,
+          ),
+        ),
+      );
+      await _address(tester, _addr);
+      await _type(tester, '12.4');
+      await tester.tap(find.textContaining('Review '));
+      await tester.pump();
+      await tester.pumpWidget(_host(const SizedBox()));
+      built.complete(_summary());
+      await tester.pump();
+      expect(abandoned, 1, reason: 'the built send stayed in the stash');
+    });
+
+    // **Once the hold has completed, Done never lands on the armed form while
+    // the send's fate is unknown.** A receipt with no answer, and a commit
+    // that threw, came back to step 2 still holding the address and the
+    // amount, one hold from a duplicate of a send the receipt had just told
+    // the user to check.
+    for (final (label, commit)
+        in <(String, Future<SendOutcomeDto> Function(BigInt))>[
+          (
+            'an unanswered send',
+            (_) async => SendOutcomeDto(
+              submitted: 0,
+              total: 1,
+              partial: false,
+              error: 'RPC request timeout',
+              unanswered: true,
+            ),
+          ),
+          ('a commit that threw', (_) async => throw StateError('boom')),
+        ]) {
+      testWidgets('Done after $label leaves the armed form', (tester) async {
+        _phone(tester);
+        var popped = 0;
         await tester.pumpWidget(
           _host(
-            Builder(
-              builder: (c) {
-                ctx = c;
-                return const Scaffold();
-              },
+            Navigator(
+              onGenerateRoute: (_) => MaterialPageRoute<void>(
+                builder: (_) => _RouteSpy(
+                  onPop: () => popped++,
+                  child: SendScreen(
+                    mature: ValueNotifier<BigInt?>(BigInt.from(100000000000)),
+                    prepare: (_, _) async => _summary(),
+                    commit: commit,
+                    abandon: () async {},
+                  ),
+                ),
+              ),
             ),
           ),
         );
-        unawaited(
-          showSigningCeremony(
-            ctx,
-            summary: _summary(),
-            commit: (_) => Completer<SendOutcomeDto>().future,
-            abandon: () async {},
-            onLeftInFlight: () => fires++,
-          ),
-        );
+        await _address(tester, _addr);
+        await _type(tester, '12.4');
+        await tester.tap(find.textContaining('Review '));
         await tester.pumpAndSettle();
-      }
 
-      Future<void> holdIt(WidgetTester tester) async {
         final gesture = await tester.startGesture(
           tester.getCenter(find.text('Hold to send 12.40 KAS')),
         );
@@ -2312,31 +2577,68 @@ void main() {
           KvMotion.deliberate + const Duration(milliseconds: 20),
         );
         await gesture.up();
-        await tester.pump(const Duration(seconds: 7));
-      }
+        await tester.pumpAndSettle();
 
-      // The rail's back target.
-      await open(tester);
-      await holdIt(tester);
-      await tester.tap(find.text('Cancel'));
-      await tester.pumpAndSettle();
-      expect(fires, 1, reason: 'the rail exit signalled more than once');
+        await tester.tap(find.text('Done'));
+        await tester.pumpAndSettle();
+        expect(
+          popped,
+          1,
+          reason: 'the send screen stayed, holding the same send armed',
+        );
+      });
+    }
 
-      // The system back gesture.
-      fires = 0;
-      await open(tester);
-      await holdIt(tester);
-      await tester.binding.handlePopRoute();
+    testWidgets('Done after a send Rust proved never left returns to the '
+        'filled form', (tester) async {
+      // Refused before its first request: nothing left the wallet, so a
+      // retry cannot be a duplicate, and the filled form is the quickest way
+      // to try again.
+      _phone(tester);
+      var popped = 0;
+      await tester.pumpWidget(
+        _host(
+          Navigator(
+            onGenerateRoute: (_) => MaterialPageRoute<void>(
+              builder: (_) => _RouteSpy(
+                onPop: () => popped++,
+                child: SendScreen(
+                  mature: ValueNotifier<BigInt?>(BigInt.from(100000000000)),
+                  prepare: (_, _) async => _summary(),
+                  commit: (_) async => SendOutcomeDto(
+                    submitted: 0,
+                    total: 1,
+                    partial: false,
+                    error:
+                        'The wallet could not reach the network in time. Try '
+                        'again in a moment.',
+                    unanswered: false,
+                  ),
+                  abandon: () async {},
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await _address(tester, _addr);
+      await _type(tester, '12.4');
+      await tester.tap(find.textContaining('Review '));
       await tester.pumpAndSettle();
-      expect(fires, 1, reason: 'the system exit must agree with the rail');
 
-      // A plain dismissal, before anything was signed, is not an in-flight
-      // exit and must say nothing.
-      fires = 0;
-      await open(tester);
-      await tester.tap(find.text('Cancel'));
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.text('Hold to send 12.40 KAS')),
+      );
+      await tester.pump();
+      await tester.pump(KvMotion.deliberate + const Duration(milliseconds: 20));
+      await gesture.up();
       await tester.pumpAndSettle();
-      expect(fires, 0, reason: 'nothing was in flight');
+      expect(find.text('Not sent'), findsOneWidget);
+
+      await tester.tap(find.text('Done'));
+      await tester.pumpAndSettle();
+      expect(popped, 0, reason: 'a send that never left went home');
+      expect(find.textContaining('Review '), findsOneWidget);
     });
 
     testWidgets('a wait that overruns gives the exit back rather than sealing '
@@ -2364,11 +2666,14 @@ void main() {
 
       // Sealed while the wait still looks normal.
       expect(tester.widget<KvSheet>(find.byType(KvSheet)).onCancel, isNull);
-      expect(find.textContaining('You can leave'), findsNothing);
+      expect(find.textContaining('Leaving now'), findsNothing);
 
       await tester.pump(const Duration(seconds: 7));
       expect(tester.widget<KvSheet>(find.byType(KvSheet)).onCancel, isNotNull);
-      expect(find.textContaining('leaving cancels nothing'), findsOneWidget);
+      expect(
+        find.text('Taking longer than usual. Leaving now cancels nothing.'),
+        findsOneWidget,
+      );
       // And it claims nothing about where the transaction has GOT to — the
       // reasoning that deleted the funds-safe sentence applies here too.
       expect(find.textContaining('already out of the wallet'), findsNothing);
@@ -3341,7 +3646,7 @@ void main() {
       // stays, on its last named stage, which is now literally true.
       await tester.pump(const Duration(seconds: 2));
       expect(find.text('Sent'), findsNothing);
-      expect(find.text('Waiting for a node to accept it'), findsOneWidget);
+      expect(find.text('Waiting for the network to accept it'), findsOneWidget);
       expect(find.text('Accepted —'), findsNothing);
 
       // The DAG takes it — and only now does the receipt open, with a depth

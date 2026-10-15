@@ -593,6 +593,7 @@ SendOutcomeDto _outcome() => SendOutcomeDto(
   submitted: 1,
   total: 1,
   partial: false,
+  unanswered: false,
 );
 
 /// One painted arc, kept with everything that decides how much ink lands.

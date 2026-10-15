@@ -19,7 +19,7 @@
 //! module (it never sees a seed or keychain — the bridge hands it public
 //! [`Address`]es only).
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -29,13 +29,16 @@ use std::time::Duration;
 
 use borsh::BorshDeserialize;
 use kaspa_addresses::{Address, Prefix};
+use kaspa_consensus_core::tx::TransactionOutpoint;
 use kaspa_txscript::extract_script_pub_key_address;
 use kaspa_wallet_core::events::Events;
 use kaspa_wallet_core::rpc::Rpc;
 use kaspa_wallet_core::storage::transaction::{TransactionData, TransactionId, TransactionRecord};
-use kaspa_wallet_core::utxo::{Maturity, NetworkParams, UtxoContext};
+use kaspa_wallet_core::utxo::{
+    Maturity, NetworkParams, OutgoingTransaction, UtxoContext, UtxoEntryId, UtxoEntryReference,
+};
 use kaspa_wrpc_client::prelude::{NetworkId, NetworkType};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, oneshot, OwnedRwLockWriteGuard};
 use tokio::time::Instant;
 
 use crate::dag_monitor::{LaneRecovery, WalletLaneHooks};
@@ -177,6 +180,11 @@ pub enum WalletEvent {
         mature: u64,
         pending: u64,
         outgoing: u64,
+        /// Ours, on its way back to us in a send still in flight, and in none
+        /// of the three figures above ([`InFlightSends::unsettled`]). A merge
+        /// to our own address carries the whole wallet this way: for the
+        /// second or so before its acceptance the pin's figures read zero.
+        unsettled: u64,
     },
     /// The full current activity list, newest-first (capped at [`ACTIVITY_CAP`]).
     Activity(Vec<WalletActivityRecord>),
@@ -252,6 +260,220 @@ fn carries_fee(record: &TransactionRecord) -> bool {
             | TransactionData::Batch { .. }
             | TransactionData::TransferOutgoing { .. }
     )
+}
+
+/// The record the pinned `try_submit` emits for a submit of ours
+/// (`notify_outgoing_transaction`: a batch leg, or the final transaction,
+/// pin `wallet/core/src/utxo/context.rs:264-276` @ `01b532e`).
+fn is_own_send(record: &TransactionRecord) -> bool {
+    matches!(
+        record.transaction_data(),
+        TransactionData::Outgoing { .. } | TransactionData::Batch { .. }
+    )
+}
+
+/// One send of ours in flight, from the record its submit emitted.
+#[derive(Debug)]
+struct InFlightSend {
+    /// The outputs paying our own addresses that no bucket of the pin's
+    /// balance counts while the send is in flight. The pin's
+    /// `calculate_balance` (`wallet/core/src/utxo/context.rs:506-547` @
+    /// `01b532e`) carries a payment's change in its mature figure already,
+    /// and its paid amount in `outgoing`; a transaction with no payment value
+    /// (a merge to our own address, or a batch leg) nets to nothing, so every
+    /// output of it that comes back to us is left out until acceptance.
+    returning: Vec<(TransactionOutpoint, u64)>,
+    /// The coins it spends.
+    spends: Vec<TransactionOutpoint>,
+}
+
+/// **Takes coins out of a context whatever state the pin left them in**: in
+/// the map or not, pending, or on the mature list once or twice. `remove`
+/// sheds a pending coin from the pending set only and a mature one only
+/// through the map (`context.rs:355-392` @ `01b532e`), and a cancel pushes a
+/// leg's coins onto the mature list whether or not the map holds them
+/// (`:280-291`). Entering each coin between two removals (`insert` fills an
+/// empty map entry, `:295-301`) leaves every copy within the second's reach.
+pub(crate) async fn take_out(context: &UtxoContext, coins: Vec<UtxoEntryReference>) -> Result<()> {
+    context.remove(coins.clone()).await?;
+    for coin in &coins {
+        context.insert(coin.clone(), 0, true).await?;
+    }
+    context.remove(coins).await?;
+    Ok(())
+}
+
+/// **Our own sends on one lane**: the ones in flight, kept by the lane's fold
+/// from the pin's own records, and what each submit left in the pin's maps,
+/// kept by the commit, so a reopen hands back what a close took
+/// ([`WalletEngine::resume_sends`]).
+///
+/// A send enters `sends` at the `Pending` record its submit emits
+/// (`notify_outgoing_transaction`) and leaves at the first `Maturity` record
+/// of the same transaction, its acceptance. The pin emits both ahead of the
+/// balance they change (`handle_utxo_changed` folds removals, then additions,
+/// then one balance update: `processor.rs:393-490`), so at every balance the
+/// fold sees, `sends` holds exactly the sends that balance still treats as in
+/// flight.
+#[derive(Default)]
+pub(crate) struct InFlightSends {
+    sends: HashMap<TransactionId, InFlightSend>,
+    /// The pin's record of each send of ours it kept after the submit (the
+    /// node took it, or the failure came after the broadcast), until its
+    /// acceptance is seen. A close clears the processor's copy (`cleanup()`,
+    /// pin `processor.rs:609-615`) and the reopen registers it again.
+    taken: HashMap<TransactionId, OutgoingTransaction>,
+    /// Sends whose acceptance was seen while the pin still held a context
+    /// record for them: the processor's purge of that record cannot run once
+    /// a close has cleared its map.
+    accepted: HashSet<TransactionId>,
+    /// The coins of each leg the pin cancelled after registering it: the
+    /// cancel returns them to the mature list (`context.rs:280-291`), and a
+    /// chain's later leg spends earlier legs' outputs, which the context's
+    /// map never held.
+    cancelled: HashMap<TransactionId, Vec<UtxoEntryReference>>,
+}
+
+/// What a reopen does with the sends a close interrupted
+/// ([`InFlightSends::reopen`]).
+struct Reopen {
+    /// Every record the pin kept whose acceptance is unseen (kept on).
+    taken: Vec<OutgoingTransaction>,
+    /// Accepted sends whose context record may outlive them.
+    accepted: Vec<TransactionId>,
+    /// The coins of every leg the pin cancelled.
+    cancelled: Vec<UtxoEntryReference>,
+}
+
+impl InFlightSends {
+    fn enter(&mut self, record: &TransactionRecord, ours: &HashSet<Address>) {
+        let (transaction, uncounted) = match record.transaction_data() {
+            TransactionData::Outgoing {
+                transaction,
+                payment_value,
+                ..
+            } => (transaction, payment_value.is_none()),
+            TransactionData::Batch { transaction, .. } => (transaction, true),
+            _ => return,
+        };
+        let txid = *record.id();
+        let prefix = Prefix::from(record.network_id().network_type);
+        let returning = if uncounted {
+            transaction
+                .outputs
+                .iter()
+                .enumerate()
+                .filter_map(|(index, output)| {
+                    let to =
+                        extract_script_pub_key_address(&output.script_public_key, prefix).ok()?;
+                    ours.contains(&to)
+                        .then(|| (TransactionOutpoint::new(txid, index as u32), output.value))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let spends = transaction
+            .inputs
+            .iter()
+            .map(|input| input.previous_outpoint)
+            .collect();
+        self.sends.insert(txid, InFlightSend { returning, spends });
+    }
+
+    /// A send leaves at its acceptance, and with it every send of ours it
+    /// spends from: a transaction's acceptance implies its inputs' creators
+    /// were accepted. A chain's middle leg needs this: the node folds a
+    /// virtual change's diff whole, so an output created and spent inside one
+    /// change cancels out (`consensus/core/src/utxo/utxo_diff.rs:246-266` @
+    /// `01b532e`) and the leg can land with no record of its own.
+    fn leave(&mut self, txid: &TransactionId) -> bool {
+        if self.taken.remove(txid).is_some() {
+            self.accepted.insert(*txid);
+        }
+        let Some(send) = self.sends.remove(txid) else {
+            return false;
+        };
+        for spent in &send.spends {
+            self.leave(&spent.transaction_id);
+        }
+        true
+    }
+
+    /// Keep the pin's record of a send it kept after the submit.
+    pub(crate) fn note_taken(&mut self, record: OutgoingTransaction) {
+        self.taken.insert(record.id(), record);
+    }
+
+    /// Keep the coins of a leg the pin cancelled after registering it.
+    pub(crate) fn note_cancelled(&mut self, txid: TransactionId, coins: Vec<UtxoEntryReference>) {
+        self.cancelled.insert(txid, coins);
+    }
+
+    /// The records of the sends whose submit has returned and whose
+    /// acceptance is unseen. They survive a close, which clears the
+    /// processor's copy, and a send still in its submit is not among them.
+    fn returned(&self) -> HashMap<TransactionId, OutgoingTransaction> {
+        self.taken.clone()
+    }
+
+    /// The sends whose acceptance was seen while the pin still held a context
+    /// record for them (the reopen discharges them; so does any read before it).
+    fn seen_accepted(&self) -> Vec<TransactionId> {
+        self.accepted.iter().copied().collect()
+    }
+
+    /// What a reopen hands back to the pin and clears: the records it kept
+    /// stay here until their acceptance is seen.
+    fn reopen(&mut self) -> Reopen {
+        Reopen {
+            taken: self.taken.values().cloned().collect(),
+            accepted: self.accepted.drain().collect(),
+            cancelled: self
+                .cancelled
+                .drain()
+                .flat_map(|(_, coins)| coins)
+                .collect(),
+        }
+    }
+
+    /// A send the node's unspent set shows settled (it landed, or something
+    /// spending one of its coins did): it no longer counts, and its records
+    /// are discharged by the caller. Unlike [`Self::leave`] it does not reach
+    /// the sends it spends from: a conflict that landed proves nothing about
+    /// them.
+    fn settled(&mut self, txid: &TransactionId) {
+        self.sends.remove(txid);
+        self.taken.remove(txid);
+        self.accepted.remove(txid);
+    }
+
+    #[cfg(test)]
+    fn insert_parts(
+        &mut self,
+        txid: TransactionId,
+        returning: Vec<(TransactionOutpoint, u64)>,
+        spends: Vec<TransactionOutpoint>,
+    ) {
+        self.sends.insert(txid, InFlightSend { returning, spends });
+    }
+
+    /// **The value coming back to us that the pin's balance does not show**:
+    /// the returning outputs of the sends in flight, less any another send in
+    /// flight spends again (a chain's legs feed each other, so only what its
+    /// last leg leaves comes home).
+    fn unsettled(&self) -> u64 {
+        let spent: HashSet<TransactionOutpoint> = self
+            .sends
+            .values()
+            .flat_map(|send| send.spends.iter().copied())
+            .collect();
+        self.sends
+            .values()
+            .flat_map(|send| send.returning.iter())
+            .filter(|(outpoint, _)| !spent.contains(outpoint))
+            .fold(0u64, |sum, (_, value)| sum.saturating_add(*value))
+    }
 }
 
 /// A record wallet-core classifies as a spend WE originated. If we already hold
@@ -831,7 +1053,6 @@ struct Inner {
     events: broadcast::Sender<WalletEvent>,
     store: Mutex<ActivityStore>,
     event_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    shutdown: Mutex<Option<oneshot::Sender<()>>>,
     /// The watched address window — kept so [`WalletEngine::rescan`] can re-ask
     /// the node for the SAME set the balance reflects, and so a reconnect
     /// re-registers the CURRENT window rather than the one `start()` happened to
@@ -884,7 +1105,6 @@ impl WalletEngine {
                 events,
                 store: Mutex::new(store),
                 event_task: Mutex::new(None),
-                shutdown: Mutex::new(None),
                 watch: Mutex::new(Arc::new(Vec::new())),
                 change_set: Mutex::new(Arc::new(HashSet::new())),
                 link: Mutex::new(None),
@@ -1092,9 +1312,8 @@ impl WalletEngine {
     async fn start_lane(&self, lane: &Arc<Lane>) -> Result<()> {
         let channel = lane.processor.multiplexer().channel();
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
-        *self
-            .inner
-            .shutdown
+        *lane
+            .fold_shutdown
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(shutdown_tx);
         let engine = self.clone();
@@ -1204,8 +1423,7 @@ impl WalletEngine {
                 &lane.context,
             )
             .await?;
-        lane.context
-            .scan_and_register_addresses(addresses.as_ref().clone(), None)
+        self.file_from_node(&lane, addresses.as_ref().clone())
             .await?;
         log::info!(
             "wallet-sync: in-place rescan re-asked the node for {count} addresses (a lost \
@@ -1276,10 +1494,7 @@ impl WalletEngine {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) =
             Arc::new(change_addresses.into_iter().collect());
-        self.lane()
-            .context
-            .scan_and_register_addresses(added, None)
-            .await?;
+        self.file_from_node(&self.lane(), added).await?;
         log::info!(
             "wallet-sync: watch window widened by {count} to {total} addresses (late discovery)"
         );
@@ -1313,13 +1528,23 @@ impl WalletEngine {
         }
         let lane = self.lane();
         lane.retire();
-        Self::stop_processor(&lane).await?;
+        // A submit in flight returns first, within the bound a stop keeps; one
+        // that does not leaves its processor running rather than stopped under
+        // it (the submit itself is never bounded: it may land).
+        match tokio::time::timeout(LANE_STEP_WITHIN, lane.fence_out_submits()).await {
+            Ok(fence) => Self::stop_processor(&lane, fence).await?,
+            Err(_) => log::warn!(
+                "wallet-lane: a submit on lane {} is still in flight after {:?}; its processor \
+                 is left running",
+                lane.number,
+                LANE_STEP_WITHIN
+            ),
+        }
         // Take both handles out from under their locks BEFORE awaiting — never
         // hold a std MutexGuard across an await (clippy::await_holding_lock;
         // mirrors dag_monitor.rs:148).
-        let shutdown = self
-            .inner
-            .shutdown
+        let shutdown = lane
+            .fold_shutdown
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
@@ -1340,7 +1565,11 @@ impl WalletEngine {
 
     /// The pinned `stop()`, bounded. A timeout is logged and is not an error:
     /// the processor it could not stop is dead or stuck, and is being dropped.
-    async fn stop_processor(lane: &Lane) -> Result<()> {
+    ///
+    /// Called with the lane's submit fence held (`_fence`), so no submit is in
+    /// flight: the pinned stop ends in `handle_disconnect`, whose `cleanup()`
+    /// would clear the outgoing map a submit reads back after its broadcast.
+    async fn stop_processor(lane: &Lane, _fence: OwnedRwLockWriteGuard<()>) -> Result<()> {
         match tokio::time::timeout(LANE_STEP_WITHIN, lane.processor.stop()).await {
             Ok(result) => Ok(result?),
             Err(_) => {
@@ -1691,9 +1920,12 @@ impl WalletEngine {
         let rebuilding = RebuildingGuard(self.clone());
         self.publish_health();
 
-        // The old lane stops cold: its gate refuses everything, its relay ends,
-        // its fold task is cancelled (nothing it would still fold matters), and
-        // its pinned `stop()` runs bounded on the side.
+        // The old lane stops: its gate refuses everything and its relay ends
+        // at once. Its pinned `stop()` runs bounded on the side, after any
+        // submit in flight on it returns, and its fold stays up until then in
+        // the retired mode (`handle_event`): it folds only the record of a
+        // send of ours, so a send that straddled the rebuild still reaches
+        // the activity the new lane serves. Then the fold ends.
         old.retire();
         let old_fold = self
             .inner
@@ -1701,12 +1933,29 @@ impl WalletEngine {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
-        if let Some(task) = old_fold {
-            task.abort();
-        }
         let stopping = old.clone();
         tokio::spawn(async move {
-            let _ = Self::stop_processor(&stopping).await;
+            // After any submit in flight on it returns, however long that
+            // takes: nothing waits on this task, and the straddled send's
+            // record still has to reach the fold kept up below.
+            let fence = stopping.fence_out_submits().await;
+            let _ = Self::stop_processor(&stopping, fence).await;
+            let shutdown = stopping
+                .fold_shutdown
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take();
+            if let Some(tx) = shutdown {
+                let _ = tx.send(());
+            }
+            if let Some(mut task) = old_fold {
+                if tokio::time::timeout(LANE_STEP_WITHIN, &mut task)
+                    .await
+                    .is_err()
+                {
+                    task.abort();
+                }
+            }
         });
 
         let number = self.inner.lanes_built.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1797,6 +2046,300 @@ impl WalletEngine {
         let _ = self.inner.events.send(event);
     }
 
+    /// **The sends a close interrupted, handed back to the pin before the
+    /// rescan.** A close clears the processor's outgoing map and not the
+    /// context's (`cleanup()`, pin `processor.rs:609-615` @ `01b532e`), and
+    /// the pin recognises an acceptance, and purges an accepted record, only
+    /// through the processor's map (`context.rs:577-627`,
+    /// `processor.rs:336-349`).
+    ///
+    /// - A send the pin kept whose acceptance is unseen is registered again
+    ///   (`processor.rs:351`). Its coins stay in the context's map and off the
+    ///   mature list, so the rescan does not file them as spendable while the
+    ///   send may still be in a mempool (the node's UTXO index holds accepted
+    ///   transactions only), and its acceptance is folded as before the close.
+    ///   Whether it settled while the socket was down is decided from the
+    ///   reopen's one read of the node, once the subscription is armed again
+    ///   ([`Self::file_from_node`]).
+    /// - An accepted send's context record is discharged: left in place, it
+    ///   meets the pin's `unreachable!` (`context.rs:408-411`) when an output
+    ///   of its transaction is promoted (a chain's batch output, which the pin
+    ///   never inserts at acceptance and the rescan files as pending).
+    /// - A cancelled leg's coins are taken out of the context ([`take_out`]),
+    ///   so the reopen's read files them as the node has them now. Coins a
+    ///   resumed send spends are left alone.
+    async fn resume_sends(&self, lane: &Lane) {
+        let reopen = lane
+            .in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .reopen();
+        for record in &reopen.taken {
+            lane.processor.register_outgoing_transaction(record.clone());
+        }
+        for txid in &reopen.accepted {
+            lane.context.remove_outgoing_transaction(txid);
+        }
+        let mut returned = 0;
+        if !reopen.cancelled.is_empty() {
+            let resumed: HashSet<UtxoEntryId> = reopen
+                .taken
+                .iter()
+                .flat_map(|record| record.utxo_entries().keys().cloned().collect::<Vec<_>>())
+                .collect();
+            let mut seen = HashSet::new();
+            let coins: Vec<UtxoEntryReference> = reopen
+                .cancelled
+                .into_iter()
+                .filter(|coin| !resumed.contains(&coin.id()) && seen.insert(coin.id()))
+                .collect();
+            returned = coins.len();
+            if let Err(e) = take_out(&lane.context, coins).await {
+                self.emit_error(&e.to_string());
+            }
+        }
+        if !reopen.taken.is_empty() || !reopen.accepted.is_empty() || returned > 0 {
+            log::info!(
+                "wallet-sync: reopen: {} send(s) handed back to the processor, {} accepted \
+                 record(s) discharged, {returned} cancelled coin(s) left to the rescan",
+                reopen.taken.len(),
+                reopen.accepted.len()
+            );
+        }
+    }
+
+    /// **One read of the node's unspent set for `addresses`, decided and filed
+    /// as one.** The reopen, a pull, a widened window and a prepare's change
+    /// scan all come here. The pin's `scan_and_register_addresses`
+    /// (`context.rs:744-756` @ `01b532e`) is these same public calls without
+    /// the middle step.
+    ///
+    /// The node's index holds accepted transactions only, answers only for the
+    /// addresses asked (a prepare asks for one), and answers as it stood when
+    /// it served the read. The processor's view of our sends can trail that or
+    /// lead it: the index changes before its `UtxosChanged` goes out
+    /// (`indexes/processor/src/processor.rs:96-104`), and the handler folds
+    /// that whenever it next takes the notification lock's write side
+    /// (`processor.rs:637-638`). So our sends are read before the request and
+    /// again under the lock, and:
+    /// - a send counts as landed only if the processor had tagged it accepted
+    ///   before the request. Every other send of ours that either read names,
+    ///   or that our own record of the returned submits names (a close clears
+    ///   the processor's copy until the reopen hands it back), may still land
+    ///   as far as this answer can tell, and an input it creates proves
+    ///   nothing;
+    /// - a send whose submit has returned and whose record the processor holds
+    ///   untagged is judged, parents first: an input at an address asked,
+    ///   which no send that may land creates and the node no longer lists,
+    ///   means the send landed or something spending that coin did. Its record
+    ///   is tagged accepted rather than removed, so a `UtxosChanged` for it
+    ///   still on its way finds it (a batch leg's outputs are then not filed
+    ///   as a deposit, `context.rs:588-602`) and the processor purges it as it
+    ///   purges any accepted send (`processor.rs:336-349`); its context record
+    ///   goes, and its inputs leave the map. A send still in its submit is
+    ///   never judged: a submit holds the lock's read side too
+    ///   (`pending.rs:216`) and reads its record back when the request
+    ///   returns (`context.rs:265`, `:285`);
+    /// - an accepted send's context record is discharged: one the processor
+    ///   holds tagged now, one it had tagged before the request, and one our
+    ///   fold saw accepted (a close clears the processor's copy, never the
+    ///   context's, and ticks can promote before the reopen hands the sends
+    ///   back, `processor.rs:540-541`). The balance loses nothing real: a
+    ///   tagged record is not counted (`context.rs:519`), and an untagged one
+    ///   the fold saw accepted nets to zero for a batch leg and can only read
+    ///   low for a final send (`:530-547`). Left in place, it would meet a
+    ///   chain's batch output filed below as pending at its promotion, which
+    ///   runs before the processor's own purge (`processor.rs:266-267`,
+    ///   `context.rs:408-411`);
+    /// - the answer is filed (`extend_from_scan`, then `update_balance`) less
+    ///   every coin a send of ours seen at either read spends (the answer can
+    ///   predate a spend the processor has since folded, or purged), and every
+    ///   coin a send that may still land creates.
+    ///
+    /// The lock is held for the decisions only. Filing a new coin asks the
+    /// node for its timestamp (`processor.rs:359-392`, there being no wallet
+    /// bus), and the handler, with every submit queued behind it (the lock
+    /// prefers a waiting writer), must not wait on the node.
+    ///
+    /// Without an answer nothing is decided and nothing is filed.
+    pub(crate) async fn file_from_node(&self, lane: &Lane, addresses: Vec<Address>) -> Result<()> {
+        lane.context.register_addresses(&addresses).await?;
+        let asked: HashSet<Address> = addresses.iter().cloned().collect();
+        // Our sends as they stood before the request. A record's tag is shared
+        // with the processor's copy, so it is read now, not later.
+        let returned = lane
+            .in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .returned();
+        let before: Vec<OutgoingTransaction> = lane
+            .processor
+            .outgoing()
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect();
+        let landed_before: HashSet<TransactionId> = before
+            .iter()
+            .filter(|record| record.is_accepted())
+            .map(|record| record.id())
+            .collect();
+        let entries = tokio::time::timeout(
+            LANE_HOLD_WITHIN,
+            lane.processor.rpc_api().get_utxos_by_addresses(addresses),
+        )
+        .await
+        .map_err(|_| {
+            ChainError::Message(format!(
+                "the node's unspent set was not read inside {LANE_HOLD_WITHIN:?}"
+            ))
+        })??;
+        let current_daa_score = lane.processor.current_daa_score().ok_or_else(|| {
+            ChainError::Message("the processor is not connected: no DAA score".into())
+        })?;
+        let quiet = tokio::time::timeout(LANE_STEP_WITHIN, lane.processor.notification_lock())
+            .await
+            .map_err(|_| {
+                ChainError::Message(format!(
+                    "the processor's notification lock was not free inside {LANE_STEP_WITHIN:?}"
+                ))
+            })?;
+        let unspent: HashSet<UtxoEntryId> = entries
+            .iter()
+            .map(|entry| UtxoEntryId::new(entry.outpoint.transaction_id, entry.outpoint.index))
+            .collect();
+        let mut may_land: HashSet<TransactionId> = HashSet::new();
+        let mut held: HashSet<UtxoEntryId> = HashSet::new();
+        for record in before.iter().chain(returned.values()) {
+            may_land.insert(record.id());
+            held.extend(record.utxo_entries().keys().cloned());
+        }
+        let mut judged: HashMap<TransactionId, OutgoingTransaction> = HashMap::new();
+        let mut accepted: Vec<TransactionId> = Vec::new();
+        for entry in lane.processor.outgoing().iter() {
+            let (txid, record) = (*entry.key(), entry.value());
+            may_land.insert(txid);
+            held.extend(record.utxo_entries().keys().cloned());
+            if record.is_accepted() {
+                accepted.push(txid);
+            } else if returned.contains_key(&txid) {
+                judged.insert(txid, record.clone());
+            }
+        }
+        for txid in &landed_before {
+            may_land.remove(txid);
+        }
+        let seen_accepted = lane
+            .in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .seen_accepted();
+        for txid in accepted
+            .iter()
+            .chain(landed_before.iter())
+            .chain(seen_accepted.iter())
+        {
+            lane.context.remove_outgoing_transaction(txid);
+        }
+        let mut settled = 0;
+        loop {
+            let done: Vec<TransactionId> = judged
+                .values()
+                .filter(|record| {
+                    record.utxo_entries().values().any(|coin| {
+                        let id = coin.id();
+                        !may_land.contains(&id.transaction_id)
+                            && coin
+                                .utxo
+                                .address
+                                .as_ref()
+                                .is_some_and(|address| asked.contains(address))
+                            && !unspent.contains(&id)
+                    })
+                })
+                .map(|record| record.id())
+                .collect();
+            if done.is_empty() {
+                break;
+            }
+            for txid in done {
+                let Some(record) = judged.remove(&txid) else {
+                    continue;
+                };
+                may_land.remove(&txid);
+                record.tag_as_accepted_at_daa_score(current_daa_score);
+                lane.context.remove_outgoing_transaction(&txid);
+                if let Err(e) = lane
+                    .context
+                    .remove(record.utxo_entries().values().cloned().collect())
+                    .await
+                {
+                    self.emit_error(&e.to_string());
+                }
+                lane.in_flight
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .settled(&txid);
+                settled += 1;
+            }
+        }
+        let found = entries.len();
+        let coins: Vec<UtxoEntryReference> = entries
+            .into_iter()
+            .map(UtxoEntryReference::from)
+            .filter(|coin| {
+                let id = coin.id();
+                !held.contains(&id) && !may_land.contains(&id.transaction_id)
+            })
+            .collect();
+        let withheld = found - coins.len();
+        drop(quiet);
+        lane.context
+            .extend_from_scan(coins, current_daa_score)
+            .await?;
+        lane.context.update_balance().await?;
+        if settled > 0 || withheld > 0 {
+            log::info!(
+                "wallet-sync: unspent set read: {settled} send(s) of ours settled, {withheld} \
+                 coin(s) withheld while {} send(s) of ours may still land",
+                may_land.len()
+            );
+        }
+        Ok(())
+    }
+
+    /// Fold one transaction record into the activity store and publish the
+    /// list.
+    fn fold_record(&self, record: TransactionRecord, change_set: &HashSet<Address>) {
+        // Our own change re-reported as an incoming deposit (a restart
+        // re-scan lost the outgoing context) is never a deposit — don't
+        // record it (the spend's own record already represents the tx).
+        //
+        // Every verdict is logged (public chain data, INV-3): the V1
+        // sitting's live-deposit miss (finding 8) was undiagnosable
+        // because this arm was silent — balance lines proved the fold
+        // task alive, but nothing said whether a record event ever
+        // arrived or which guard ate it.
+        let txid = record.id().to_string();
+        if is_own_change(&record, change_set) {
+            log::info!("wallet-sync: record txid={txid} verdict=own-change (not a deposit)");
+            return;
+        }
+        let outcome = self
+            .inner
+            .store
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .upsert(record);
+        if let Err(e) = &outcome {
+            log::warn!("wallet-sync: activity append failed: {e}");
+        }
+        log::info!(
+            "wallet-sync: record txid={txid} verdict={}",
+            upsert_verdict(&outcome)
+        );
+        self.emit_activity(change_set);
+    }
+
     /// **The one way an error enters the fold** (`ffi-leak-auditor`,
     /// LINK-Q1). Its text can be a node's own words — the processor builds
     /// its errors from them, and a failed wRPC call carries the server's
@@ -1842,9 +2385,23 @@ impl WalletEngine {
         let addresses = addresses.as_slice();
         let change_set = self.change_set();
         let change_set = change_set.as_ref();
+        // A replaced lane's fold stays up only until its processor has
+        // stopped, for one record: that of a send of ours whose submit was in
+        // flight when the lane was replaced (its pinned `try_submit` emits it
+        // on this lane's processor). Everything else here describes a context
+        // nothing reads any more, and must not reach the snapshot.
+        if lane.is_retired() {
+            if let Events::Pending { record } = event {
+                if is_own_send(&record) {
+                    self.fold_record(record, change_set);
+                }
+            }
+            return;
+        }
         match event {
             Events::UtxoProcStart => {
                 self.lane_came_up(lane);
+                self.resume_sends(lane).await;
                 self.emit(WalletEvent::Syncing);
                 log::info!(
                     "wallet-sync: utxo-proc start — scanning {} addresses",
@@ -1878,17 +2435,19 @@ impl WalletEngine {
                     ),
                     Err(e) => self.emit_error(&e.to_string()),
                 }
-                // Register the address window and fetch the initial UTXO set;
+                // Register the address window and file the node's unspent set,
+                // deciding the sends a close interrupted from the same read;
                 // this drives Discovery + Balance events (the latter even for an
                 // empty wallet → a live zero). DAA is already stored by
                 // handle_connect_impl (processor.rs:529) before UtxoProcStart.
-                if let Err(e) = lane
-                    .context
-                    .scan_and_register_addresses(addresses.to_vec(), None)
-                    .await
-                {
+                if let Err(e) = self.file_from_node(lane, addresses.to_vec()).await {
                     self.emit_error(&e.to_string());
                 }
+                // Submits wait for this (`Lane::is_ready`): the start has been
+                // followed through, its sends handed back and the node read,
+                // whether or not each step succeeded (a failure is reported
+                // above, and a kept send's coins stay withheld either way).
+                lane.start_folded();
             }
             Events::Connect { url, .. } => self.emit(WalletEvent::Connected { url }),
             Events::Disconnect { .. } => self.emit(WalletEvent::Disconnected),
@@ -1900,54 +2459,49 @@ impl WalletEngine {
                 self.emit(WalletEvent::UtxoIndexMissing { url });
             }
             Events::Balance { balance, .. } => {
+                // The pin sends `Some` from its one emit site
+                // (`UtxoContext::update_balance`, `context.rs:231-243` @
+                // `01b532e`); a merge's all-zero figures are its own
+                // arithmetic, which `unsettled` completes.
                 let (mature, pending, outgoing) = balance
                     .map(|b| (b.mature, b.pending, b.outgoing))
                     .unwrap_or((0, 0, 0));
+                let unsettled = lane
+                    .in_flight
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .unsettled();
                 // Public chain data (sompi) — lets a "stuck/wrong balance" report
                 // be diagnosed from logcat; never a secret (INV-3).
                 log::info!(
-                    "wallet-sync: balance mature={mature} pending={pending} outgoing={outgoing} sompi"
+                    "wallet-sync: balance mature={mature} pending={pending} outgoing={outgoing} \
+                     unsettled={unsettled} sompi"
                 );
                 self.emit(WalletEvent::Balance {
                     mature,
                     pending,
                     outgoing,
+                    unsettled,
                 });
             }
-            Events::Pending { record }
-            | Events::Maturity { record }
-            | Events::Discovery { record } => {
-                // Our own change re-reported as an incoming deposit (a restart
-                // re-scan lost the outgoing context) is never a deposit — don't
-                // record it (the spend's own record already represents the tx).
-                //
-                // Every verdict is logged (public chain data, INV-3): the V1
-                // sitting's live-deposit miss (finding 8) was undiagnosable
-                // because this arm was silent — balance lines proved the fold
-                // task alive, but nothing said whether a record event ever
-                // arrived or which guard ate it.
-                let txid = record.id().to_string();
-                if is_own_change(&record, change_set) {
-                    log::info!(
-                        "wallet-sync: record txid={txid} verdict=own-change (not a deposit)"
-                    );
-                    return;
+            Events::Pending { record } => {
+                if is_own_send(&record) {
+                    let ours: HashSet<Address> = addresses.iter().cloned().collect();
+                    lane.in_flight
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .enter(&record, &ours);
                 }
-                let outcome = self
-                    .inner
-                    .store
+                self.fold_record(record, change_set);
+            }
+            Events::Maturity { record } => {
+                lane.in_flight
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .upsert(record);
-                if let Err(e) = &outcome {
-                    log::warn!("wallet-sync: activity append failed: {e}");
-                }
-                log::info!(
-                    "wallet-sync: record txid={txid} verdict={}",
-                    upsert_verdict(&outcome)
-                );
-                self.emit_activity(change_set);
+                    .leave(record.id());
+                self.fold_record(record, change_set);
             }
+            Events::Discovery { record } => self.fold_record(record, change_set),
             Events::Reorg { record } => {
                 log::info!("wallet-sync: reorg — removing tx {}", record.id());
                 {
@@ -2025,6 +2579,64 @@ impl WalletEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A chain's legs count once toward unsettled, and leave together.** A
+    /// batch leg's output comes home only if no later leg of ours spends it
+    /// again: alone (a chain that stopped part way) it is unsettled; under a
+    /// last leg that spends it, only the last leg's output is. The last leg's
+    /// acceptance takes the legs it spends with it, since a middle leg can
+    /// land with no record of its own.
+    #[test]
+    fn a_chains_legs_count_once_toward_unsettled() {
+        let id = |n: u8| TransactionId::from_bytes([n; 32]);
+        let mut sends = InFlightSends::default();
+        let leg_out = TransactionOutpoint::new(id(1), 0);
+        sends.insert_parts(
+            id(1),
+            vec![(leg_out, 500)],
+            vec![TransactionOutpoint::new(id(9), 0)],
+        );
+        assert_eq!(sends.unsettled(), 500, "a lone leg's output comes home");
+        sends.insert_parts(
+            id(2),
+            vec![(TransactionOutpoint::new(id(2), 0), 480)],
+            vec![leg_out],
+        );
+        assert_eq!(
+            sends.unsettled(),
+            480,
+            "the leg's output is spent again by the last leg"
+        );
+        assert!(sends.leave(&id(2)));
+        assert_eq!(sends.unsettled(), 0, "the leg it spends left with it");
+        assert!(!sends.leave(&id(1)), "already gone");
+    }
+
+    /// **A send settled by the node's unspent set leaves its parents in
+    /// flight.** Settled can mean a conflict landed, which proves nothing
+    /// about the legs it spends from, unlike an acceptance.
+    #[test]
+    fn a_settled_send_leaves_its_parents_in_flight() {
+        let id = |n: u8| TransactionId::from_bytes([n; 32]);
+        let mut sends = InFlightSends::default();
+        let leg_out = TransactionOutpoint::new(id(1), 0);
+        sends.insert_parts(
+            id(1),
+            vec![(leg_out, 500)],
+            vec![TransactionOutpoint::new(id(9), 0)],
+        );
+        sends.insert_parts(
+            id(2),
+            vec![(TransactionOutpoint::new(id(2), 0), 480)],
+            vec![leg_out],
+        );
+        sends.settled(&id(2));
+        assert_eq!(
+            sends.unsettled(),
+            500,
+            "the parent left with a child the node settled"
+        );
+    }
     use kaspa_wallet_core::storage::Binding;
     use kaspa_wallet_core::utxo::UtxoContextId;
     use kaspa_wrpc_client::prelude::{NetworkId, NetworkType};
