@@ -177,9 +177,11 @@ def c6_lesson_destinations():
             for name in set(re.findall(r"`([a-z][a-z0-9-]+)`", clause)):
                 if name not in skills:
                     continue
-                body = read(".claude", "skills", name, "SKILL.md") or ""
+                # A skill is its directory: SKILL.md and the reference files it loads in scope.
+                body = "\n".join(read(".claude", "skills", name, f) or ""
+                                  for f in sorted(os.listdir(os.path.join(sk, name))) if f.endswith(".md"))
                 if not re.search(rf"\bL{lid}\b", body):
-                    fail(f"C6 L{lid} names `{name}` as a destination, but .claude/skills/{name}/SKILL.md never cites L{lid} (the destination is declared, not built)")  # gate-allow:internal-path — the census reads the record; naming its files is its job
+                    fail(f"C6 L{lid} names `{name}` as a destination, but no file in .claude/skills/{name}/ cites L{lid} (the destination is declared, not built)")  # gate-allow:internal-path — the census reads the record; naming its files is its job
         for tool in set(re.findall(r"`(tools/[A-Za-z0-9_./-]+\.(?:sh|py))`", dest)):
             if not os.path.exists(p(tool)):
                 fail(f"C6 L{lid} names `{tool}` as a destination, and it does not exist")

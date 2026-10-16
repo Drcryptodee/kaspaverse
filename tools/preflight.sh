@@ -19,7 +19,28 @@ git log --oneline -5 2>/dev/null | sed 's/^/    /' || echo "    (none)"
 # "diff against NEXT_SESSION.md") against files that are not there.
 HAVE_DOCS=0; [ -d docs ] && HAVE_DOCS=1
 if [ "$HAVE_DOCS" = 1 ]; then
-  echo "• active phase: $(ls docs/phases/*_ACTIVE.md 2>/dev/null | xargs -n1 basename 2>/dev/null || echo 'NONE — check PHASE_INDEX')" # gate-allow:internal-path
+  # The work in flight is the PHASE_INDEX row marked IN FLIGHT; the `_ACTIVE` suffix marks the
+  # elaborated phase file, which a pre-phase leaves where it is (PHASE_INDEX's header note).
+  PHASE_INDEX_FILE=docs/phases/PHASE_INDEX.md # gate-allow:internal-path — preflight reads the record when it is present
+  INFLIGHT="$(python3 - "$PHASE_INDEX_FILE" 2>/dev/null <<'PY'
+import re, sys
+for row in open(sys.argv[1], encoding='utf-8'):
+    cells = [c.strip() for c in row.split('|')]
+    if len(cells) > 4 and 'IN FLIGHT' in cells[4]:
+        phase, name = (re.sub(r'\*', '', c) for c in cells[1:3])
+        path = re.sub(r'[`*]', '', cells[3]).split(' + ')[0]
+        nxt = re.findall(r'\*\*Next: ([^*]+)\*\*', cells[4])
+        print(f'{phase} · {name} ({path})' + (f' · next: {nxt[-1].rstrip(" ,")}' if nxt else ''))
+        break
+PY
+)"
+  ACTIVE_FILE="$(ls docs/phases/*_ACTIVE.md 2>/dev/null | xargs -n1 basename 2>/dev/null)" # gate-allow:internal-path
+  if [ -n "$INFLIGHT" ]; then
+    echo "• phase in flight: $INFLIGHT"
+    echo "  (elaborated file ${ACTIVE_FILE:-NONE}: its _ACTIVE suffix is not the work in flight)"
+  else
+    echo "• active phase: ${ACTIVE_FILE:-NONE — check PHASE_INDEX}"
+  fi
 else
   echo "• active phase: (docs/ not present — engineering record is ops-mirror-only, D-102)"
 fi
@@ -69,9 +90,7 @@ echo "• android device: $(command -v adb >/dev/null && adb devices 2>/dev/null
 if [ "$HAVE_DOCS" = 1 ]; then
   TRIG_LINES="$(grep -rnE '\[TRIGGER(\]|:)' docs/ 2>/dev/null | grep -v 'TRIGGER-FIRED' || true)"
   TRIG_N="$(printf '%s\n' "$TRIG_LINES" | grep -c . || true)"
-  TRIG_BY="$(printf '%s\n' "$TRIG_LINES" | grep . | sed -E 's|^docs/(([^/:]*/)*)([^:]*):.*|\3|' \
-      | sed 's/\.md$//' | sort | uniq -c | awk '{printf "%s %s · ", $2, $1}' | sed 's/ · $//')"
-  echo "• armed triggers: ${TRIG_N}${TRIG_BY:+  ($TRIG_BY)} — grep -rnE '\[TRIGGER(\]|:)' docs/"
+  echo "• armed triggers: ${TRIG_N} — grep -rnE '\[TRIGGER(\]|:)' docs/"
 fi
 # PNN beacon floor (D-201 / D-183 trigger T-C). The reading itself needs the network and
 # stays MANUAL in tools/beacon_floor.sh; this line is offline by construction — it only

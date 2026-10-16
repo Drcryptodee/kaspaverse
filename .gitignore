@@ -59,3 +59,8 @@ docs/
 # and outside the gate (preview tests skip unless requested) — so an `add -A` at
 # a wrap would commit it into `main` unnoticed (`dependency-steward`, UX-R2B).
 test/preview/failures/
+
+# Python bytecode from the repo tools: regenerable, kept out of `main`. (A forced add overrides
+# this, so the wrap's ops add excludes `__pycache__` itself.)
+__pycache__/
+*.pyc
