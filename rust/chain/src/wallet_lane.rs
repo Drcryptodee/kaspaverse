@@ -252,6 +252,9 @@ struct GateState {
     /// DAA ticks arrive about ten a second, so this is the socket's own pulse
     /// as the lane sees it.
     last_admitted: Option<Instant>,
+    /// The newest DAA score a tick the gate admitted carried: the score the
+    /// processor reaches once it has handled every frame handed to it.
+    newest_daa: u64,
 }
 
 /// One reading of the held-frame witness's inputs ([`Gate::held_view`]).
@@ -271,6 +274,7 @@ impl Gate {
                 epoch: 1,
                 outstanding: Vec::new(),
                 last_admitted: None,
+                newest_daa: 0,
             }),
             retired: AtomicBool::new(false),
             dropped: AtomicU64::new(0),
@@ -304,8 +308,14 @@ impl Gate {
             .outstanding
             .retain(|(_, frame)| frame.strong_count() > 0);
         let held = !state.outstanding.is_empty();
-        if let Notification::UtxosChanged(utxos) = notification {
-            state.outstanding.push((now, Arc::downgrade(&utxos.added)));
+        match notification {
+            Notification::UtxosChanged(utxos) => {
+                state.outstanding.push((now, Arc::downgrade(&utxos.added)));
+            }
+            Notification::VirtualDaaScoreChanged(tick) => {
+                state.newest_daa = state.newest_daa.max(tick.virtual_daa_score);
+            }
+            _ => {}
         }
         // Two EVENTS turn the held-frame witness on, and each wakes the
         // supervisor, whose wake is armed before it reads anything: a first
@@ -358,6 +368,14 @@ impl Gate {
             .outstanding
             .retain(|(_, frame)| frame.strong_count() > 0);
         state.outstanding.first().map(|(at, _)| *at)
+    }
+
+    /// The newest DAA score a tick the gate admitted carried (0 = none yet).
+    fn newest_daa(&self) -> u64 {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .newest_daa
     }
 
     fn retire(&self) {
@@ -525,9 +543,11 @@ pub(crate) struct Lane {
     /// Ends this lane's fold task. Held on the lane, so a rebuild's new fold
     /// does not end the old one before the old processor has stopped.
     pub(crate) fold_shutdown: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-    /// Our own sends this lane's processor has taken and not yet seen
-    /// accepted, kept by the lane's fold.
-    pub(crate) in_flight: Mutex<crate::wallet_sync::InFlightSends>,
+    /// Our own sends in flight, kept by the lane's fold. Shared with the lane
+    /// this one replaced, if any: a send that lane took may still land, and
+    /// one whose submit straddled the rebuild returns on that lane after this
+    /// one has started.
+    pub(crate) in_flight: Arc<Mutex<crate::wallet_sync::InFlightSends>>,
     /// Opens the relay signalled that await the processor's start.
     opens: AtomicU64,
     /// Opens that ended in the processor's error instead of a start.
@@ -549,7 +569,12 @@ pub(crate) enum NotAdmitted {
 impl Lane {
     /// Build a processor and context on `upstream`'s handle, behind a fresh
     /// boundary. Nothing runs until [`Lane::start_relay`].
-    pub(crate) fn new(number: u64, upstream: &Rpc, network_id: NetworkId) -> Arc<Self> {
+    pub(crate) fn new(
+        number: u64,
+        upstream: &Rpc,
+        network_id: NetworkId,
+        in_flight: Arc<Mutex<crate::wallet_sync::InFlightSends>>,
+    ) -> Arc<Self> {
         let changed = Arc::new(tokio::sync::Notify::new());
         let gate = Arc::new(Gate::new(changed.clone()));
         let ctl = RpcCtl::new();
@@ -584,11 +609,17 @@ impl Lane {
             relay: Mutex::new(None),
             fence: Arc::new(RwLock::new(())),
             fold_shutdown: Mutex::new(None),
-            in_flight: Mutex::new(Default::default()),
+            in_flight,
             opens: AtomicU64::new(0),
             opens_failed: AtomicU64::new(0),
             starts_folded: AtomicU64::new(0),
         })
+    }
+
+    /// The newest DAA score handed to this lane's processor: the score it
+    /// reaches once its handler has caught up, whatever it has reached now.
+    pub(crate) fn newest_admitted_daa(&self) -> u64 {
+        self.gate.newest_daa()
     }
 
     /// Whether the lane has been replaced or stopped.

@@ -17,6 +17,7 @@ pub mod devab;
 pub mod discovery;
 mod durable;
 mod error;
+pub mod foreground;
 pub mod history_fill;
 mod kvlog;
 pub mod lane_health;

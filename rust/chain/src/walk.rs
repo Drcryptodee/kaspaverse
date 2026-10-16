@@ -80,6 +80,7 @@ use tokio::sync::{broadcast, mpsc, watch, Notify};
 use crate::acceptance::{TrackerFeed, WalkAcceptance, WalkBatch};
 use crate::dag_monitor::mono_ms;
 use crate::devab::DevAb;
+use crate::foreground::Foreground;
 use crate::link;
 use crate::transport::{self, TransportEvent};
 
@@ -620,6 +621,9 @@ pub(crate) struct Walk {
     fold_gate: tokio::sync::Mutex<()>,
     /// The page call in flight, if any ([`PageInFlight`], LINK-Q4).
     in_flight: Mutex<Option<PageInFlight>>,
+    /// The socket's sends, which a catch-up page waits for ([`Foreground`]).
+    /// Unset, a page never waits.
+    foreground: std::sync::OnceLock<Arc<Foreground>>,
 }
 
 impl Walk {
@@ -649,7 +653,15 @@ impl Walk {
             quiet_warned: AtomicBool::new(false),
             fold_gate: tokio::sync::Mutex::new(()),
             in_flight: Mutex::new(None),
+            foreground: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Let the sends on this socket go first: a catch-up page waits while one
+    /// is in progress ([`Foreground`]); a page at the tip does not, being one
+    /// chain move's worth. Set once; later calls are ignored.
+    pub(crate) fn yield_to(&self, foreground: Arc<Foreground>) {
+        let _ = self.foreground.set(foreground);
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -1017,6 +1029,14 @@ impl Walk {
         for attempt in 0..WALK_PAGE_ATTEMPTS {
             if !self.still_at(epoch, from) {
                 return Fetched::Stopped;
+            }
+            if catch_up {
+                if let Some(foreground) = self.foreground.get() {
+                    foreground.wait_turn("walk").await;
+                    if !self.still_at(epoch, from) {
+                        return Fetched::Stopped;
+                    }
+                }
             }
             let asked = {
                 let _in_flight = InFlightGuard::new(self, source.socket(), catch_up);
@@ -1890,6 +1910,41 @@ pub(crate) mod tests {
             vec![h(1), h(4)],
             "the next run starts at the commit"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A catch-up page waits while a send has the socket; a tip page does
+    /// not.** A catch-up page is a large reply that holds a submit's answer and
+    /// its acceptance behind it on the one socket; a tip page is one chain
+    /// move's worth. Mutation: dropping the wait sends the first page at once.
+    #[tokio::test(start_paused = true)]
+    async fn a_catch_up_page_waits_for_a_send_and_a_tip_page_does_not() {
+        let dir = test_dir("foreground");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_cursor(&dir.join("scan.cursor"), &h(1));
+        let chain = FakeChain::default();
+        chain.queue(h(1), Ok(response(Vec::new(), blocks(2, 2))));
+        let recorder = Arc::new(Recorder::default());
+        let walk = walk_with(&recorder);
+        let foreground = Foreground::new();
+        walk.yield_to(foreground.clone());
+        foreground.claim(Duration::from_secs(20));
+        walk.arm(dir.join("scan.cursor"));
+        let started = tokio::time::Instant::now();
+        walk.run_to_tip(&chain).await;
+        assert_eq!(
+            started.elapsed(),
+            Duration::from_secs(20),
+            "the catch-up page went out while a send held the socket"
+        );
+        assert_eq!(chain.calls(), vec![h(1)]);
+
+        // At the tip, the next page goes at once whatever the claim.
+        foreground.claim(Duration::from_secs(20));
+        let started = tokio::time::Instant::now();
+        walk.run_to_tip(&chain).await;
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        assert_eq!(chain.calls(), vec![h(1), h(3)]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

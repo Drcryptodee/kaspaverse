@@ -70,6 +70,8 @@ pub enum RecordedCall {
 pub const FULL_VCC_PAGE: usize = 100;
 
 pub struct FakeRpc {
+    /// This fake, for the node-side tasks of a serialized connection.
+    me: std::sync::Weak<FakeRpc>,
     network_id: NetworkId,
     epoch: AtomicU64,
     calls: Mutex<Vec<RecordedCall>>,
@@ -132,8 +134,27 @@ pub struct FakeRpc {
     /// While set, `submit_transaction` waits for a permit after it has the
     /// transaction: the node has it and its answer is not back yet.
     hold_submit: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    /// When set, a chain-walk page is recorded and then waits for a permit:
+    /// a large reply still streaming on the one socket.
+    hold_vcc: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    /// What `get_sink_blue_score` answers.
+    sink_blue_score: AtomicU64,
+    /// When set, chain-walk pages and block reads are served one at a time
+    /// in arrival order, as a node serves one connection
+    /// (`rpc/wrpc/server/src/service.rs:121-127` @ `01b532e`: messages are
+    /// handled inline, not concurrently).
+    serialize: AtomicBool,
+    connection: tokio::sync::Mutex<()>,
+    /// Chain-walk pages answered so far.
+    vcc_answered: AtomicU64,
+    /// When set, a sync-status poll is counted and then waits for a permit:
+    /// a processor's handler that stops the sync monitor meanwhile waits on
+    /// it, holding the notification lock.
+    hold_sync_status: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
     /// When set, a UTXO-set read is recorded and then waits for a permit.
     hold_scan: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+    /// How many of the next UTXO-set reads fail, as a node's error.
+    fail_scans: AtomicU64,
     /// When set, a timestamp estimate (asked once for each transaction whose
     /// coins a scan files new) is counted and then waits for a permit.
     hold_timestamp: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
@@ -192,7 +213,8 @@ impl FakeRpc {
             MutationPolicies::new(UtxosChangedMutationPolicy::AddressSet),
         ));
         notifier.clone().start();
-        Arc::new(Self {
+        Arc::new_cyclic(|me| Self {
+            me: me.clone(),
             network_id,
             epoch: AtomicU64::new(1),
             calls: Mutex::new(Vec::new()),
@@ -216,7 +238,14 @@ impl FakeRpc {
             get_block_calls: AtomicU64::new(0),
             utxos: Mutex::new(Vec::new()),
             hold_submit: Mutex::new(None),
+            hold_vcc: Mutex::new(None),
+            sink_blue_score: AtomicU64::new(1_000),
+            serialize: AtomicBool::new(false),
+            connection: tokio::sync::Mutex::new(()),
+            vcc_answered: AtomicU64::new(0),
+            hold_sync_status: Mutex::new(None),
             hold_scan: Mutex::new(None),
+            fail_scans: AtomicU64::new(0),
             hold_timestamp: Mutex::new(None),
             timestamp_calls: AtomicU64::new(0),
             refuse_vcc_pages: AtomicBool::new(false),
@@ -267,6 +296,45 @@ impl FakeRpc {
     /// Refuse every chain-walk page from now on (`true`), or answer again.
     pub fn refuse_vcc_pages(&self, refuse: bool) {
         self.refuse_vcc_pages.store(refuse, Ordering::SeqCst);
+    }
+
+    /// Hold every chain-walk page from now on until the returned semaphore
+    /// grants it a permit (each page is recorded first).
+    pub fn hold_vcc_pages(&self) -> Arc<tokio::sync::Semaphore> {
+        let hold = Arc::new(tokio::sync::Semaphore::new(0));
+        *self.hold_vcc.lock().unwrap_or_else(PoisonError::into_inner) = Some(hold.clone());
+        hold
+    }
+
+    /// Hold every sync-status poll from now on until the returned semaphore
+    /// grants it a permit (each poll is counted first).
+    pub fn hold_sync_status(&self) -> Arc<tokio::sync::Semaphore> {
+        let hold = Arc::new(tokio::sync::Semaphore::new(0));
+        *self
+            .hold_sync_status
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(hold.clone());
+        hold
+    }
+
+    /// Serve walk pages and block reads one at a time, in arrival order.
+    pub fn serialize_requests(&self) {
+        self.serialize.store(true, Ordering::SeqCst);
+    }
+
+    /// Chain-walk pages answered so far.
+    pub fn vcc_answered(&self) -> u64 {
+        self.vcc_answered.load(Ordering::SeqCst)
+    }
+
+    /// The sink blue score the node reports from now on.
+    pub fn set_sink_blue_score(&self, blue_score: u64) {
+        self.sink_blue_score.store(blue_score, Ordering::SeqCst);
+    }
+
+    /// Fail the next `n` UTXO-set reads (each recorded first).
+    pub fn fail_scans(&self, n: u64) {
+        self.fail_scans.store(n, Ordering::SeqCst);
     }
 
     /// Hold every UTXO-set read from now on until the returned semaphore
@@ -570,6 +638,49 @@ impl FakeRpc {
         }
     }
 
+    /// One chain-walk page, as the node answers it.
+    async fn serve_vcc_page(
+        &self,
+        request: GetVirtualChainFromBlockRequest,
+    ) -> RpcResult<GetVirtualChainFromBlockResponse> {
+        self.record(RecordedCall::VirtualChainFrom {
+            epoch: self.current_epoch(),
+        });
+        Self::pass(&self.hold_vcc).await;
+        self.vcc_answered.fetch_add(1, Ordering::SeqCst);
+        if self.refuse_vcc_pages.load(Ordering::SeqCst) {
+            // As the pinned client wraps a node's error (`RpcSubsystem`,
+            // `rpc/macros/src/wrpc/client.rs:73-74` @ `01b532e`).
+            return Err(RpcError::RpcSubsystem(
+                "RPC response error: the chain path is unavailable".to_string(),
+            ));
+        }
+        let keyed = self
+            .vcc_pages
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&request.start_hash)
+            .cloned();
+        if let Some(page) = keyed {
+            return Ok(page);
+        }
+        if self.refuse_unkeyed_vcc_pages.load(Ordering::SeqCst) {
+            return Err(RpcError::RpcSubsystem(
+                "RPC response error: the chain path is unavailable".to_string(),
+            ));
+        }
+        let blocks = if self.fill_vcc_pages.load(Ordering::SeqCst) {
+            FULL_VCC_PAGE
+        } else {
+            1
+        };
+        Ok(GetVirtualChainFromBlockResponse {
+            removed_chain_block_hashes: vec![],
+            added_chain_block_hashes: (0..blocks).map(|_| Self::next_hash()).collect(),
+            accepted_transaction_ids: vec![],
+        })
+    }
+
     pub fn sink_hash() -> RpcHash {
         "1111111111111111111111111111111111111111111111111111111111111111"
             .parse()
@@ -645,6 +756,11 @@ impl RpcApi for FakeRpc {
             addresses: request.addresses,
         });
         Self::pass(&self.hold_scan).await;
+        if Self::take_one(&self.fail_scans) {
+            return Err(RpcError::RpcSubsystem(
+                "RPC response error: the UTXO index is unavailable".to_string(),
+            ));
+        }
         // No coins set: the scan still completes and folds a live zero.
         let entries = self
             .utxos
@@ -664,40 +780,18 @@ impl RpcApi for FakeRpc {
         _connection: Option<&DynRpcConnection>,
         request: GetVirtualChainFromBlockRequest,
     ) -> RpcResult<GetVirtualChainFromBlockResponse> {
-        self.record(RecordedCall::VirtualChainFrom {
-            epoch: self.current_epoch(),
-        });
-        if self.refuse_vcc_pages.load(Ordering::SeqCst) {
-            // As the pinned client wraps a node's error (`RpcSubsystem`,
-            // `rpc/macros/src/wrpc/client.rs:73-74` @ `01b532e`).
-            return Err(RpcError::RpcSubsystem(
-                "RPC response error: the chain path is unavailable".to_string(),
-            ));
+        if self.serialize.load(Ordering::SeqCst) {
+            // The node serves the page on its own, whether or not the caller
+            // is polled meanwhile; the answer comes back over the socket.
+            let me = self.me.upgrade().expect("the fake outlives its calls");
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            tokio::spawn(async move {
+                let _connection = me.connection.lock().await;
+                let _ = tx.send(me.serve_vcc_page(request).await);
+            });
+            return rx.await.unwrap_or(Err(RpcError::NotImplemented));
         }
-        let keyed = self
-            .vcc_pages
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&request.start_hash)
-            .cloned();
-        if let Some(page) = keyed {
-            return Ok(page);
-        }
-        if self.refuse_unkeyed_vcc_pages.load(Ordering::SeqCst) {
-            return Err(RpcError::RpcSubsystem(
-                "RPC response error: the chain path is unavailable".to_string(),
-            ));
-        }
-        let blocks = if self.fill_vcc_pages.load(Ordering::SeqCst) {
-            FULL_VCC_PAGE
-        } else {
-            1
-        };
-        Ok(GetVirtualChainFromBlockResponse {
-            removed_chain_block_hashes: vec![],
-            added_chain_block_hashes: (0..blocks).map(|_| Self::next_hash()).collect(),
-            accepted_transaction_ids: vec![],
-        })
+        self.serve_vcc_page(request).await
     }
 
     async fn get_sink_call(
@@ -718,7 +812,9 @@ impl RpcApi for FakeRpc {
         _connection: Option<&DynRpcConnection>,
         _request: GetSinkBlueScoreRequest,
     ) -> RpcResult<GetSinkBlueScoreResponse> {
-        Ok(GetSinkBlueScoreResponse { blue_score: 1_000 })
+        Ok(GetSinkBlueScoreResponse {
+            blue_score: self.sink_blue_score.load(Ordering::SeqCst),
+        })
     }
 
     // ── Everything else: a clean error, never a panic or a hang ────────────
@@ -762,6 +858,7 @@ impl RpcApi for FakeRpc {
     ) -> RpcResult<GetSyncStatusResponse> {
         self.sync_status_calls.fetch_add(1, Ordering::SeqCst);
         self.activity.notify_waiters();
+        Self::pass(&self.hold_sync_status).await;
         if Self::take_one(&self.panic_sync_status) {
             panic!("forced: the sync monitor dies inside get_sync_status");
         }
@@ -883,6 +980,18 @@ impl RpcApi for FakeRpc {
         _connection: Option<&DynRpcConnection>,
         _request: GetBlockRequest,
     ) -> RpcResult<GetBlockResponse> {
+        if self.serialize.load(Ordering::SeqCst) {
+            let me = self.me.upgrade().expect("the fake outlives its calls");
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            tokio::spawn(async move {
+                let _connection = me.connection.lock().await;
+                me.get_block_calls.fetch_add(1, Ordering::SeqCst);
+                me.activity.notify_waiters();
+                let _ = tx.send(());
+            });
+            let _ = rx.await;
+            return Err(RpcError::NotImplemented);
+        }
         self.get_block_calls.fetch_add(1, Ordering::SeqCst);
         self.activity.notify_waiters();
         Err(RpcError::NotImplemented)

@@ -36,12 +36,12 @@ use kaspa_wallet_core::tx::generator::{
     Generator, GeneratorSettings, GeneratorSummary, PendingTransaction,
 };
 use kaspa_wallet_core::tx::{Fees, PaymentDestination, PaymentOutputs};
-use kaspa_wallet_core::utxo::{OutgoingTransaction, UtxoEntryReference};
+use kaspa_wallet_core::utxo::{OutgoingTransaction, UtxoEntryId, UtxoEntryReference};
 
 use crate::error::{ChainError, Result};
 use crate::spend_policy;
-use crate::wallet_lane::{Lane, NotAdmitted, LANE_HOLD_WITHIN};
-use crate::wallet_sync::{take_out, WalletEngine};
+use crate::wallet_lane::{Lane, NotAdmitted, LANE_HOLD_WITHIN, LANE_STEP_WITHIN};
+use crate::wallet_sync::{take_out, Anchoring, UnknownLeg, WalletEngine};
 use crate::Rpc;
 
 /// What crosses to the confirm screen — Rust's decode of the built transaction
@@ -156,6 +156,10 @@ pub struct PreparedSend {
     /// needs it. `None` for every ordinary payment and for the `Change`-
     /// destination drain, whose accounting the pin already gets exactly right.
     discharge_outgoing: Option<kaspa_wallet_core::utxo::UtxoContext>,
+    /// What a build for the same payment carries: the destination, or the
+    /// conversation a message belongs to. A leg of this send that gets no
+    /// answer anchors later builds with the same key (`UnknownLeg::paid_to`).
+    anchor_key: String,
 }
 
 impl PreparedSend {
@@ -260,6 +264,9 @@ impl PreparedSend {
             // round trip, the hold that bounds `LANE_HOLD_WITHIN` (PRE3-LANE;
             // until now only probes stood in for it). Public txid only, INV-3.
             crate::spans::mark_with("submit_start", &pt.id().to_string());
+            // Logged before the request: a read whose snapshot this leg
+            // postdates withholds what it spends, whatever becomes of it.
+            let logged = LoggedLeg::begin(&self.lane, pt);
             match pt.try_submit(self.rpc.rpc_api()).await {
                 Ok(txid) => {
                     submitted += 1;
@@ -268,6 +275,14 @@ impl PreparedSend {
                     let tx_id = txid;
                     let txid = tx_id.to_string();
                     self.note_taken(pt);
+                    // A node took it: a leg of unknown fate with its txid is
+                    // this send now, whichever lane folds its record.
+                    self.lane
+                        .in_flight
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .own_send_seen(&tx_id, &[]);
+                    logged.returned(true);
                     // V1 span: the node acked this submit RPC — the anchor
                     // that decomposes broadcast-lag from chain-lag in the
                     // submit→accepted baseline (public txid only, INV-3).
@@ -362,9 +377,41 @@ impl PreparedSend {
                     let unanswered = may_have_reached_a_node(&e);
                     if self.note_failed(pt, &e) {
                         self.take_back_earlier_outputs(pt, &earlier).await;
+                        let (direct, earlier_coins): (Vec<_>, Vec<_>) = pt
+                            .utxo_entries()
+                            .values()
+                            .cloned()
+                            .partition(|coin| !earlier.contains(&coin.id().transaction_id));
+                        // Every direct input anchors a retry, on the list or
+                        // not: one off it (a reopen took it out) is not spent
+                        // for that. Those the map no longer holds come off the
+                        // spendable list (a phantom), and a read settles them.
+                        self.keep_held_after_cancel(direct.clone()).await;
+                        let held = direct;
+                        if unanswered {
+                            self.lane
+                                .in_flight
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .fate_unknown(UnknownLeg {
+                                    txid: pt.id(),
+                                    // A chain's earlier leg pays us, not the
+                                    // destination: its coins anchor nothing.
+                                    paid_to: if pt.is_final() {
+                                        self.anchor_key.clone()
+                                    } else {
+                                        String::new()
+                                    },
+                                    held,
+                                    earlier: earlier_coins,
+                                    since_unix_ms: crate::wallet_sync::now_unix_ms(),
+                                    seq: 0,
+                                });
+                        }
                     } else if self.lane.processor.outgoing().contains_key(&pt.id()) {
                         self.drop_filed_earlier_outputs(pt, &earlier).await;
                     }
+                    logged.returned(unanswered);
                     return SendOutcome {
                         final_txid,
                         submitted,
@@ -494,6 +541,63 @@ impl PreparedSend {
         }
     }
 
+    /// **A cancelled leg's coins that a frame had already spent come off the
+    /// spendable list.** The pin's cancel pushes every input of the leg onto
+    /// the mature list (`utxo/context.rs:280-291`), whether or not the map
+    /// still holds it; one a frame had already spent before the register
+    /// (another send of ours, or another wallet on this seed) is a phantom no
+    /// frame can take back. Under the notification lock, so no frame lands
+    /// between the steps: the coins the map does not hold are taken out whole
+    /// ([`take_out`]).
+    async fn keep_held_after_cancel(&self, coins: Vec<UtxoEntryReference>) {
+        if coins.is_empty() {
+            return;
+        }
+        // Bounded like every wait on this lock: a handler stuck on the node
+        // never frees it. Unchecked, every coin counts as held and none is
+        // taken out (a phantom stays, as it did before the check existed).
+        let Ok(_quiet) =
+            tokio::time::timeout(LANE_STEP_WITHIN, self.lane.processor.notification_lock()).await
+        else {
+            log::warn!(
+                "send: the processor's notification lock was not free inside \
+                 {LANE_STEP_WITHIN:?}; a cancelled leg's coins were not checked"
+            );
+            return;
+        };
+        let context = &self.lane.context;
+        // `update` answers whether the map holds the coin and moves nothing
+        // between lists; it replaces the entry with the leg's own copy, the
+        // same coin (`:328-353`).
+        let mut held = Vec::new();
+        for coin in &coins {
+            if context
+                .update(coin.clone(), 0, false)
+                .await
+                .unwrap_or(false)
+            {
+                held.push(coin.clone());
+            }
+        }
+        let held_ids: HashSet<UtxoEntryId> = held.iter().map(|coin| coin.id()).collect();
+        let phantoms: Vec<UtxoEntryReference> = coins
+            .into_iter()
+            .filter(|coin| !held_ids.contains(&coin.id()))
+            .collect();
+        if !phantoms.is_empty() {
+            log::info!(
+                "send: {} coin(s) of a cancelled leg were already spent; taken out",
+                phantoms.len()
+            );
+            if let Err(e) = take_out(context, phantoms).await {
+                log::warn!("send: a spent coin of a cancelled leg was not taken out ({e})");
+            }
+        }
+        if let Err(e) = context.update_balance().await {
+            log::warn!("send: balance refresh after a cancel failed ({e})");
+        }
+    }
+
     /// After the pin cancels a leg, its inputs are back on the mature list
     /// (`utxo/context.rs:280-291`), this send's earlier legs' outputs among
     /// them. The map never held such an output unless a read filed it since
@@ -520,6 +624,53 @@ impl PreparedSend {
         if let Err(e) = take_out(&self.lane.context, coins).await {
             log::warn!("send: an earlier leg's output was not taken back ({e})");
         }
+    }
+}
+
+/// **A leg in the submit log until its outcome is on record**
+/// (`InFlightSends::submitting`). Its return is noted once that outcome is
+/// recorded ([`Self::returned`]); dropped before then (a commit dropped
+/// mid-submit), it is noted as possibly sent, so it cannot pin every later
+/// read's floor.
+struct LoggedLeg<'a> {
+    lane: &'a Lane,
+    txid: kaspa_consensus_core::tx::TransactionId,
+    noted: bool,
+}
+
+impl<'a> LoggedLeg<'a> {
+    fn begin(lane: &'a Lane, pt: &PendingTransaction) -> Self {
+        lane.in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .submitting(pt.id(), pt.utxo_entries().keys().cloned().collect());
+        Self {
+            lane,
+            txid: pt.id(),
+            noted: false,
+        }
+    }
+
+    /// The leg's submit returned, its outcome on record: the log keeps it only
+    /// while a read that began before may need it.
+    fn returned(mut self, may_have_left: bool) {
+        self.note(may_have_left);
+    }
+
+    fn note(&mut self, may_have_left: bool) {
+        if !std::mem::replace(&mut self.noted, true) {
+            self.lane
+                .in_flight
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .submit_returned(&self.txid, may_have_left);
+        }
+    }
+}
+
+impl Drop for LoggedLeg<'_> {
+    fn drop(&mut self) {
+        self.note(true);
     }
 }
 
@@ -575,6 +726,7 @@ impl WalletEngine {
             rpc,
             payload,
             exclude,
+            None,
         )
         .await
     }
@@ -828,6 +980,7 @@ impl WalletEngine {
         rpc: Rpc,
         payload: Option<Vec<u8>>,
         exclude: &[Address],
+        anchor_key: Option<String>,
     ) -> Result<PreparedSend> {
         let priority = pinned_priority_or_refuse(priority)?;
         // Change returns to `source` (not a fresh change address): the discipline
@@ -841,6 +994,7 @@ impl WalletEngine {
             rpc,
             payload,
             exclude,
+            anchor_key,
         )
         .await
     }
@@ -864,7 +1018,11 @@ impl WalletEngine {
         rpc: Rpc,
         payload: Option<Vec<u8>>,
         exclude: &[Address],
+        anchor_key: Option<String>,
     ) -> Result<PreparedSend> {
+        // A payment is keyed by its destination; a message by its own key.
+        let payment = anchor_key.is_none();
+        let anchor_key = anchor_key.unwrap_or_else(|| destination.to_string());
         // The lane and its context are read once, together: the send is
         // built on this context and admitted by this lane.
         let lane = self.lane();
@@ -874,7 +1032,33 @@ impl WalletEngine {
         // already-watched address (the pinned source is always in the window).
         // BEFORE the snapshot below, so a coin this scan surfaces is in the
         // policy's pool.
-        self.file_from_node(&lane, vec![change.clone()]).await?;
+        //
+        // With them, the addresses of the coins a send of the same payment
+        // with no answer holds: if one was spent while the coin was off the
+        // spendable list, this read retires that send before its coin leads.
+        let mut read = vec![change.clone()];
+        for address in lane
+            .in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unknown_addresses(&anchor_key)
+        {
+            if !read.contains(&address) {
+                read.push(address);
+            }
+        }
+        self.file_from_node(&lane, read).await?;
+        // A payment that got no answer and has since landed is named before
+        // another is built: the person retrying may be about to pay twice.
+        if payment
+            && lane
+                .in_flight
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take_landed(&anchor_key, crate::wallet_sync::now_unix_ms())
+        {
+            return Err(ChainError::EarlierPaymentWentThrough);
+        }
 
         // The spend order is wallet policy (spend_policy.rs): the pinned block
         // wholly first (D-067 — input[0] identity), then up to RIDER_LIMIT of
@@ -891,6 +1075,10 @@ impl WalletEngine {
             .map(Into::into)
             .collect();
         let pinned = priority.unwrap_or_default();
+        let anchoring = anchoring_for(&lane, &anchor_key, &mature);
+        if payment && anchoring.blocked {
+            return Err(ChainError::PaymentStillSettling);
+        }
 
         // BOTH shapes are always generated, and the second generation is no
         // longer just the leg check. The pinned Generator is the only judge of
@@ -911,6 +1099,7 @@ impl WalletEngine {
             &mature,
             &pinned,
             exclude,
+            &anchoring,
             |order| {
                 generate_chain(
                     &context,
@@ -924,8 +1113,11 @@ impl WalletEngine {
             },
             || spend_floor(&context, &mature, &pinned, &change, exclude),
         )?;
+        if payment {
+            anchor_fence(&pending, &anchoring)?;
+        }
 
-        Ok(finish_prepared_send(
+        let mut prepared = finish_prepared_send(
             pending,
             &summary,
             &mature,
@@ -934,7 +1126,9 @@ impl WalletEngine {
             &destination,
             rpc,
             lane,
-        ))
+        );
+        prepared.anchor_key = anchor_key;
+        Ok(prepared)
     }
 }
 
@@ -1011,6 +1205,7 @@ fn finish_prepared_send(
         // change is unconfirmed: the pin adds it back so the user sees their
         // money immediately. Never discharge it here.
         discharge_outgoing: None,
+        anchor_key: destination.to_string(),
     }
 }
 
@@ -1157,6 +1352,25 @@ fn pinned_priority_or_refuse(priority: Vec<UtxoEntryReference>) -> Result<Vec<Ut
     Ok(priority)
 }
 
+/// **A payment with an unanswered send of the same payment conflicts with
+/// it, checked on the built chain.** The order leads with that send's coins,
+/// which the Generator consumes first; a chain that spends none of them could
+/// land beside it, so it is refused rather than sent.
+fn anchor_fence(pending: &[PendingTransaction], anchoring: &Anchoring) -> Result<()> {
+    if anchoring.first.is_empty() {
+        return Ok(());
+    }
+    let anchors: HashSet<UtxoEntryId> = anchoring.first.iter().map(|coin| coin.id()).collect();
+    let spends_one = pending
+        .iter()
+        .any(|tx| tx.utxo_entries().keys().any(|id| anchors.contains(id)));
+    if spends_one {
+        Ok(())
+    } else {
+        Err(ChainError::PaymentStillSettling)
+    }
+}
+
 fn covenant_fence(pending: &[PendingTransaction]) -> Result<()> {
     for tx in pending {
         if let Some(entry) = tx
@@ -1207,6 +1421,44 @@ fn wallet_coins_consumed(
         .collect()
 }
 
+/// **Where a build keyed `key` puts the coins of our sends of unknown fate**
+/// (`InFlightSends::anchoring`), read from `lane` against the spendable list
+/// the build is drawn from and the coins its sends in flight still spend.
+fn anchoring_for(lane: &Lane, key: &str, mature: &[UtxoEntryReference]) -> Anchoring {
+    let spendable: HashSet<UtxoEntryId> = mature.iter().map(|coin| coin.id()).collect();
+    let held_by_ours: HashSet<UtxoEntryId> = lane
+        .processor
+        .outgoing()
+        .iter()
+        .filter(|entry| !entry.value().is_accepted())
+        .flat_map(|entry| {
+            entry
+                .value()
+                .utxo_entries()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let anchoring = lane
+        .in_flight
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .anchoring(
+            key,
+            &spendable,
+            &held_by_ours,
+            crate::wallet_sync::now_unix_ms(),
+        );
+    if !anchoring.first.is_empty() {
+        log::info!(
+            "send: {} coin(s) of a send of the same payment with no answer lead the build",
+            anchoring.first.len()
+        );
+    }
+    anchoring
+}
+
 /// Which of the two generated shapes the send ships — the whole decision in one
 /// testable place, so the untestable half of `prepare_send_inner` (it needs a
 /// live `UtxoContext`) is only plumbing.
@@ -1253,19 +1505,22 @@ fn shipped_two_shape(
     mature: &[UtxoEntryReference],
     pinned: &[UtxoEntryReference],
     exclude: &[Address],
+    anchoring: &Anchoring,
     build: impl Fn(Vec<UtxoEntryReference>) -> Result<(Vec<PendingTransaction>, GeneratorSummary)>,
     floor: impl FnOnce() -> Option<u64>,
 ) -> Result<(Vec<PendingTransaction>, GeneratorSummary)> {
-    let ridden = build(spend_policy::select_spend_priority(
-        mature,
-        pinned,
-        spend_policy::RIDER_LIMIT,
-        exclude,
-    ))?;
-    let comparison = build(spend_policy::select_spend_priority(
-        mature, pinned, 0, exclude,
-    ))
-    .ok();
+    // Both shapes place the coins of our sends of unknown fate alike, so
+    // whichever ships conflicts with a send to the same destination.
+    let order = |riders| {
+        spend_policy::anchored(
+            spend_policy::select_spend_priority(mature, pinned, riders, exclude),
+            pinned,
+            &anchoring.first,
+            &anchoring.last,
+        )
+    };
+    let ridden = build(order(spend_policy::RIDER_LIMIT))?;
+    let comparison = build(order(0)).ok();
     Ok(shipped_shape(ridden, comparison, floor))
 }
 
@@ -1957,6 +2212,7 @@ impl WalletEngine {
                         rpc,
                         lane,
                         discharge_outgoing: discharge.then(|| context.clone()),
+                        anchor_key: destination.to_string(),
                     });
                 }
                 built
@@ -1993,6 +2249,7 @@ impl WalletEngine {
             rpc,
             lane,
             discharge_outgoing: discharge.then(|| context.clone()),
+            anchor_key: destination.to_string(),
         })
     }
 }
@@ -3017,7 +3274,7 @@ impl WalletEngine {
         amount_sompi: u64,
         exclude: &[Address],
     ) -> Result<Option<u64>> {
-        self.fee_preview_inner(destination, change, amount_sompi, &[], None, exclude)
+        self.fee_preview_inner(destination, change, amount_sompi, &[], None, exclude, None)
     }
 
     /// **The fee a PINNED, payload-bearing send would cost** — the messaging
@@ -3041,6 +3298,7 @@ impl WalletEngine {
     /// prices as `None` rather than as a fee for a transaction that will never
     /// be built. Signerless, stash-free and read-only, like its sibling — it
     /// may be called on every keystroke.
+    #[allow(clippy::too_many_arguments)]
     pub fn fee_preview_pinned(
         &self,
         destination: Address,
@@ -3049,18 +3307,28 @@ impl WalletEngine {
         pinned: &[UtxoEntryReference],
         payload: Option<Vec<u8>>,
         exclude: &[Address],
+        anchor_key: Option<String>,
     ) -> Result<Option<u64>> {
         // An all-covenant pin is a refusal on the real path, so it is no fee
         // here — never a number for a send that cannot happen.
         let Ok(pinned) = pinned_priority_or_refuse(pinned.to_vec()) else {
             return Ok(None);
         };
-        self.fee_preview_inner(destination, change, amount_sompi, &pinned, payload, exclude)
+        self.fee_preview_inner(
+            destination,
+            change,
+            amount_sompi,
+            &pinned,
+            payload,
+            exclude,
+            anchor_key,
+        )
     }
 
     /// The shared body of both previews: one snapshot, the same two-shape
     /// decision the prepare runs ([`shipped_two_shape`]), the same covenant
     /// fence, and the Generator's own aggregate fee.
+    #[allow(clippy::too_many_arguments)]
     fn fee_preview_inner(
         &self,
         destination: Address,
@@ -3069,16 +3337,20 @@ impl WalletEngine {
         pinned: &[UtxoEntryReference],
         payload: Option<Vec<u8>>,
         exclude: &[Address],
+        anchor_key: Option<String>,
     ) -> Result<Option<u64>> {
         if amount_sompi == 0 {
             return Ok(None);
         }
         let context = self.context();
         let mature = mature_snapshot_sync(&context)?;
+        let key = anchor_key.unwrap_or_else(|| destination.to_string());
+        let anchoring = anchoring_for(&self.lane(), &key, &mature);
         let Ok((pending, summary)) = shipped_two_shape(
             &mature,
             pinned,
             exclude,
+            &anchoring,
             |order| {
                 price_chain(
                     &context,
@@ -4424,9 +4696,14 @@ mod tests {
         // still ships, and the floor is never consulted because the decision
         // was already made. This is the 100.91 cliff, and it is why the
         // production call site says `.ok()`.
-        let (shipped, summary) = shipped_two_shape(&pool, &[], &[], build_at(100.91), || {
-            panic!("a shape that never built must not trigger a floor lookup")
-        })
+        let (shipped, summary) = shipped_two_shape(
+            &pool,
+            &[],
+            &[],
+            &Anchoring::default(),
+            build_at(100.91),
+            || panic!("a shape that never built must not trigger a floor lookup"),
+        )
         .expect("the ridden shape builds, so the send ships");
         assert_eq!(shipped.len(), 1);
         assert_eq!(summary.aggregated_utxos(), 3);
@@ -4434,9 +4711,14 @@ mod tests {
         // A RIDDEN refusal is the send's own refusal and propagates. Asking
         // for more than the pool holds refuses on both shapes; the error the
         // caller sees is the ridden one, never a swallowed `None`.
-        let far_too_much = shipped_two_shape(&pool, &[], &[], build_at(9_999_999.0), || {
-            panic!("a refused ridden shape must not reach the floor either")
-        });
+        let far_too_much = shipped_two_shape(
+            &pool,
+            &[],
+            &[],
+            &Anchoring::default(),
+            build_at(9_999_999.0),
+            || panic!("a refused ridden shape must not reach the floor either"),
+        );
         assert!(
             far_too_much.is_err(),
             "the ridden shape's failure IS the send's failure"
@@ -4446,10 +4728,17 @@ mod tests {
         // is the caller's — handed in, not computed inside — which is what
         // keeps a live `UtxoContext` out of this law entirely.
         let mut floor_asked = false;
-        let (ordinary, _) = shipped_two_shape(&pool, &[], &[], build_at(1.0), || {
-            floor_asked = true;
-            None
-        })
+        let (ordinary, _) = shipped_two_shape(
+            &pool,
+            &[],
+            &[],
+            &Anchoring::default(),
+            build_at(1.0),
+            || {
+                floor_asked = true;
+                None
+            },
+        )
         .expect("an ordinary send builds on both shapes");
         assert!(!ordinary.is_empty());
         // Whether it was asked depends on `riderless_is_candidate`, which has

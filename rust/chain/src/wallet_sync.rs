@@ -19,7 +19,7 @@
 //! module (it never sees a seed or keychain — the bridge hands it public
 //! [`Address`]es only).
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -332,6 +332,136 @@ pub(crate) struct InFlightSends {
     /// chain's later leg spends earlier legs' outputs, which the context's
     /// map never held.
     cancelled: HashMap<TransactionId, Vec<UtxoEntryReference>>,
+    /// **Every leg, logged just before its submit**, in order: what a read
+    /// withholds for the sends it cannot otherwise see ([`Self::begin_read`]).
+    /// A send whose submit starts after a read's snapshot is in neither of
+    /// the read's views then, and can be accepted, folded and purged by the
+    /// processor before the read takes its lock, leaving it in no view at
+    /// all while the answer, served before its acceptance, still lists the
+    /// coins it spent.
+    legs: BTreeMap<u64, LoggedLeg>,
+    next_leg: u64,
+    /// The floor of every read between its snapshot and its decision.
+    readers: Vec<u64>,
+    /// **Legs whose submit got no answer**: each may be on the network or
+    /// not, and nobody can say yet. A build for the same payment (the same
+    /// destination, or the same conversation for a message) spends one's
+    /// coins first, so the two conflict and at most one lands; any other build
+    /// draws them last ([`Self::anchoring`]). In memory: a relaunch forgets
+    /// them, and a retry after it is built from the coins as the node lists
+    /// them.
+    unknown: Vec<UnknownLeg>,
+    next_unknown: u64,
+    /// Sends a read of the node settled ([`Self::settled`]): an answer that no
+    /// longer lists a coin says the send landed or a conflict did, and cannot
+    /// say which, so a later `Maturity` for one is no proof it landed.
+    read_settled: HashSet<TransactionId>,
+    read_settled_order: VecDeque<TransactionId>,
+    /// Legs of unknown fate proven landed by their own transaction (a record
+    /// of it, or a read listing one of its outputs), with when: the next
+    /// build for the same payment says so once ([`Self::take_landed`]).
+    landed: VecDeque<(String, u64)>,
+    /// Legs retired on other evidence, with their key and when.
+    retired: VecDeque<(TransactionId, String, u64)>,
+}
+
+/// **How long a leg proven landed is named to the next build for the same
+/// payment, a policy:** a retry after a send with no answer comes within
+/// minutes; an hour on, another payment to the same address is meant.
+const LANDED_NOTICE_FOR_MS: u64 = 60 * 60 * 1000;
+
+/// How many legs proven landed [`InFlightSends::landed`] keeps, and how many
+/// retired legs [`InFlightSends::retired`] keeps.
+const LANDED_KEPT: usize = 64;
+
+/// How many settled-without-proof sends [`InFlightSends::read_settled`] keeps:
+/// far more than a person sends while a `Maturity` can still be queued.
+const READ_SETTLED_KEPT: usize = 1024;
+
+/// **How long a leg's earlier-leg outputs anchor builds, a policy.** No node
+/// bound exists: a submit over RPC enters a node's mempool at high priority,
+/// which never expires and is rebroadcast until accepted or the node restarts
+/// (`mining/src/mempool/model/transactions_pool.rs:354-366`,
+/// `protocol/flows/src/flow_context.rs:650-661` @ `01b532e`). Those outputs
+/// exist only once the earlier legs land; anchored on them for good, a build
+/// to the same destination would be refused for good if they never do. A leg
+/// that holds a coin of its own is anchored on it instead and is retired only
+/// on evidence ([`InFlightSends::retire_unknown`]).
+const EARLIER_ANCHOR_FOR_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// A leg's coins, largest first; ties in outpoint order.
+fn largest_first(mut coins: Vec<UtxoEntryReference>) -> Vec<UtxoEntryReference> {
+    coins.sort_by_key(|coin| {
+        let id = coin.id();
+        (
+            std::cmp::Reverse(coin.amount()),
+            id.transaction_id,
+            id.index,
+        )
+    });
+    coins
+}
+
+/// The device clock in unix ms (0 before the epoch).
+pub(crate) fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// A leg whose submit got no answer ([`InFlightSends::fate_unknown`]).
+#[derive(Debug, Clone)]
+pub(crate) struct UnknownLeg {
+    pub(crate) txid: TransactionId,
+    /// What a build for the same payment carries (`PreparedSend::anchor_key`):
+    /// the destination, or the conversation for a message.
+    pub(crate) paid_to: String,
+    /// Its inputs other than its own send's earlier legs' outputs, whether or
+    /// not the context held them when the pin cancelled it
+    /// (`context.rs:280-291` @ `01b532e`).
+    pub(crate) held: Vec<UtxoEntryReference>,
+    /// Its inputs that are its own send's earlier legs' outputs, which no
+    /// list of the context holds.
+    pub(crate) earlier: Vec<UtxoEntryReference>,
+    /// When the leg was cancelled (unix ms).
+    pub(crate) since_unix_ms: u64,
+    /// Its place among the legs registered (set by
+    /// [`InFlightSends::fate_unknown`]): a read judges only legs registered
+    /// before its snapshot.
+    pub(crate) seq: u64,
+}
+
+impl UnknownLeg {
+    fn spends(&self, coin: &UtxoEntryId) -> bool {
+        self.held
+            .iter()
+            .chain(self.earlier.iter())
+            .any(|own| own.id() == *coin)
+    }
+}
+
+/// What a build does with the coins of legs whose fate is unknown
+/// ([`InFlightSends::anchoring`]).
+#[derive(Debug, Default, Clone)]
+pub(crate) struct Anchoring {
+    /// Spent first: a leg that pays the same destination.
+    pub(crate) first: Vec<UtxoEntryReference>,
+    /// Drawn last: every other such leg.
+    pub(crate) last: Vec<UtxoEntryReference>,
+    /// A leg of the same payment holds coins and another send of ours in
+    /// flight spends every one: a build now would conflict with neither, and
+    /// both could land.
+    pub(crate) blocked: bool,
+}
+
+/// One leg as its submit began ([`InFlightSends::submitting`]).
+#[derive(Debug)]
+struct LoggedLeg {
+    txid: TransactionId,
+    inputs: Vec<UtxoEntryId>,
+    /// Its submit has returned, with the request possibly sent.
+    returned: bool,
 }
 
 /// What a reopen does with the sends a close interrupted
@@ -343,6 +473,25 @@ struct Reopen {
     accepted: Vec<TransactionId>,
     /// The coins of every leg the pin cancelled.
     cancelled: Vec<UtxoEntryReference>,
+}
+
+/// A read's place in the submit log, from its snapshot until it has decided
+/// (or failed): the log keeps every leg from its floor on until then.
+struct ReadFloor<'a> {
+    lane: &'a Lane,
+    floor: u64,
+    /// [`InFlightSends::unknown_mark`] at the snapshot.
+    unknown_before: u64,
+}
+
+impl Drop for ReadFloor<'_> {
+    fn drop(&mut self) {
+        self.lane
+            .in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .end_read(self.floor);
+    }
 }
 
 impl InFlightSends {
@@ -392,12 +541,348 @@ impl InFlightSends {
             self.accepted.insert(*txid);
         }
         let Some(send) = self.sends.remove(txid) else {
+            self.fate_seen(txid);
             return false;
         };
+        self.own_send_seen(txid, &send.spends);
         for spent in &send.spends {
             self.leave(&spent.transaction_id);
         }
         true
+    }
+
+    /// A leg's submit is about to start: log what it spends.
+    pub(crate) fn submitting(&mut self, txid: TransactionId, inputs: Vec<UtxoEntryId>) {
+        self.legs.insert(
+            self.next_leg,
+            LoggedLeg {
+                txid,
+                inputs,
+                returned: false,
+            },
+        );
+        self.next_leg += 1;
+    }
+
+    /// A leg's submit returned. One refused before its request spends nothing
+    /// and leaves the log; any other stays while a read that began before its
+    /// return may still need it.
+    pub(crate) fn submit_returned(&mut self, txid: &TransactionId, may_have_left: bool) {
+        let seq = self
+            .legs
+            .iter()
+            .rev()
+            .find(|(_, leg)| leg.txid == *txid && !leg.returned)
+            .map(|(seq, _)| *seq);
+        if let Some(seq) = seq {
+            if may_have_left {
+                if let Some(leg) = self.legs.get_mut(&seq) {
+                    leg.returned = true;
+                }
+            } else {
+                self.legs.remove(&seq);
+            }
+        }
+        self.prune();
+    }
+
+    /// **A read takes its snapshot.** Its floor is the first leg still in its
+    /// submit, or the next leg to come: every leg from the floor on is one the
+    /// snapshot may not name, and [`Self::logged_from`] withholds what it
+    /// spends. A leg that returned before the snapshot is in the snapshot's
+    /// own views. Pair with [`Self::end_read`].
+    fn begin_read(&mut self) -> u64 {
+        let floor = self
+            .legs
+            .iter()
+            .find(|(_, leg)| !leg.returned)
+            .map_or(self.next_leg, |(seq, _)| *seq);
+        self.readers.push(floor);
+        floor
+    }
+
+    /// The coins every leg logged from `floor` on spends.
+    fn logged_from(&self, floor: u64) -> impl Iterator<Item = &UtxoEntryId> {
+        self.legs
+            .range(floor..)
+            .flat_map(|(_, leg)| leg.inputs.iter())
+    }
+
+    /// The read that took `floor` has decided.
+    fn end_read(&mut self, floor: u64) {
+        if let Some(at) = self.readers.iter().position(|reader| *reader == floor) {
+            self.readers.swap_remove(at);
+        }
+        self.prune();
+    }
+
+    /// A returned leg below every read's floor is in the views of every read
+    /// to come: it leaves the log.
+    fn prune(&mut self) {
+        let lowest = self.readers.iter().min().copied();
+        self.legs
+            .retain(|seq, leg| !leg.returned || lowest.is_some_and(|floor| *seq >= floor));
+    }
+
+    /// A leg's submit got no answer and the pin cancelled it.
+    pub(crate) fn fate_unknown(&mut self, mut leg: UnknownLeg) {
+        leg.seq = self.next_unknown;
+        self.next_unknown += 1;
+        self.unknown.retain(|known| known.txid != leg.txid);
+        self.unknown.push(leg);
+    }
+
+    /// **The coins of every leg with an unknown fate, as a build keyed `key`
+    /// should offer them.** Read only, and a leg's coins lead whether or not
+    /// they are on the spendable list now: a reopen takes a cancelled leg's
+    /// coins out until its read files them again, and a rebuilt lane holds none
+    /// until its first read. A coin spent while off the list raises no record,
+    /// so a build for the payment reads the leg's addresses first
+    /// ([`Self::unknown_addresses`]) and that read retires a spent leg once the
+    /// coin is older than the pin's maturity window ([`Self::retire_unknown`]):
+    /// until then a spent coin costs refusals, never a second payment. Other
+    /// evidence retires one sooner ([`Self::coins_spent`],
+    /// [`Self::fate_seen`]). Never a coin another send of ours in flight spends
+    /// (`spent_by_ours`, untagged): leading with it would conflict with that
+    /// send, which may be a payment already made; a leg whose every coin such a
+    /// send holds leads with nothing and marks the build `blocked`. A leg leads
+    /// with its earlier-leg outputs only when it holds no coin of its own, and
+    /// only for [`EARLIER_ANCHOR_FOR_MS`]. The first coin of each leg leads
+    /// before the rest, so a build reaches every leg's coin before any leg's
+    /// second one; within a leg the largest leads, so one coin usually covers
+    /// the build and the order never depends on the processor's map. Other
+    /// keys' legs trail with their listed coins.
+    pub(crate) fn anchoring(
+        &self,
+        key: &str,
+        spendable: &HashSet<UtxoEntryId>,
+        spent_by_ours: &HashSet<UtxoEntryId>,
+        now_unix_ms: u64,
+    ) -> Anchoring {
+        let mut ours: HashSet<UtxoEntryId> = spent_by_ours.clone();
+        ours.extend(
+            self.taken
+                .values()
+                .filter(|record| !record.is_accepted())
+                .flat_map(|record| record.utxo_entries().keys().cloned().collect::<Vec<_>>()),
+        );
+        let free = |coin: &&UtxoEntryReference| !ours.contains(&coin.id());
+        let mut anchoring = Anchoring::default();
+        let mut each: Vec<Vec<UtxoEntryReference>> = Vec::new();
+        for leg in &self.unknown {
+            if leg.paid_to != key {
+                anchoring.last.extend(
+                    leg.held
+                        .iter()
+                        .filter(|coin| spendable.contains(&coin.id()))
+                        .filter(free)
+                        .cloned(),
+                );
+                continue;
+            }
+            let own: Vec<UtxoEntryReference> = leg.held.iter().filter(free).cloned().collect();
+            if !own.is_empty() {
+                each.push(largest_first(own));
+            } else if !leg.held.is_empty() {
+                anchoring.blocked = true;
+            } else if now_unix_ms.saturating_sub(leg.since_unix_ms) < EARLIER_ANCHOR_FOR_MS {
+                let earlier: Vec<UtxoEntryReference> =
+                    leg.earlier.iter().filter(free).cloned().collect();
+                if !earlier.is_empty() {
+                    each.push(largest_first(earlier));
+                }
+            }
+        }
+        anchoring
+            .first
+            .extend(each.iter().filter_map(|coins| coins.first().cloned()));
+        anchoring
+            .first
+            .extend(each.iter().flat_map(|coins| coins.iter().skip(1).cloned()));
+        anchoring
+    }
+
+    /// **Legs whose fate a read of the node settles**, under the read's lock:
+    /// one of their coins is gone from the answer (`spent`: asked for, not
+    /// listed, old enough for any synced node's index to list it, and created
+    /// by no send of ours that may still land), so the leg landed or a
+    /// conflict did and it can never land again. Only legs registered before
+    /// the read's snapshot (`before`) are judged: a later one's coins may
+    /// postdate the answer. A leg with only earlier-leg outputs and none of
+    /// its own also goes once those outputs no longer anchor it.
+    pub(crate) fn retire_unknown(
+        &mut self,
+        spent: impl Fn(&UtxoEntryReference) -> bool,
+        before: u64,
+        now_unix_ms: u64,
+    ) {
+        self.retire(
+            |leg| {
+                !(leg.seq < before && leg.held.iter().chain(leg.earlier.iter()).any(&spent))
+                    && (!leg.held.is_empty()
+                        || now_unix_ms.saturating_sub(leg.since_unix_ms) < EARLIER_ANCHOR_FOR_MS)
+            },
+            now_unix_ms,
+        );
+    }
+
+    /// Keep the legs `keep` holds; the rest are retired, and kept by txid a
+    /// while in case a record of their own transaction follows.
+    fn retire(&mut self, keep: impl Fn(&UnknownLeg) -> bool, now: u64) {
+        let (kept, gone): (Vec<UnknownLeg>, Vec<UnknownLeg>) = std::mem::take(&mut self.unknown)
+            .into_iter()
+            .partition(|leg| keep(leg));
+        self.unknown = kept;
+        for leg in gone {
+            self.retired.push_back((leg.txid, leg.paid_to, now));
+        }
+        while self.retired.len() > LANDED_KEPT {
+            self.retired.pop_front();
+        }
+    }
+
+    /// A leg's own transaction was seen on the network: it landed, whether
+    /// or not other evidence retired it first (a frame's removals are handled
+    /// before its additions).
+    fn proven_landed(&mut self, landed: impl Fn(&TransactionId) -> bool, now: u64) {
+        let mut keys: Vec<String> = Vec::new();
+        self.unknown.retain(|leg| {
+            if landed(&leg.txid) {
+                keys.push(leg.paid_to.clone());
+                return false;
+            }
+            true
+        });
+        self.retired.retain(|(txid, key, at)| {
+            if landed(txid) && now.saturating_sub(*at) < LANDED_NOTICE_FOR_MS {
+                keys.push(key.clone());
+                return false;
+            }
+            true
+        });
+        for key in keys {
+            Self::note_landed(&mut self.landed, &key, now);
+        }
+    }
+
+    /// The pin raised an `External` record for these coins: a frame removed
+    /// them from the map with no send of ours spending them
+    /// (`context.rs:686-689`). A leg of unknown fate that spends one landed,
+    /// or a conflict did, and it can never land again.
+    fn coins_spent(&mut self, coins: &[UtxoEntryId]) {
+        self.retire(
+            |leg| !coins.iter().any(|coin| leg.spends(coin)),
+            now_unix_ms(),
+        );
+    }
+
+    /// A send of ours lost to a conflict: a leg of unknown fate whose
+    /// earlier-leg outputs it was to create can never land.
+    fn creator_lost(&mut self, txid: &TransactionId) {
+        self.retire(
+            |leg| {
+                !leg.earlier
+                    .iter()
+                    .any(|coin| coin.id().transaction_id == *txid)
+            },
+            now_unix_ms(),
+        );
+    }
+
+    /// Our record of a submit that returned, if we still keep it: whether it
+    /// is tagged accepted (the tag is the processor's own, shared).
+    fn returned_tagged(&self, txid: &TransactionId) -> Option<bool> {
+        self.taken.get(txid).map(|record| record.is_accepted())
+    }
+
+    /// The addresses of the coins every leg of unknown fate keyed `key` holds:
+    /// a build for that payment reads them, so a read can settle such a leg
+    /// before its coin leads again ([`Self::retire_unknown`]).
+    pub(crate) fn unknown_addresses(&self, key: &str) -> Vec<Address> {
+        let mut seen = HashSet::new();
+        self.unknown
+            .iter()
+            .filter(|leg| leg.paid_to == key)
+            .flat_map(|leg| leg.held.iter().chain(leg.earlier.iter()))
+            .filter_map(|coin| coin.utxo.address.clone())
+            .filter(|address| seen.insert(address.clone()))
+            .collect()
+    }
+
+    /// Whether `txid` is a send of ours the fold still keeps.
+    fn tracks(&self, txid: &TransactionId) -> bool {
+        self.taken.contains_key(txid)
+            || self.sends.contains_key(txid)
+            || self.read_settled.contains(txid)
+    }
+
+    /// The next leg of unknown fate's place: a read taken now judges only the
+    /// legs before it.
+    fn unknown_mark(&self) -> u64 {
+        self.next_unknown
+    }
+
+    /// A record of `txid` from the network reached the fold: if it is a leg
+    /// with an unknown fate, it landed.
+    fn fate_seen(&mut self, txid: &TransactionId) {
+        self.proven_landed(|leg| leg == txid, now_unix_ms());
+    }
+
+    /// A send of ours with this txid is in flight or settled: a leg with the
+    /// same txid is that send now (a retry built the same way from the same
+    /// coins has the same txid: a txid leaves out signatures), which proves
+    /// nothing about the first submit. If it was accepted, every leg it
+    /// conflicts with cannot land any more.
+    pub(crate) fn own_send_seen(
+        &mut self,
+        txid: &TransactionId,
+        accepted_spends: &[TransactionOutpoint],
+    ) {
+        self.unknown.retain(|leg| leg.txid != *txid);
+        self.retire_spent_by(accepted_spends);
+    }
+
+    fn retire_spent_by(&mut self, accepted_spends: &[TransactionOutpoint]) {
+        self.retire(
+            |leg| {
+                !accepted_spends
+                    .iter()
+                    .any(|spent| leg.spends(&UtxoEntryId::from(*spent)))
+            },
+            now_unix_ms(),
+        );
+    }
+
+    /// A read listed an output of these transactions: the node's index holds
+    /// accepted transactions only, so each leg of unknown fate among them
+    /// landed.
+    pub(crate) fn outputs_listed(&mut self, txids: &HashSet<TransactionId>) {
+        self.proven_landed(|leg| txids.contains(leg), now_unix_ms());
+    }
+
+    fn note_landed(landed: &mut VecDeque<(String, u64)>, key: &str, now: u64) {
+        if key.is_empty() {
+            return;
+        }
+        landed.push_back((key.to_string(), now));
+        while landed.len() > LANDED_KEPT {
+            landed.pop_front();
+        }
+    }
+
+    /// Whether a leg of the payment `key` was proven landed within
+    /// [`LANDED_NOTICE_FOR_MS`]; answered once.
+    pub(crate) fn take_landed(&mut self, key: &str, now: u64) -> bool {
+        let mut found = false;
+        self.landed.retain(|(paid_to, at)| {
+            let live = now.saturating_sub(*at) < LANDED_NOTICE_FOR_MS;
+            if live && paid_to == key {
+                found = true;
+                return false;
+            }
+            live
+        });
+        found
     }
 
     /// Keep the pin's record of a send it kept after the submit.
@@ -443,9 +928,38 @@ impl InFlightSends {
     /// the sends it spends from: a conflict that landed proves nothing about
     /// them.
     fn settled(&mut self, txid: &TransactionId) {
+        if self.read_settled.insert(*txid) {
+            self.read_settled_order.push_back(*txid);
+            // Bounded by count: a `Maturity` raised before the processor purged
+            // the send can still be queued after the purge.
+            while self.read_settled_order.len() > READ_SETTLED_KEPT {
+                if let Some(oldest) = self.read_settled_order.pop_front() {
+                    self.read_settled.remove(&oldest);
+                }
+            }
+        }
+        self.done_with(txid);
+    }
+
+    /// Whether a read settled `txid` ([`Self::read_settled`]).
+    fn was_read_settled(&self, txid: &TransactionId) -> bool {
+        self.read_settled.contains(txid)
+    }
+
+    /// A send that can no longer land, or whose fate is the acceptance
+    /// tracker's to say: it no longer counts, and its records are gone.
+    fn done_with(&mut self, txid: &TransactionId) {
+        self.own_send_seen(txid, &[]);
         self.sends.remove(txid);
         self.taken.remove(txid);
         self.accepted.remove(txid);
+    }
+
+    /// Whether another send of ours, of unknown fate, spends one of `coins`.
+    fn unknown_spends_any(&self, coins: &[UtxoEntryId]) -> bool {
+        self.unknown
+            .iter()
+            .any(|leg| coins.iter().any(|coin| leg.spends(coin)))
     }
 
     #[cfg(test)]
@@ -1087,7 +1601,7 @@ impl WalletEngine {
     /// One `UtxoContext` = one account (P1 §0.8). `store_path` is an app-private
     /// file for the activity log (INV-3).
     pub fn new(rpc: Rpc, network_id: NetworkId, store_path: PathBuf) -> Result<Self> {
-        let lane = Lane::new(1, &rpc, network_id);
+        let lane = Lane::new(1, &rpc, network_id, Default::default());
         let store = ActivityStore::load(store_path.clone())?;
         let (events, _) = broadcast::channel(256);
         Ok(Self {
@@ -1959,7 +2473,14 @@ impl WalletEngine {
         });
 
         let number = self.inner.lanes_built.fetch_add(1, Ordering::SeqCst) + 1;
-        let lane = Lane::new(number, &self.inner.rpc, self.inner.network_id);
+        // The old lane's sends in flight are this lane's too: its reads keep
+        // their coins out until they land or can no longer land.
+        let lane = Lane::new(
+            number,
+            &self.inner.rpc,
+            self.inner.network_id,
+            old.in_flight.clone(),
+        );
         *self
             .inner
             .lane
@@ -2074,8 +2595,13 @@ impl WalletEngine {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .reopen();
+        // A send a replaced lane took belongs to that lane's context: it is
+        // not handed to this processor, and this lane's reads judge it from
+        // the node's answer instead ([`Self::file_from_node`]).
         for record in &reopen.taken {
-            lane.processor.register_outgoing_transaction(record.clone());
+            if *record.originating_context() == lane.context {
+                lane.processor.register_outgoing_transaction(record.clone());
+            }
         }
         for txid in &reopen.accepted {
             lane.context.remove_outgoing_transaction(txid);
@@ -2166,12 +2692,25 @@ impl WalletEngine {
         lane.context.register_addresses(&addresses).await?;
         let asked: HashSet<Address> = addresses.iter().cloned().collect();
         // Our sends as they stood before the request. A record's tag is shared
-        // with the processor's copy, so it is read now, not later.
-        let returned = lane
-            .in_flight
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .returned();
+        // with the processor's copy, so it is read now, not later. The read's
+        // floor in the submit log is taken under the same lock: every leg not
+        // returned by then, or logged after, is withheld at the decision.
+        let (returned, read) = {
+            let mut in_flight = lane
+                .in_flight
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let floor = in_flight.begin_read();
+            let unknown_before = in_flight.unknown_mark();
+            (
+                in_flight.returned(),
+                ReadFloor {
+                    lane,
+                    floor,
+                    unknown_before,
+                },
+            )
+        };
         let before: Vec<OutgoingTransaction> = lane
             .processor
             .outgoing()
@@ -2203,12 +2742,37 @@ impl WalletEngine {
                     "the processor's notification lock was not free inside {LANE_STEP_WITHIN:?}"
                 ))
             })?;
+        // A settled send is tagged at the newest score the processor has
+        // reached or been handed, never at the one read before the lock: the
+        // pin purges a tagged record a hundred DAA after its tag
+        // (`processor.rs:336-349`), and ticks queued behind a stalled handler
+        // would otherwise purge it before its own frame arrives.
+        // A coin this old is in every synced node's index; a younger one may
+        // be missing from a node that trails (the pin's own maturity period).
+        let indexed_after = lane
+            .processor
+            .network_params()
+            .map(|params| params.user_transaction_maturity_period_daa())
+            .unwrap_or(u64::MAX / 2);
+        let tag_daa_score = lane
+            .processor
+            .current_daa_score()
+            .unwrap_or(current_daa_score)
+            .max(current_daa_score)
+            .max(lane.newest_admitted_daa());
         let unspent: HashSet<UtxoEntryId> = entries
             .iter()
             .map(|entry| UtxoEntryId::new(entry.outpoint.transaction_id, entry.outpoint.index))
             .collect();
+        let listed: HashSet<TransactionId> = unspent.iter().map(|id| id.transaction_id).collect();
         let mut may_land: HashSet<TransactionId> = HashSet::new();
-        let mut held: HashSet<UtxoEntryId> = HashSet::new();
+        let mut held: HashSet<UtxoEntryId> = lane
+            .in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .logged_from(read.floor)
+            .cloned()
+            .collect();
         for record in before.iter().chain(returned.values()) {
             may_land.insert(record.id());
             held.extend(record.utxo_entries().keys().cloned());
@@ -2225,8 +2789,37 @@ impl WalletEngine {
                 judged.insert(txid, record.clone());
             }
         }
+        // A send a replaced lane took is in no processor this lane reads: it
+        // is judged from the answer alone, like one this processor holds
+        // untagged.
+        for (txid, record) in &returned {
+            if *record.originating_context() != lane.context && !landed_before.contains(txid) {
+                judged.entry(*txid).or_insert_with(|| record.clone());
+            }
+        }
         for txid in &landed_before {
             may_land.remove(txid);
+        }
+        {
+            let mut in_flight = lane
+                .in_flight
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            in_flight.outputs_listed(&listed);
+            in_flight.retire_unknown(
+                |coin| {
+                    let id = coin.id();
+                    coin.utxo
+                        .address
+                        .as_ref()
+                        .is_some_and(|address| asked.contains(address))
+                        && !unspent.contains(&id)
+                        && !may_land.contains(&id.transaction_id)
+                        && coin.block_daa_score().saturating_add(indexed_after) <= current_daa_score
+                },
+                read.unknown_before,
+                now_unix_ms(),
+            );
         }
         let seen_accepted = lane
             .in_flight
@@ -2266,7 +2859,13 @@ impl WalletEngine {
                     continue;
                 };
                 may_land.remove(&txid);
-                record.tag_as_accepted_at_daa_score(current_daa_score);
+                // Recorded before the tag, so a fold that sees the tag also
+                // sees that a read set it ([`Self::proves_landed`]).
+                lane.in_flight
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .settled(&txid);
+                record.tag_as_accepted_at_daa_score(tag_daa_score);
                 lane.context.remove_outgoing_transaction(&txid);
                 if let Err(e) = lane
                     .context
@@ -2275,10 +2874,6 @@ impl WalletEngine {
                 {
                     self.emit_error(&e.to_string());
                 }
-                lane.in_flight
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .settled(&txid);
                 settled += 1;
             }
         }
@@ -2305,6 +2900,196 @@ impl WalletEngine {
             );
         }
         Ok(())
+    }
+
+    /// **Whether a `Maturity` of a send of ours proves it landed.** The pin
+    /// raises one for every send spending a coin a frame removed, whoever
+    /// spent it, with an accepted score and no tag (`context.rs:631-660` @
+    /// `01b532e`); the one raised for the send's own output arriving tags it
+    /// (`:577-629`). Judged once the frame is wholly handled (the handler
+    /// holds the notification lock's write side for a whole frame, removals
+    /// before additions, `processor.rs:637-638`):
+    /// - tagged by the frame, not by a read of ours: it landed;
+    /// - else a coin it spends still in the map means a conflict spent
+    ///   another: it can never land. Its records go and those coins return to
+    ///   the spendable list;
+    /// - else every coin it spends is gone. Shared with another send of ours
+    ///   of unknown fate, or settled by a read, which of them landed is the
+    ///   acceptance tracker's to say: it is tagged so the pin purges it, and
+    ///   its row stays as it was. Alone, it landed.
+    ///
+    /// A record that is not a send of ours, or that the processor no longer
+    /// holds, is folded as it comes.
+    async fn proves_landed(&self, lane: &Lane, record: &TransactionRecord) -> bool {
+        if !matches!(
+            record.transaction_data(),
+            TransactionData::Outgoing { .. } | TransactionData::Batch { .. }
+        ) {
+            return true;
+        }
+        let txid = *record.id();
+        let quiet =
+            tokio::time::timeout(LANE_STEP_WITHIN, lane.processor.notification_lock()).await;
+        let outgoing = lane
+            .processor
+            .outgoing()
+            .get(&txid)
+            .map(|entry| entry.value().clone());
+        // The tag is read before the record of reads: a read records its
+        // settle before it tags.
+        let tagged = outgoing.as_ref().is_some_and(|record| record.is_accepted());
+        let (read_settled, tracked) = {
+            let in_flight = lane
+                .in_flight
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            (in_flight.was_read_settled(&txid), in_flight.tracks(&txid))
+        };
+        let Some(outgoing) = outgoing else {
+            // Gone from the processor. Cleared by a close, it is still in our
+            // record of the submits that returned: the reopen hands it back
+            // and its read judges it, so nothing changes here. Purged after a
+            // read settled it, nothing here says whether it landed: a send we
+            // keep is not folded and no longer counts, and its row is the
+            // acceptance tracker's to settle.
+            let mut in_flight = lane
+                .in_flight
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            // Our copy shares its tag. Tagged, only its own frame can have set
+            // it (a read's settle drops our copy first): it landed, and leaving
+            // it hands the context record to the next discharge. Untagged, a
+            // close cleared it, and the reopen hands it back to be judged.
+            if let Some(tagged) = in_flight.returned_tagged(&txid) {
+                return tagged && !read_settled;
+            }
+            if tracked {
+                in_flight.done_with(&txid);
+                return false;
+            }
+            return true;
+        };
+        // Tagged by its own frame (the output arriving): it landed.
+        if tagged && !read_settled {
+            return true;
+        }
+        let Ok(_quiet) = quiet else {
+            // Untagged, it is judged by the next read that asks its addresses
+            // (the reopen asks all of them); settled by a read, its row stays
+            // as it was.
+            log::warn!(
+                "wallet-sync: the processor's notification lock was not free inside \
+                 {LANE_STEP_WITHIN:?}; send {txid}'s Maturity is left to the next read"
+            );
+            return !tracked;
+        };
+        let coins: Vec<UtxoEntryReference> = outgoing.utxo_entries().values().cloned().collect();
+        let mut held = Vec::new();
+        for coin in &coins {
+            if lane
+                .context
+                .update(coin.clone(), 0, false)
+                .await
+                .unwrap_or(false)
+            {
+                held.push(coin.clone());
+            }
+        }
+        if !held.is_empty() {
+            // A coin another send of ours still spends stays with that send.
+            let spent_elsewhere: HashSet<UtxoEntryId> = lane
+                .processor
+                .outgoing()
+                .iter()
+                .filter(|entry| *entry.key() != txid)
+                .flat_map(|entry| {
+                    entry
+                        .value()
+                        .utxo_entries()
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            let held: Vec<UtxoEntryReference> = held
+                .into_iter()
+                .filter(|coin| !spent_elsewhere.contains(&coin.id()))
+                .collect();
+            lane.processor.cancel_outgoing_transaction(txid);
+            lane.context.remove_outgoing_transaction(&txid);
+            // Off the mature list since the register, in the map still:
+            // `remove` sheds the map entry, `insert` files it on both.
+            if let Err(e) = lane.context.remove(held.clone()).await {
+                self.emit_error(&e.to_string());
+            }
+            for coin in &held {
+                if let Err(e) = lane.context.insert(coin.clone(), 0, true).await {
+                    self.emit_error(&e.to_string());
+                }
+            }
+            {
+                let mut in_flight = lane
+                    .in_flight
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                in_flight.done_with(&txid);
+                in_flight.creator_lost(&txid);
+            }
+            if let Err(e) = lane.context.update_balance().await {
+                self.emit_error(&e.to_string());
+            }
+            log::info!(
+                "wallet-sync: send {txid} lost to a conflict; purged, {} coin(s) spendable again",
+                held.len()
+            );
+            return false;
+        }
+        let ids: Vec<UtxoEntryId> = coins.iter().map(|coin| coin.id()).collect();
+        let shared = lane
+            .in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .unknown_spends_any(&ids)
+            || lane.processor.outgoing().iter().any(|entry| {
+                *entry.key() != txid
+                    && entry
+                        .value()
+                        .utxo_entries()
+                        .keys()
+                        .any(|coin| ids.contains(coin))
+            });
+        // A read may have settled it while its coins were checked.
+        let read_settled = read_settled
+            || lane
+                .in_flight
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .was_read_settled(&txid);
+        if shared || read_settled {
+            // Our own tag proves nothing: recorded beside a read's before it
+            // is set, so a later `Maturity` inside the purge window is not
+            // read as proof.
+            lane.in_flight
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .settled(&txid);
+            if !outgoing.is_accepted() {
+                if let Some(daa) = lane.processor.current_daa_score() {
+                    outgoing.tag_as_accepted_at_daa_score(daa);
+                }
+            }
+            log::info!(
+                "wallet-sync: send {txid}'s coins were spent, and another send of ours spends \
+                 them too or a read settled it; its row waits for the acceptance tracker"
+            );
+            return false;
+        }
+        if !outgoing.is_accepted() {
+            if let Some(daa) = lane.processor.current_daa_score() {
+                outgoing.tag_as_accepted_at_daa_score(daa);
+            }
+        }
+        true
     }
 
     /// Fold one transaction record into the activity store and publish the
@@ -2485,6 +3270,23 @@ impl WalletEngine {
                 });
             }
             Events::Pending { record } => {
+                {
+                    let mut in_flight = lane
+                        .in_flight
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    if is_own_send(&record) {
+                        in_flight.own_send_seen(record.id(), &[]);
+                    } else {
+                        in_flight.fate_seen(record.id());
+                    }
+                    // A send of ours whose output this processor files as it
+                    // arrives, with no record of its own (a replaced lane took
+                    // it): it landed.
+                    if !is_own_send(&record) && in_flight.tracks(record.id()) {
+                        in_flight.leave(record.id());
+                    }
+                }
                 if is_own_send(&record) {
                     let ours: HashSet<Address> = addresses.iter().cloned().collect();
                     lane.in_flight
@@ -2495,13 +3297,31 @@ impl WalletEngine {
                 self.fold_record(record, change_set);
             }
             Events::Maturity { record } => {
+                if let TransactionData::External { utxo_entries, .. } = record.transaction_data() {
+                    let spent: Vec<UtxoEntryId> = utxo_entries
+                        .iter()
+                        .map(|utxo| UtxoEntryId::new(*record.id(), utxo.index))
+                        .collect();
+                    lane.in_flight
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .coins_spent(&spent);
+                }
+                if self.proves_landed(lane, &record).await {
+                    lane.in_flight
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .leave(record.id());
+                    self.fold_record(record, change_set);
+                }
+            }
+            Events::Discovery { record } => {
                 lane.in_flight
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .leave(record.id());
-                self.fold_record(record, change_set);
+                    .fate_seen(record.id());
+                self.fold_record(record, change_set)
             }
-            Events::Discovery { record } => self.fold_record(record, change_set),
             Events::Reorg { record } => {
                 log::info!("wallet-sync: reorg — removing tx {}", record.id());
                 {
@@ -2579,6 +3399,286 @@ impl WalletEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A leg of unknown fate leads a build to its own destination and trails
+    /// any other, and is retired only on evidence**: a read's answer that no
+    /// longer lists one of its coins, a record of it reaching the fold (it
+    /// landed), or a send of ours that spends its coins accepted. A coin off
+    /// the spendable list for a while (a reopen, a rebuild, a send of ours
+    /// holding it) retires nothing, and neither does time: a node keeps a
+    /// submitted transaction until it is accepted. Only a leg whose own coins
+    /// are all gone leads with its earlier legs' outputs, and only for a
+    /// policy's while.
+    #[test]
+    fn a_leg_of_unknown_fate_is_retired_only_on_evidence() {
+        let id = |n: u8| TransactionId::from_bytes([n; 32]);
+        let coin = |n: u8| {
+            UtxoEntryReference::from(kaspa_rpc_core::RpcUtxosByAddressesEntry {
+                address: None,
+                outpoint: kaspa_rpc_core::RpcTransactionOutpoint {
+                    transaction_id: id(n),
+                    index: 0,
+                },
+                utxo_entry: kaspa_rpc_core::RpcUtxoEntry::new(
+                    1,
+                    Default::default(),
+                    0,
+                    false,
+                    None,
+                ),
+            })
+        };
+        let leg = |txid: u8, paid_to: &str, held: Vec<u8>, earlier: Vec<u8>| UnknownLeg {
+            txid: id(txid),
+            paid_to: paid_to.to_string(),
+            held: held.into_iter().map(coin).collect(),
+            earlier: earlier.into_iter().map(coin).collect(),
+            since_unix_ms: 1_000,
+            seq: 0,
+        };
+        let ids = |coins: &[UtxoEntryReference]| -> Vec<UtxoEntryId> {
+            coins.iter().map(|c| c.id()).collect()
+        };
+        let all: HashSet<UtxoEntryId> = [11, 12, 13].map(|n| coin(n).id()).into();
+        let now = 2_000;
+        let mut sends = InFlightSends::default();
+        sends.fate_unknown(leg(1, "A", vec![11], vec![]));
+        sends.fate_unknown(leg(2, "B", vec![12], vec![]));
+        sends.fate_unknown(leg(3, "A", vec![], vec![21]));
+
+        let none: HashSet<UtxoEntryId> = HashSet::new();
+        let to_a = sends.anchoring("A", &all, &none, now);
+        assert_eq!(ids(&to_a.first), ids(&[coin(11), coin(21)]));
+        assert_eq!(ids(&to_a.last), ids(&[coin(12)]));
+
+        // Coin 11 off the list for a while (a reopen took it out until its
+        // read files it again): it still leads, and nothing is retired.
+        let without_11: HashSet<UtxoEntryId> = [12, 13].map(|n| coin(n).id()).into();
+        assert_eq!(
+            ids(&sends.anchoring("A", &without_11, &none, now).first),
+            ids(&[coin(11), coin(21)])
+        );
+        assert_eq!(
+            sends.unknown.len(),
+            3,
+            "a coin briefly off the list retired a leg"
+        );
+        // Spent by a send of ours in flight, it never leads: that send may be
+        // a payment already made.
+        let ours: HashSet<UtxoEntryId> = [11].map(|n| coin(n).id()).into();
+        assert_eq!(
+            ids(&sends.anchoring("A", &all, &ours, now).first),
+            ids(&[coin(21)])
+        );
+        // That leg then anchors nothing, and a payment waits for it.
+        assert!(sends.anchoring("A", &all, &ours, now).blocked);
+        assert!(!sends.anchoring("A", &all, &none, now).blocked);
+        assert!(!sends.anchoring("B", &all, &ours, now).blocked);
+        // A read judges only the legs registered before its snapshot.
+        let mark = sends.unknown_mark();
+        sends.fate_unknown(leg(8, "A", vec![14], vec![]));
+        sends.retire_unknown(|c| c.id() == coin(14).id(), mark, now);
+        assert!(sends.unknown.iter().any(|l| l.txid == id(8)));
+        sends.retire_unknown(|c| c.id() == coin(14).id(), sends.unknown_mark(), now);
+        assert!(sends.unknown.iter().all(|l| l.txid != id(8)));
+
+        // Time alone retires a leg that holds a coin of its own: never.
+        let much_later = now + EARLIER_ANCHOR_FOR_MS * 10;
+        sends.retire_unknown(|_| false, u64::MAX, much_later);
+        assert!(sends.unknown.iter().any(|l| l.txid == id(1)));
+        assert!(sends.unknown.iter().any(|l| l.txid == id(2)));
+        // A leg with only earlier-leg outputs stops leading after the policy.
+        assert!(sends.unknown.iter().all(|l| l.txid != id(3)));
+        sends.fate_unknown(leg(3, "A", vec![], vec![21]));
+
+        // A read's answer no longer lists leg 2's coin: its fate is known.
+        sends.retire_unknown(|c| c.id() == coin(12).id(), u64::MAX, now);
+        assert!(sends.unknown.iter().all(|l| l.txid != id(2)));
+
+        // Leg 1 landed: its own record reached the fold.
+        sends.fate_seen(&id(1));
+        assert_eq!(
+            ids(&sends.anchoring("A", &all, &none, now).first),
+            ids(&[coin(21)])
+        );
+
+        // A send of ours spending leg 3's coin was accepted.
+        sends.own_send_seen(&id(9), &[TransactionOutpoint::new(id(21), 0)]);
+        assert!(sends.unknown.is_empty());
+
+        // A leg with coins of its own on the list leads with those alone.
+        sends.fate_unknown(leg(5, "A", vec![11, 12], vec![22]));
+        assert_eq!(
+            ids(&sends.anchoring("A", &all, &none, now).first),
+            ids(&[coin(11), coin(12)])
+        );
+        // Two legs to one key: one coin of each leads before the rest.
+        sends.fate_unknown(leg(6, "A", vec![13], vec![]));
+        assert_eq!(
+            ids(&sends.anchoring("A", &all, &none, now).first),
+            ids(&[coin(11), coin(13), coin(12)])
+        );
+        // A frame spent leg 6's coin with no send of ours (`External`).
+        sends.coins_spent(&[coin(13).id()]);
+        assert!(sends.unknown.iter().all(|l| l.txid != id(6)));
+        // The send that was to create leg 7's earlier-leg output lost.
+        sends.fate_unknown(leg(7, "A", vec![], vec![23]));
+        sends.creator_lost(&id(23));
+        assert!(sends.unknown.iter().all(|l| l.txid != id(7)));
+    }
+
+    /// **A leg proven landed is named to the next build for its payment once,
+    /// inside its window; the records keep their bound.** Proof may come
+    /// before or after other evidence retired the leg.
+    #[test]
+    fn a_landed_notice_holds_for_its_window_once_and_the_records_keep_their_bound() {
+        let id = |n: u8| TransactionId::from_bytes([n; 32]);
+        let leg = |txid: u8| UnknownLeg {
+            txid: id(txid),
+            paid_to: "A".to_string(),
+            held: Vec::new(),
+            earlier: Vec::new(),
+            since_unix_ms: 0,
+            seq: 0,
+        };
+        let t0 = 1_000_000;
+        let mut sends = InFlightSends::default();
+
+        // Proven while still unknown: named once, up to the window's last ms.
+        sends.fate_unknown(leg(1));
+        sends.proven_landed(|t| *t == id(1), t0);
+        assert!(!sends.take_landed("B", t0));
+        assert!(sends.take_landed("A", t0 + LANDED_NOTICE_FOR_MS - 1));
+        assert!(!sends.take_landed("A", t0 + LANDED_NOTICE_FOR_MS - 1));
+        sends.fate_unknown(leg(2));
+        sends.proven_landed(|t| *t == id(2), t0);
+        assert!(!sends.take_landed("A", t0 + LANDED_NOTICE_FOR_MS));
+        // The window is an hour: a retry 59 minutes on is still told.
+        sends.fate_unknown(leg(5));
+        sends.proven_landed(|t| *t == id(5), t0);
+        assert!(sends.take_landed("A", t0 + 59 * 60 * 1000));
+
+        // Proven after other evidence retired it: the same, inside the
+        // window from the retirement.
+        sends.fate_unknown(leg(3));
+        sends.retire(|_| false, t0);
+        sends.proven_landed(|t| *t == id(3), t0 + LANDED_NOTICE_FOR_MS - 1);
+        assert!(sends.take_landed("A", t0 + LANDED_NOTICE_FOR_MS - 1));
+        sends.fate_unknown(leg(4));
+        sends.retire(|_| false, t0);
+        sends.proven_landed(|t| *t == id(4), t0 + LANDED_NOTICE_FOR_MS);
+        assert!(!sends.take_landed("A", t0 + LANDED_NOTICE_FOR_MS));
+
+        // Our own send with a leg's txid is that leg now: no news, and
+        // nothing kept to be proven later.
+        sends.fate_unknown(leg(6));
+        sends.own_send_seen(&id(6), &[]);
+        assert!(sends.unknown.is_empty());
+        sends.proven_landed(|t| *t == id(6), t0);
+        assert!(!sends.take_landed("A", t0));
+
+        // Both records keep the newest LANDED_KEPT.
+        let keyed = |txid: u8| UnknownLeg {
+            paid_to: format!("K{txid}"),
+            ..leg(txid)
+        };
+        let mut sends = InFlightSends::default();
+        for n in 0..=LANDED_KEPT as u8 {
+            sends.fate_unknown(keyed(n));
+        }
+        sends.retire(|_| false, t0);
+        assert_eq!(sends.retired.len(), LANDED_KEPT);
+        assert!(sends.retired.iter().all(|(txid, _, _)| *txid != id(0)));
+        sends.fate_unknown(keyed(0));
+        sends.proven_landed(|_| true, t0);
+        assert!(sends.retired.is_empty() && sends.unknown.is_empty());
+        assert_eq!(sends.landed.len(), LANDED_KEPT);
+        // Noted in order: the unknown leg first, then the retired ones.
+        assert!(
+            !sends.take_landed("K0", t0),
+            "the oldest kept past the bound"
+        );
+        assert!(sends.take_landed("K1", t0) && sends.take_landed("K64", t0));
+    }
+
+    /// **The record of sends settled without proof keeps the newest
+    /// [`READ_SETTLED_KEPT`].** A `Maturity` raised before the processor
+    /// purged such a send can still be queued after the purge, so presence in
+    /// the processor is no bound; count is.
+    #[test]
+    fn the_settled_record_keeps_the_newest_by_count() {
+        let id = |n: u16| {
+            let mut bytes = [0u8; 32];
+            bytes[..2].copy_from_slice(&n.to_le_bytes());
+            TransactionId::from_bytes(bytes)
+        };
+        let mut sends = InFlightSends::default();
+        for n in 0..=READ_SETTLED_KEPT as u16 {
+            sends.settled(&id(n));
+        }
+        assert!(
+            !sends.was_read_settled(&id(0)),
+            "the oldest kept past the bound"
+        );
+        assert!(sends.was_read_settled(&id(1)));
+        assert!(sends.was_read_settled(&id(READ_SETTLED_KEPT as u16)));
+        assert_eq!(sends.read_settled.len(), READ_SETTLED_KEPT);
+    }
+
+    /// **The submit log: a read withholds every leg from its floor on, and the
+    /// log keeps a leg exactly as long as a read may need it.** The floor is
+    /// the first leg still in its submit at the snapshot, or the next leg to
+    /// come; a leg refused before its request spends nothing and leaves at
+    /// once; a returned leg below every read's floor leaves.
+    #[test]
+    fn a_read_withholds_every_leg_from_its_floor_and_the_log_keeps_no_more() {
+        let id = |n: u8| TransactionId::from_bytes([n; 32]);
+        let coin = |n: u8| UtxoEntryId::new(id(n), 0);
+        let held = |sends: &InFlightSends, floor: u64| -> HashSet<UtxoEntryId> {
+            sends.logged_from(floor).cloned().collect()
+        };
+        let mut sends = InFlightSends::default();
+
+        // A leg that returned before any read is in a snapshot's own views.
+        sends.submitting(id(1), vec![coin(11)]);
+        sends.submit_returned(&id(1), true);
+        assert!(sends.legs.is_empty(), "a returned leg with no read kept");
+
+        // A leg in its submit at the snapshot is withheld, and so is a leg
+        // that starts after it.
+        sends.submitting(id(2), vec![coin(12)]);
+        let floor = sends.begin_read();
+        sends.submitting(id(3), vec![coin(13)]);
+        sends.submit_returned(&id(2), true);
+        sends.submit_returned(&id(3), true);
+        assert_eq!(held(&sends, floor), HashSet::from([coin(12), coin(13)]));
+
+        // A leg refused before its request spends nothing.
+        sends.submitting(id(4), vec![coin(14)]);
+        sends.submit_returned(&id(4), false);
+        assert!(
+            !held(&sends, floor).contains(&coin(14)),
+            "a refused leg withheld"
+        );
+
+        // A second read begun now: no leg in its submit, so its floor is the
+        // next leg, and the first read's legs stay for the first read alone.
+        let second = sends.begin_read();
+        assert!(held(&sends, second).is_empty());
+        sends.end_read(floor);
+        assert!(sends.legs.is_empty(), "legs kept below every read's floor");
+        sends.submitting(id(5), vec![coin(15)]);
+        sends.submit_returned(&id(5), true);
+        assert_eq!(held(&sends, second), HashSet::from([coin(15)]));
+        sends.end_read(second);
+        assert!(sends.legs.is_empty(), "a returned leg kept with no read");
+
+        // A leg still in its submit is never dropped.
+        sends.submitting(id(6), vec![coin(16)]);
+        let third = sends.begin_read();
+        sends.end_read(third);
+        assert_eq!(sends.legs.len(), 1, "a leg in its submit dropped");
+    }
 
     /// **A chain's legs count once toward unsettled, and leave together.** A
     /// batch leg's output comes home only if no later leg of ours spends it

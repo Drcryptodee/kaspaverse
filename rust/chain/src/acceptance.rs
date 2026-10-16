@@ -37,9 +37,11 @@
 //! re-accepted.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use borsh::{BorshDeserialize, BorshSerialize};
@@ -50,6 +52,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::durable::atomic_write;
 use crate::error::Result;
+use crate::foreground::Foreground;
 use crate::kvlog::Log;
 use crate::spans;
 
@@ -276,6 +279,14 @@ impl Fold {
     }
 }
 
+/// An accepting block's facts, as [`AcceptanceTracker::read_accepting_block`]
+/// read them.
+struct AcceptingBlock {
+    blue_score: u64,
+    daa_score: Option<u64>,
+    accepted_unix_ms: u64,
+}
+
 /// What folding one chain batch did, for the cursor.
 struct BatchFold {
     /// Every fact it carried for a watched txid is on disk.
@@ -303,6 +314,19 @@ struct TrackerState {
     /// acceptance may be missing its removal: no depth is claimed (nothing
     /// reads Confirmed, nothing is finalized) until the hold is released.
     depth_held: bool,
+    /// A walk from `vcc.cursor` is running: an acceptance may be missing a
+    /// removal the walk has not reached yet, so no depth is claimed until it
+    /// ends (SEND-8: a restart read a send Confirmed during the very walk that
+    /// was about to displace it).
+    walking: bool,
+    /// Sends of ours a live batch named accepted while a walk ran
+    /// ([`AcceptanceTracker::fold_ahead`]): txid to (accepting block, its
+    /// blue score, its own time). In memory only, read by [`Self::status`];
+    /// the batch itself is written when it folds after the walk. Written
+    /// earlier, a process killed before that fold would leave an acceptance
+    /// on disk ahead of `vcc.cursor`, whose walks could never see its block
+    /// leave the chain.
+    ahead: HashMap<String, (String, u64, u64)>,
     /// What the live stream took off the chain (LINK-Q3): see [`OffChain`].
     off_chain: OffChain,
 }
@@ -345,6 +369,8 @@ impl TrackerState {
             confirmed_emitted: HashSet::new(),
             sink_blue: 0,
             depth_held: false,
+            walking: false,
+            ahead: HashMap::new(),
             off_chain: OffChain::default(),
         })
     }
@@ -353,6 +379,21 @@ impl TrackerState {
     /// `block` would displace).
     fn holds_acceptance_at(&self, block: &str) -> bool {
         self.by_accepting_block.contains_key(block)
+    }
+
+    /// Whether depth may be claimed: no cursor hold and no walk under way.
+    fn claims_depth(&self) -> bool {
+        !self.depth_held && !self.walking
+    }
+
+    /// A send of ours with no acceptance on disk yet: the one record a live
+    /// batch may be read ahead for while a walk runs
+    /// ([`AcceptanceTracker::fold_ahead`]).
+    fn awaits_first_acceptance(&self, txid: &str) -> bool {
+        self.log.records.get(txid).is_some_and(|record| {
+            record.source == WatchSource::Send
+                && matches!(record.status, PersistedStatus::Submitted { .. })
+        })
     }
 
     fn is_watched(&self, txid: &str) -> bool {
@@ -567,6 +608,7 @@ impl TrackerState {
                 fold.failed.get_or_insert(e);
                 continue;
             }
+            self.ahead.remove(txid);
             // A→B re-acceptance: drop the txid from A's index entry, or a
             // later (possibly out-of-order) removal of A would falsely
             // displace a tx currently accepted by B (the same cleanup
@@ -648,7 +690,7 @@ impl TrackerState {
     /// log only via the horizon/cap prune.
     fn on_sink_blue(&mut self, sink_blue: u64, now_ms: u64) -> Result<Vec<AcceptanceEvent>> {
         self.sink_blue = sink_blue;
-        if self.depth_held {
+        if !self.claims_depth() {
             self.prune_beyond_horizon(now_ms)?;
             return Ok(Vec::new());
         }
@@ -742,6 +784,11 @@ impl TrackerState {
     /// The periodic sweep: stall signals (Send-sourced Submitted) and
     /// tombstone-window elapses (Displaced past the window).
     fn tick(&mut self, now_ms: u64) -> Vec<AcceptanceEvent> {
+        // A walk may still fold the acceptance or re-acceptance a window is
+        // waiting on: the windows are read again at the first tick after it.
+        if self.walking {
+            return Vec::new();
+        }
         let mut events = Vec::new();
         for record in self.log.records.values() {
             match &record.status {
@@ -792,6 +839,13 @@ impl TrackerState {
     fn status(&self, txid: &str, now_ms: u64) -> Option<TxStatus> {
         let record = self.log.records.get(txid)?;
         Some(match &record.status {
+            PersistedStatus::Submitted { .. } if self.ahead.contains_key(txid) => {
+                let (_, accepting_blue_score, accepted_unix_ms) = self.ahead[txid];
+                TxStatus::Accepted {
+                    blue_depth: self.sink_blue.saturating_sub(accepting_blue_score),
+                    accepted_unix_ms,
+                }
+            }
             PersistedStatus::Submitted { submit_ok_unix_ms } => {
                 let waited_ms = now_ms.saturating_sub(*submit_ok_unix_ms);
                 if record.source == WatchSource::Send && waited_ms >= STALL_AFTER_MS {
@@ -806,7 +860,7 @@ impl TrackerState {
                 ..
             } => {
                 let blue_depth = self.sink_blue.saturating_sub(*accepting_blue_score);
-                if blue_depth >= CONFIRMED_DEPTH_BLUE && !self.depth_held {
+                if blue_depth >= CONFIRMED_DEPTH_BLUE && self.claims_depth() {
                     TxStatus::Confirmed {
                         blue_depth,
                         accepted_unix_ms: *accepted_unix_ms,
@@ -867,7 +921,13 @@ pub struct AcceptanceTracker {
     /// [`MATCHED_MEMORY_CAPACITY`]. Lock order: `state` before this, and
     /// `sender_interest` before this; this one is always taken last.
     matched: Mutex<MatchedMemory>,
+    /// The socket's sends, which a catch-up page waits for ([`Foreground`]).
+    /// Unset, a page never waits.
+    foreground: OnceLock<Arc<Foreground>>,
 }
+
+/// A walk from `vcc.cursor`, polled by the run loop beside the live feed.
+type WalkTask = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 /// How many unresolved senders we will carry at once. Sized for a human
 /// conversation rate, not a chain-wide one; the oldest is dropped first.
@@ -1053,6 +1113,38 @@ impl OffChain {
     }
 }
 
+/// Marks a walk as running ([`TrackerState::walking`]) from the moment it is
+/// created until the batches it held back have folded. Set at creation, not
+/// at the walk's first poll: the run loop's `select!` can fold a sink score
+/// before it polls the walk, and that score would finalize a record the walk
+/// is about to displace.
+struct Walking(Arc<AcceptanceTracker>);
+
+impl Walking {
+    fn begin(tracker: &Arc<AcceptanceTracker>) -> Self {
+        tracker
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .walking = true;
+        Self(tracker.clone())
+    }
+}
+
+impl Drop for Walking {
+    fn drop(&mut self) {
+        let mut state = self
+            .0
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.walking = false;
+        // What the walk held back has folded: an acceptance read ahead is on
+        // disk now, or the chain took it back.
+        state.ahead.clear();
+    }
+}
+
 impl AcceptanceTracker {
     /// Load (or create) the tracker's persistence in `dir`
     /// (`acceptance.kvlog` + `vcc.cursor`).
@@ -1070,7 +1162,14 @@ impl AcceptanceTracker {
             force_owed: AtomicBool::new(false),
             sender_interest: Mutex::new(VecDeque::new()),
             matched: Mutex::new(MatchedMemory::default()),
+            foreground: OnceLock::new(),
         }))
+    }
+
+    /// Let the sends on this socket go first: every catch-up page waits while
+    /// one is in progress ([`Foreground`]). Set once; later calls are ignored.
+    pub fn yield_to(&self, foreground: Arc<Foreground>) {
+        let _ = self.foreground.set(foreground);
     }
 
     /// New receiver onto the acceptance event fan-out.
@@ -1257,6 +1356,37 @@ impl AcceptanceTracker {
         }
     }
 
+    /// **Give a send's socket claim back once `txid` reads accepted**, or after
+    /// `within` whatever happened ([`Foreground`]). Subscribed before the first
+    /// read, so an acceptance between the two is not missed.
+    pub fn release_at_acceptance(
+        self: &Arc<Self>,
+        foreground: Arc<Foreground>,
+        claim: u64,
+        txid: String,
+        within: Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        let tracker = self.clone();
+        let mut events = self.subscribe();
+        tokio::spawn(async move {
+            let accepted = |tracker: &AcceptanceTracker| {
+                matches!(
+                    tracker.status(&txid),
+                    Some(TxStatus::Accepted { .. } | TxStatus::Confirmed { .. })
+                )
+            };
+            let _ = tokio::time::timeout(within, async {
+                while !accepted(&tracker) {
+                    if let Err(broadcast::error::RecvError::Closed) = events.recv().await {
+                        break;
+                    }
+                }
+            })
+            .await;
+            foreground.release(claim);
+        })
+    }
+
     /// Current status of a watched txid (None = not watched / already
     /// pruned — the consumer falls back to its own truth source).
     pub fn status(&self, txid: &str) -> Option<TxStatus> {
@@ -1375,72 +1505,22 @@ impl AcceptanceTracker {
             }
         }
         for (accepting_block, txids, wanted) in matches {
-            // `daa_score` is the sibling of the blue score we already fetch —
-            // and it is exactly the input `get_utxo_return_address` needs.
-            let mut daa_score: Option<u64> = None;
-            // The accepting block's OWN timestamp — the chain's moment of
-            // acceptance, and the only honest source for a receipt's
-            // `Accepted` line. `0` when the block could not be fetched; the
-            // bridge maps that to `None` and the glass then shows no time
-            // rather than this device's clock.
-            let mut accepted_unix_ms: u64 = 0;
-            let blue_score = match rpc.rpc_api().get_block(accepting_block, false).await {
-                Ok(block) => {
-                    daa_score = Some(block.header.daa_score);
-                    accepted_unix_ms = accepted_stamp(&block);
-                    block.header.blue_score
+            let Some(facts) = self
+                .read_accepting_block(rpc, accepting_block, txids.len())
+                .await
+            else {
+                // Skipped is not folded: the cursor must stay behind this
+                // acceptance until a later fold can read its block.
+                if !txids.is_empty() {
+                    complete = false;
                 }
-                Err(e) => {
-                    // Conservative fallback: the current sink blue score is an
-                    // UPPER bound for the accepting blue score, so depth reads
-                    // small — Confirmed is delayed, never premature. BUT a
-                    // sink of 0 (no SinkBlueScore folded yet — the cold-open
-                    // window) would invert that into an instant fabricated
-                    // Confirmed + terminal prune (consensus-audit finding 1):
-                    // refresh from the node first, and if the node cannot
-                    // answer either, skip the fold — the txids stay Submitted
-                    // (honest; wallet-core still converges on its own).
-                    let mut sink = self
-                        .state
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .sink_blue;
-                    if sink == 0 {
-                        match rpc.rpc_api().get_sink_blue_score().await {
-                            Ok(blue) => {
-                                sink = blue;
-                                self.state
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                    .sink_blue = blue;
-                            }
-                            Err(e2) => {
-                                log::warn!(
-                                    "acceptance: get_block({accepting_block}) failed ({}) and \
-                                     no sink blue score available ({}) — fold skipped, \
-                                     {} watch(es) stay Submitted",
-                                    crate::link::sanitize_node_text(&e.to_string()),
-                                    crate::link::sanitize_node_text(&e2.to_string()),
-                                    txids.len()
-                                );
-                                // Skipped is not folded: the cursor must stay
-                                // behind this acceptance until a later fold
-                                // can read its block.
-                                if !txids.is_empty() {
-                                    complete = false;
-                                }
-                                continue;
-                            }
-                        }
-                    }
-                    log::warn!(
-                        "acceptance: get_block({accepting_block}) failed ({}) — \
-                         using sink blue score {sink} as a conservative bound",
-                        crate::link::sanitize_node_text(&e.to_string())
-                    );
-                    sink
-                }
+                continue;
             };
+            let AcceptingBlock {
+                blue_score,
+                daa_score,
+                accepted_unix_ms,
+            } = facts;
             // Sender resolution rides the same block read. Only when the node
             // actually answered: the blue-score fallback above is a bound, not
             // a fact, and a wrong DAA score names the wrong sender.
@@ -1485,6 +1565,140 @@ impl AcceptanceTracker {
                 .any(|block| state.holds_acceptance_at(&block.to_string()))
         };
         BatchFold { complete, accepted }
+    }
+
+    /// **The accepting block's facts a fold needs**, read from the node: its
+    /// blue score, its DAA score (the sibling of the blue score, and exactly
+    /// the input `get_utxo_return_address` needs) and its own timestamp, the
+    /// chain's moment of acceptance and the only honest source for a
+    /// receipt's `Accepted` line.
+    ///
+    /// When the node cannot serve the block, the sink blue score stands in
+    /// for the blue score: an UPPER bound for the accepting blue score, so
+    /// depth reads small (Confirmed is delayed, never premature), with no DAA
+    /// score and time `0` (the bridge maps that to no time rather than this
+    /// device's clock). BUT a sink of 0 (no SinkBlueScore folded yet, the
+    /// cold-open window) would invert that into an instant fabricated
+    /// Confirmed and terminal prune (consensus-audit finding 1): the sink is
+    /// refreshed from the node first, and when the node cannot answer either
+    /// there are no facts and the acceptance is not folded (`watched` counts
+    /// the watches that stay Submitted, for the log).
+    async fn read_accepting_block(
+        &self,
+        rpc: &Rpc,
+        accepting_block: Hash,
+        watched: usize,
+    ) -> Option<AcceptingBlock> {
+        match rpc.rpc_api().get_block(accepting_block, false).await {
+            Ok(block) => Some(AcceptingBlock {
+                blue_score: block.header.blue_score,
+                daa_score: Some(block.header.daa_score),
+                accepted_unix_ms: accepted_stamp(&block),
+            }),
+            Err(e) => {
+                let mut sink = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .sink_blue;
+                if sink == 0 {
+                    match rpc.rpc_api().get_sink_blue_score().await {
+                        Ok(blue) => {
+                            sink = blue;
+                            self.state
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .sink_blue = blue;
+                        }
+                        Err(e2) => {
+                            log::warn!(
+                                "acceptance: get_block({accepting_block}) failed ({}) and \
+                                 no sink blue score available ({}) — fold skipped, \
+                                 {watched} watch(es) stay Submitted",
+                                crate::link::sanitize_node_text(&e.to_string()),
+                                crate::link::sanitize_node_text(&e2.to_string()),
+                            );
+                            return None;
+                        }
+                    }
+                }
+                log::warn!(
+                    "acceptance: get_block({accepting_block}) failed ({}) — \
+                     using sink blue score {sink} as a conservative bound",
+                    crate::link::sanitize_node_text(&e.to_string())
+                );
+                Some(AcceptingBlock {
+                    blue_score: sink,
+                    daa_score: None,
+                    accepted_unix_ms: 0,
+                })
+            }
+        }
+    }
+
+    /// **A send's acceptance does not wait for a walk.** While a walk from
+    /// `vcc.cursor` runs, live batches wait for it and fold in their order
+    /// once it ends: the walk's pages are older than they are, so a live fact
+    /// folded first could be overwritten by a page served before it, and the
+    /// cursor belongs to the walk. One fact is read at once: a send of ours
+    /// still waiting for its first acceptance, accepted by this batch. It is
+    /// held in memory ([`TrackerState::ahead`]) and read as Accepted, and the
+    /// batch itself folds after the walk with the rest, so the record is
+    /// written where the chain has it whatever the walk's pages said in
+    /// between. This is what releases a receipt promptly when the send
+    /// follows an unlock.
+    async fn fold_ahead(&self, rpc: &Rpc, batch: &VccBatch) {
+        let ahead: Vec<(Hash, Vec<String>)> = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            batch
+                .accepted
+                .iter()
+                .filter_map(|(block, txids)| {
+                    let due: Vec<String> = txids
+                        .iter()
+                        .map(|t| t.to_string())
+                        .filter(|t| state.awaits_first_acceptance(t))
+                        .collect();
+                    (!due.is_empty()).then_some((*block, due))
+                })
+                .collect()
+        };
+        for (block, txids) in ahead {
+            let Some(facts) = self.read_accepting_block(rpc, block, txids.len()).await else {
+                continue;
+            };
+            let mut events = Vec::new();
+            {
+                let mut state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                for txid in txids {
+                    state.ahead.insert(
+                        txid.clone(),
+                        (block.to_string(), facts.blue_score, facts.accepted_unix_ms),
+                    );
+                    spans::mark_with("accepted", &txid);
+                    events.push(AcceptanceEvent::Accepted { txid });
+                }
+            }
+            self.broadcast(events);
+        }
+    }
+
+    /// A walk from `vcc.cursor`, for the run loop to poll beside the live
+    /// feed, and its mark: no depth is claimed until the loop drops it.
+    fn walk(self: &Arc<Self>, rpc: &Rpc) -> (WalkTask, Walking) {
+        let walking = Walking::begin(self);
+        let tracker = self.clone();
+        let rpc = rpc.clone();
+        (
+            Box::pin(async move { tracker.catch_up(&rpc).await }),
+            walking,
+        )
     }
 
     /// Fold one live batch and move `vcc.cursor` past it, which happens only
@@ -1738,6 +1952,9 @@ impl AcceptanceTracker {
         cursor: Hash,
     ) -> Option<kaspa_wrpc_client::prelude::GetVirtualChainFromBlockResponse> {
         for attempt in 0..VCC_PAGE_ATTEMPTS {
+            if let Some(foreground) = self.foreground.get() {
+                foreground.wait_turn("acceptance").await;
+            }
             match rpc
                 .rpc_api()
                 .get_virtual_chain_from_block(cursor, true, None)
@@ -1758,9 +1975,18 @@ impl AcceptanceTracker {
     }
 
     /// Spawn the tracker task: folds live VCC batches and the message walk's
-    /// pages from `vcc_rx` (one channel, so each feed is folded in its own order), runs
-    /// catch-up on every (re)connect via `dag_rx`, folds sink blue score
-    /// updates, and ticks the stall/tombstone windows.
+    /// pages from `vcc_rx` (one channel, so each feed is folded in its own
+    /// order), walks from the cursor on every (re)connect via `dag_rx`, folds
+    /// sink blue score updates, and ticks the stall/tombstone windows.
+    ///
+    /// **A walk runs beside the live feed, never in place of it.** A cold walk
+    /// after a long close is up to [`MAX_VCC_CATCHUP_PAGES`] node pages, and a
+    /// send made in that time waited for all of them: its acceptance was in a
+    /// live batch queued behind the walk. Now the walk is polled alongside the
+    /// feed: what arrives meanwhile is held back and folded in order when the
+    /// walk ends, except a send's first acceptance, which is read ahead
+    /// ([`Self::fold_ahead`]). No depth is claimed, and the stall and
+    /// tombstone windows wait, until the held-back batches have folded.
     pub fn run(
         self: &Arc<Self>,
         rpc: Rpc,
@@ -1769,6 +1995,9 @@ impl AcceptanceTracker {
     ) -> tokio::task::JoinHandle<()> {
         let tracker = self.clone();
         tokio::spawn(async move {
+            // Cold open: recover whatever happened while the app was closed.
+            // Created first, so no depth is claimed from the score read next.
+            let mut walk: Option<(WalkTask, Walking)> = Some(tracker.walk(&rpc));
             // Prime the sink blue score before anything folds (best-effort):
             // narrows the cold-open window where a get_block fallback would
             // find sink_blue == 0 (consensus-audit finding 1). The socket may
@@ -1780,8 +2009,12 @@ impl AcceptanceTracker {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .sink_blue = blue;
             }
-            // Cold open: recover whatever happened while the app was closed.
-            tracker.catch_up(&rpc).await;
+            // What arrived while a walk ran, in arrival order.
+            let mut held_back: VecDeque<TrackerFeed> = VecDeque::new();
+            // A reconnect arrived during a walk: walk again once it ends.
+            let mut walk_again = false;
+            // The running walk is a held cursor's tick walk.
+            let mut hold_walk = false;
             let mut tick = tokio::time::interval(TICK);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut hold_backoff = TICK;
@@ -1789,8 +2022,39 @@ impl AcceptanceTracker {
             let mut hold_seen = 0;
             loop {
                 tokio::select! {
+                    () = async {
+                        match walk.as_mut() {
+                            Some((running, _)) => running.await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        // Depth stays held until what the walk held back has
+                        // folded too: a removal among it may still be due.
+                        let walked = walk.take();
+                        while let Some(feed) = held_back.pop_front() {
+                            match feed {
+                                TrackerFeed::Vcc(batch) => tracker.fold_live(&rpc, &batch).await,
+                                TrackerFeed::Walk(batch) => tracker.fold_walk(&batch),
+                            }
+                        }
+                        drop(walked);
+                        // A tick walk that left the hold in place waits longer
+                        // for the next, up to five minutes.
+                        if std::mem::take(&mut hold_walk) && tracker.frozen.load(Ordering::SeqCst) {
+                            hold_backoff = (hold_backoff * 2).min(HOLD_WALK_BACKOFF_MAX);
+                            hold_walk_at = tokio::time::Instant::now() + hold_backoff;
+                        }
+                        if std::mem::take(&mut walk_again) {
+                            walk = Some(tracker.walk(&rpc));
+                        }
+                    }
                     feed = vcc_rx.recv() => {
                         match feed {
+                            Some(TrackerFeed::Vcc(batch)) if walk.is_some() => {
+                                tracker.fold_ahead(&rpc, &batch).await;
+                                held_back.push_back(TrackerFeed::Vcc(batch));
+                            }
+                            Some(feed) if walk.is_some() => held_back.push_back(feed),
                             Some(TrackerFeed::Vcc(batch)) => tracker.fold_live(&rpc, &batch).await,
                             Some(TrackerFeed::Walk(batch)) => tracker.fold_walk(&batch),
                             None => break, // monitor gone
@@ -1800,7 +2064,11 @@ impl AcceptanceTracker {
                         match event {
                             Ok(crate::DagEvent::Connected { .. }) => {
                                 // Scopes re-registered; recover the gap.
-                                tracker.catch_up(&rpc).await;
+                                if walk.is_some() {
+                                    walk_again = true;
+                                } else {
+                                    walk = Some(tracker.walk(&rpc));
+                                }
                             }
                             Ok(crate::DagEvent::SinkBlueScore(blue)) => {
                                 let events = {
@@ -1831,13 +2099,9 @@ impl AcceptanceTracker {
                                 hold_backoff = TICK;
                                 hold_walk_at = tokio::time::Instant::now();
                             }
-                            if tokio::time::Instant::now() >= hold_walk_at {
-                                tracker.catch_up(&rpc).await;
-                                if tracker.frozen.load(Ordering::SeqCst) {
-                                    hold_backoff =
-                                        (hold_backoff * 2).min(HOLD_WALK_BACKOFF_MAX);
-                                    hold_walk_at = tokio::time::Instant::now() + hold_backoff;
-                                }
+                            if walk.is_none() && tokio::time::Instant::now() >= hold_walk_at {
+                                walk = Some(tracker.walk(&rpc));
+                                hold_walk = true;
                             }
                         }
                         let events = {
@@ -2218,6 +2482,36 @@ mod tests {
             state.status(&txid(2), 1_000 + STALL_AFTER_MS),
             Some(TxStatus::Submitted)
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The stall and tombstone windows wait out a walk.** A reconnect walk
+    /// may still fold the acceptance a stalled send waits for, or the
+    /// re-acceptance of a displaced one: a window read during it can fire on a
+    /// fact the walk is about to supply. Read again at the first tick after.
+    #[test]
+    fn the_windows_wait_out_a_walk() {
+        let dir = test_dir("walk-windows");
+        let mut state = TrackerState::load(dir.join("acceptance.kvlog")).unwrap();
+        state.watch(&txid(1), WatchSource::Send, 1_000).unwrap();
+        state.watch(&txid(2), WatchSource::Send, 1_000).unwrap();
+        assert!(state
+            .on_accepted(&block(1), 10, &[txid(2)], 1_000)
+            .into_result()
+            .is_ok());
+        assert!(state.on_removed(&[block(1)], 1_000).into_result().is_ok());
+        let late = 1_000 + STALL_AFTER_MS.max(TOMBSTONE_WINDOW_MS);
+
+        state.walking = true;
+        assert!(state.tick(late).is_empty(), "a window fired during a walk");
+        state.walking = false;
+        let events = state.tick(late);
+        assert!(events.contains(&AcceptanceEvent::Stalled {
+            txid: txid(1),
+            waited_ms: late - 1_000
+        }));
+        assert!(events.contains(&AcceptanceEvent::DisplacedElapsed { txid: txid(2) }));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use kaspaverse_chain::foreground::Foreground;
 use kaspaverse_chain::{
     link, AcceptanceEvent, AcceptanceTracker, DagEvent, DagMonitor, SignedTxRetention,
 };
@@ -238,6 +239,105 @@ pub(crate) fn monitor() -> Option<DagMonitor> {
     MONITOR.get().cloned()
 }
 
+/// How long a send under review holds the socket for its commit. Past it the
+/// catch-up pages go on: a review left open must not stall the message walk.
+/// A bound, not a fit: no capture yet records the review (the `send_review`
+/// mark starts that series).
+const REVIEW_HOLD: Duration = Duration::from_secs(20);
+
+/// How long a committed send holds the socket while it waits for its
+/// acceptance: the signing ceremony's own wait before it shows the receipt
+/// anyway (`_acceptCeilingAfter` in `signing_ceremony.dart`, 15 s; the two are
+/// kept equal by hand).
+const ACCEPTANCE_HOLD: Duration = Duration::from_secs(15);
+
+/// The socket claim of the send under review. One at a time: each stash holds
+/// one plan, and a new review replaces the last.
+static REVIEW_CLAIM: Mutex<Option<u64>> = Mutex::new(None);
+
+/// **A reviewed send claims the socket** so the catch-up pages in flight
+/// drain before it goes out ([`kaspaverse_chain::foreground`]). Called where
+/// a prepared plan is stashed for its ceremony.
+pub(crate) fn claim_socket_for_review() {
+    if let Some(monitor) = MONITOR.get() {
+        kaspaverse_chain::spans::mark("send_review");
+        review_claim(&monitor.foreground());
+    }
+}
+
+/// The review ended without a commit: the socket goes back.
+pub(crate) fn release_review_claim() {
+    if let Some(monitor) = MONITOR.get() {
+        review_release(&monitor.foreground());
+    }
+}
+
+/// The send is committed: its review's claim, or a new one, now holds the
+/// socket for [`ACCEPTANCE_HOLD`]. Hand the id to
+/// [`release_socket_at_acceptance`].
+pub(crate) fn claim_socket_for_commit() -> Option<u64> {
+    MONITOR
+        .get()
+        .map(|monitor| review_into_commit(&monitor.foreground()))
+}
+
+/// Give the socket back once `txid` is accepted, or at once with no txid to
+/// wait for (a send that did not fully go out). The claim's own deadline
+/// bounds the wait either way.
+pub(crate) fn release_socket_at_acceptance(
+    claim: Option<u64>,
+    txid: Option<String>,
+    tracker: Option<Arc<AcceptanceTracker>>,
+) {
+    let (Some(id), Some(monitor)) = (claim, MONITOR.get()) else {
+        return;
+    };
+    let foreground = monitor.foreground();
+    match (txid, tracker) {
+        (Some(txid), Some(tracker)) => {
+            // The wait for its acceptance runs from the broadcast's answer.
+            foreground.renew(id, ACCEPTANCE_HOLD);
+            tracker.release_at_acceptance(foreground, id, txid, ACCEPTANCE_HOLD);
+        }
+        _ => foreground.release(id),
+    }
+}
+
+fn review_claim(foreground: &Foreground) {
+    let id = foreground.claim(REVIEW_HOLD);
+    let replaced = REVIEW_CLAIM
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .replace(id);
+    if let Some(old) = replaced {
+        foreground.release(old);
+    }
+}
+
+fn review_release(foreground: &Foreground) {
+    let claim = REVIEW_CLAIM
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let Some(id) = claim {
+        foreground.release(id);
+    }
+}
+
+fn review_into_commit(foreground: &Foreground) -> u64 {
+    let review = REVIEW_CLAIM
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    match review {
+        Some(id) => {
+            foreground.renew(id, ACCEPTANCE_HOLD);
+            id
+        }
+        None => foreground.claim(ACCEPTANCE_HOLD),
+    }
+}
+
 /// Get the shared, started monitor (initialising it on the first call).
 pub(crate) async fn shared_monitor() -> Result<DagMonitor, AppError> {
     MONITOR
@@ -296,6 +396,7 @@ pub(crate) async fn shared_tracker() -> Result<Arc<AcceptanceTracker>, AppError>
             let tracker = AcceptanceTracker::load(dir).map_err(AppError::chain)?;
             let monitor = shared_monitor().await?;
             let vcc_rx = monitor.attach_acceptance();
+            tracker.yield_to(monitor.foreground());
             tracker.run(monitor.rpc(), vcc_rx, monitor.subscribe());
             log::info!("acceptance: tracker started");
             tokio::spawn(escalation_task(tracker.subscribe(), monitor));
@@ -1088,6 +1189,40 @@ pub async fn subscribe_dag_updates(sink: StreamSink<DagSnapshot>) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A send's socket claim, from review to commit.** A new review replaces
+    /// the last one's claim; an abandoned review gives the socket back; a
+    /// commit carries the review's claim on (one release ends it) and empties
+    /// the slot, so a later abandon cannot end the commit's claim. Deadlines
+    /// are the chain's `Foreground` tests. One test: the slot is process-wide.
+    #[tokio::test]
+    async fn a_reviews_claim_is_replaced_released_or_carried_into_its_commit() {
+        let foreground = Foreground::new();
+        review_claim(&foreground);
+        review_claim(&foreground);
+        review_release(&foreground);
+        assert!(
+            !foreground.is_claimed(),
+            "a replaced review left its claim, or an abandon kept one"
+        );
+
+        review_claim(&foreground);
+        let id = review_into_commit(&foreground);
+        review_release(&foreground);
+        assert!(
+            foreground.is_claimed(),
+            "an abandon after the commit ended the commit's claim"
+        );
+        foreground.release(id);
+        assert!(!foreground.is_claimed(), "the commit held a second claim");
+
+        let id = review_into_commit(&foreground);
+        assert!(
+            foreground.is_claimed(),
+            "a commit with no review claimed nothing"
+        );
+        foreground.release(id);
+    }
 
     #[test]
     fn folds_events_into_snapshot() {

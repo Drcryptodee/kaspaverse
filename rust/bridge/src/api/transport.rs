@@ -5584,6 +5584,7 @@ pub async fn transport_prepare_bcast(
     *PENDING_TRANSPORT
         .lock()
         .unwrap_or_else(PoisonError::into_inner) = Some((nonce, prepared));
+    super::dag::claim_socket_for_review();
 
     Ok(project_signable(
         nonce,
@@ -5759,6 +5760,33 @@ async fn await_spendable_at(
     Ok(priority)
 }
 
+/// **What a message's build is anchored by** while a send of the same payment
+/// has no answer (`chain::send`): its conversation, never the bound address,
+/// which every conversation on `receive/0` shares. An invitation keys on the
+/// contact it invites: a retry mints a new conversation id, since the row is
+/// written only on a clean outcome. A backup keys on backups: it is a send to
+/// ourselves, never a payment. A broadcast keys on its destination, as a
+/// payment does (`None`): it pays a value there.
+fn anchor_key_of(intent: &TransportIntent) -> Option<String> {
+    match intent {
+        TransportIntent::Comm {
+            conversation_id, ..
+        }
+        | TransportIntent::Accept {
+            conversation_id, ..
+        } => Some(comm_anchor_key(conversation_id)),
+        TransportIntent::Handshake { conversation, .. } => {
+            Some(format!("invitation:{}", conversation.contact_address))
+        }
+        TransportIntent::SelfStash { .. } => Some("backup".to_string()),
+        _ => None,
+    }
+}
+
+fn comm_anchor_key(conversation_id: &str) -> String {
+    format!("conversation:{conversation_id}")
+}
+
 /// Build + stash one encrypted-kind transport send over the shared two-phase
 /// seam; returns the B7 summary (payload kind decoded from the BUILT tx).
 ///
@@ -5853,6 +5881,7 @@ async fn prepare_transport_send(
             // out of the pool before any demotion, so the reservation set can
             // only ever demote a NEIGHBOUR's coins here (D-169).
             &crate::api::send::spend_exclusions(),
+            anchor_key_of(&intent),
         )
         .await
         .map_err(|e| {
@@ -5893,6 +5922,7 @@ async fn prepare_transport_send(
     *PENDING_TRANSPORT
         .lock()
         .unwrap_or_else(PoisonError::into_inner) = Some((nonce, prepared));
+    super::dag::claim_socket_for_review();
 
     Ok(project_signable(nonce, kind, &summary, Some(payload_kind)))
 }
@@ -7007,6 +7037,7 @@ pub async fn transport_comm_fee_preview(
             &plan.priority,
             Some(plan.wire_bytes),
             &crate::api::send::spend_exclusions(),
+            Some(comm_anchor_key(&conversation_id)),
         )
         .map_err(AppError::chain)
 }
@@ -7813,6 +7844,7 @@ pub fn transport_abandon() {
     *PENDING_INTENT
         .lock()
         .unwrap_or_else(PoisonError::into_inner) = None;
+    super::dag::release_review_claim();
 }
 
 // ── Pull surfaces (Dart renders and drops; nothing content-bearing streams) ─
@@ -11670,6 +11702,44 @@ mod tests {
                 .unwrap();
         assert!(!stash_row_is_free(&store, &other));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **An invitation sent again is anchored to the first.** Each attempt
+    /// mints a new conversation id (the row is written only on a clean
+    /// outcome), so an invitation keys on the contact it invites; a message
+    /// and an acceptance key on their conversation, which a retry keeps.
+    #[test]
+    fn an_invitation_keys_on_its_contact_and_a_message_on_its_conversation() {
+        let invite = |id: &str| TransportIntent::Handshake {
+            conversation: row_for(id, "kaspa:contact", ConversationStatus::PendingOutbound),
+            reseal: Vec::new(),
+            timestamp_ms: 1,
+        };
+        assert_eq!(
+            anchor_key_of(&invite("first")),
+            anchor_key_of(&invite("retry"))
+        );
+        let accept = |contact: &str| TransportIntent::Accept {
+            conversation_id: "c1".into(),
+            contact_address: contact.into(),
+            my_alias: String::new(),
+            reseal: Vec::new(),
+            timestamp_ms: 1,
+        };
+        assert_eq!(
+            anchor_key_of(&accept("kaspa:a")),
+            Some("conversation:c1".to_string())
+        );
+        assert_ne!(
+            anchor_key_of(&invite("c1")),
+            anchor_key_of(&accept("kaspa:contact"))
+        );
+        assert_eq!(anchor_key_of(&TransportIntent::Bcast), None);
+        let backup = TransportIntent::SelfStash {
+            covered: Vec::new(),
+            timestamp_ms: 1,
+        };
+        assert_eq!(anchor_key_of(&backup), Some("backup".to_string()));
     }
 
     fn row_for(id: &str, address: &str, status: ConversationStatus) -> ConversationRecord {

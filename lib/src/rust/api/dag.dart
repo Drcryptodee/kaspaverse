@@ -7,7 +7,7 @@ import '../frb_generated.dart';
 import 'error.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `current_endpoint_url`, `deadline`, `escalation_task`, `fold`, `hold_intake`, `monitor`, `new`, `new`, `observe`, `offer`, `reset`, `retention`, `shared_monitor`, `shared_tracker`, `snapshots`, `stored_pin`, `structural`, `tracker_handle`
+// These functions are ignored because they are not marked as `pub`: `claim_socket_for_commit`, `claim_socket_for_review`, `current_endpoint_url`, `deadline`, `escalation_task`, `fold`, `hold_intake`, `monitor`, `new`, `new`, `observe`, `offer`, `release_review_claim`, `release_socket_at_acceptance`, `reset`, `retention`, `review_claim`, `review_into_commit`, `review_release`, `shared_monitor`, `shared_tracker`, `snapshots`, `stored_pin`, `structural`, `tracker_handle`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Coalescer`, `ScoreClock`, `ScoreNote`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `assert_receiver_is_total_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`
 

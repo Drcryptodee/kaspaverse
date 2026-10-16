@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use kaspa_wallet_core::rpc::RpcCtl;
 use kaspa_wrpc_client::prelude::{GetVirtualChainFromBlockResponse, NetworkId, NetworkType};
+use kaspaverse_chain::foreground::Foreground;
 use kaspaverse_chain::{
     AcceptanceTracker, DagEvent, Hash, TrackerFeed, TxStatus, VccBatch, WatchSource,
 };
@@ -662,6 +663,399 @@ async fn a_new_hold_walks_at_its_first_tick() {
         "the new hold waited out the old one's backoff"
     );
     assert_eq!(cursor(&dir), Some(second));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A directory holding a tracker whose cursor sits at `at`: the next start
+/// walks from it.
+fn dir_with_cursor(tag: &str, at: Hash) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("kv-cursor-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("vcc.cursor"), at.to_string()).unwrap();
+    dir
+}
+
+/// **A send accepted while the cold walk runs reads accepted at its first
+/// chance, not at the walk's end.** A send made 17 s after an unlock waited
+/// 13.3 s for its acceptance on a phone: the tracker walked from its cursor
+/// inside its own loop, so the live batch naming the send queued behind every
+/// page of the walk. A node serves one connection's requests in order, so the
+/// read of the accepting block waits behind the page in flight; it must be
+/// answered, and the send read accepted, before the walk's next page. Once the
+/// walk ends the batches it held back fold in their order.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_send_accepted_during_a_cold_walk_reads_accepted_before_the_walk_ends() {
+    let behind = h(0xC0);
+    let dir = dir_with_cursor("cold-walk-send", behind);
+    let fake = FakeRpc::new(NetworkId::new(NetworkType::Mainnet));
+    fake.serialize_requests();
+    fake.fill_vcc_pages(true);
+    let page = fake.hold_vcc_pages();
+    let tracker = AcceptanceTracker::load(dir.clone()).unwrap();
+    let (vcc_tx, vcc_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_dag_tx, dag_rx) = tokio::sync::broadcast::channel(16);
+    let _task = tracker.run(fake.rpc(RpcCtl::new()), vcc_rx, dag_rx);
+    fake.wait_until("the cold walk's page in flight", WAIT, |f| {
+        f.vcc_calls(1) >= 1
+    })
+    .await;
+
+    // The send is submitted and the chain accepts it while the page is held:
+    // the read of its block waits behind the page.
+    let (sent, accepting) = (h(0x31), h(0xA3));
+    tracker.watch(&sent.to_string(), WatchSource::Send);
+    vcc_tx
+        .send(batch(
+            vec![],
+            vec![accepting],
+            vec![(accepting, vec![sent])],
+        ))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        tracker.status(&sent.to_string()),
+        Some(TxStatus::Submitted),
+        "the block was read past a page the node was still serving"
+    );
+
+    // The page is answered: the block read is next in line, then the walk's
+    // second page, which is held.
+    page.add_permits(1);
+    eventually("the send accepted before the walk's next page", || {
+        matches!(
+            tracker.status(&sent.to_string()),
+            Some(TxStatus::Accepted { .. })
+        )
+    })
+    .await;
+    assert_eq!(fake.vcc_answered(), 1, "the walk's next page came first");
+    assert_ne!(
+        cursor(&dir),
+        Some(accepting),
+        "the held-back batch moved the cursor during the walk"
+    );
+
+    // The walk runs out its budget and re-seeds; the batch it held back folds
+    // after it, moving the cursor to the accepting block.
+    page.add_permits(usize::MAX >> 4);
+    eventually("the held-back batch folded after the walk", || {
+        cursor(&dir) == Some(accepting)
+    })
+    .await;
+    assert!(matches!(
+        tracker.status(&sent.to_string()),
+        Some(TxStatus::Accepted { .. })
+    ));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **No depth is claimed while a walk runs.** A send accepted before a
+/// close may have lost its block while the app was closed, and only the walk
+/// can say so. A restart used to read it Confirmed from the first sink score,
+/// during the very walk that was about to displace it; and a sink score folded
+/// during the walk could finalize it, after which the removal could no longer
+/// reach it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cold_walk_claims_no_depth_until_it_ends() {
+    let dir = std::env::temp_dir().join(format!("kv-cursor-cold-depth-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = FakeRpc::new(NetworkId::new(NetworkType::Mainnet));
+    let (sent, accepting, after) = (h(0x41), h(0xA4), h(0xB4));
+
+    // Before the close: the send accepted (the node refuses `get_block`, so
+    // the fold takes the sink bound, 1,000), and the cursor at its block.
+    {
+        let tracker = AcceptanceTracker::load(dir.clone()).unwrap();
+        tracker.watch(&sent.to_string(), WatchSource::Send);
+        let (vcc_tx, vcc_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_dag_tx, dag_rx) = tokio::sync::broadcast::channel(16);
+        let task = tracker.run(fake.rpc(RpcCtl::new()), vcc_rx, dag_rx);
+        eventually("the cursor seeded", || cursor(&dir).is_some()).await;
+        vcc_tx
+            .send(batch(
+                vec![],
+                vec![accepting],
+                vec![(accepting, vec![sent])],
+            ))
+            .unwrap();
+        eventually("the cursor at the accepting block", || {
+            cursor(&dir) == Some(accepting)
+        })
+        .await;
+        task.abort();
+    }
+
+    // Reopened 2,500 blue blocks later, past both depths; the walk's page,
+    // which reports the accepting block gone, is held at the node.
+    fake.set_sink_blue_score(3_500);
+    fake.set_vcc_page(
+        accepting,
+        GetVirtualChainFromBlockResponse {
+            removed_chain_block_hashes: vec![accepting],
+            added_chain_block_hashes: vec![after],
+            accepted_transaction_ids: vec![],
+        },
+    );
+    let page = fake.hold_vcc_pages();
+    let before = fake.vcc_calls(1);
+    let tracker = AcceptanceTracker::load(dir.clone()).unwrap();
+    let (_vcc_tx, vcc_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (dag_tx, dag_rx) = tokio::sync::broadcast::channel(16);
+    let _task = tracker.run(fake.rpc(RpcCtl::new()), vcc_rx, dag_rx);
+    fake.wait_until("the cold walk's page in flight", WAIT, |f| {
+        f.vcc_calls(1) > before
+    })
+    .await;
+    assert!(
+        matches!(
+            tracker.status(&sent.to_string()),
+            Some(TxStatus::Accepted { .. })
+        ),
+        "read Confirmed during the walk: {:?}",
+        tracker.status(&sent.to_string())
+    );
+
+    // A sink score during the walk finalizes nothing: the removal still lands.
+    dag_tx.send(DagEvent::SinkBlueScore(3_600)).unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    page.add_permits(usize::MAX >> 4);
+    eventually("the walk's removal displaced the send", || {
+        tracker.status(&sent.to_string()) == Some(TxStatus::Displaced)
+    })
+    .await;
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **The cold walk waits while a send has the socket, and the send's
+/// acceptance folds meanwhile.** A walk's page is a large reply that holds the
+/// submit's answer and its acceptance behind it on the one socket, so no page
+/// is asked for until the send gives the socket back. The cursor staying put
+/// shows the walk was under way: with no walk the batch would have moved it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cold_walk_waits_while_a_send_has_the_socket() {
+    let behind = h(0xC1);
+    let dir = dir_with_cursor("cold-walk-foreground", behind);
+    let fake = FakeRpc::new(NetworkId::new(NetworkType::Mainnet));
+    let tracker = AcceptanceTracker::load(dir.clone()).unwrap();
+    let foreground = Foreground::new();
+    tracker.yield_to(foreground.clone());
+    let claim = foreground.claim(Duration::from_secs(60));
+    let (vcc_tx, vcc_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_dag_tx, dag_rx) = tokio::sync::broadcast::channel(16);
+    let _task = tracker.run(fake.rpc(RpcCtl::new()), vcc_rx, dag_rx);
+
+    let (sent, accepting) = (h(0x51), h(0xA5));
+    tracker.watch(&sent.to_string(), WatchSource::Send);
+    vcc_tx
+        .send(batch(
+            vec![],
+            vec![accepting],
+            vec![(accepting, vec![sent])],
+        ))
+        .unwrap();
+    eventually("the send accepted while the walk waits", || {
+        matches!(
+            tracker.status(&sent.to_string()),
+            Some(TxStatus::Accepted { .. })
+        )
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(cursor(&dir), Some(behind), "no walk was under way");
+    assert_eq!(
+        fake.vcc_calls(1),
+        0,
+        "a page went out while a send had the socket"
+    );
+
+    foreground.release(claim);
+    fake.wait_until("the walk's page once the send let go", WAIT, |f| {
+        f.vcc_calls(1) >= 1
+    })
+    .await;
+    eventually("the held-back batch folded after the walk", || {
+        cursor(&dir) == Some(accepting)
+    })
+    .await;
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A send gives the socket back at its acceptance, or at its bound.** The
+/// claim outlives the submit: the acceptance's notification and its block's
+/// read travel the same socket. A send the chain never accepts holds no walk
+/// past the bound.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sends_claim_ends_at_its_acceptance_or_its_bound() {
+    let dir = std::env::temp_dir().join(format!("kv-cursor-release-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let fake = FakeRpc::new(NetworkId::new(NetworkType::Mainnet));
+    let tracker = AcceptanceTracker::load(dir.clone()).unwrap();
+    let (vcc_tx, vcc_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_dag_tx, dag_rx) = tokio::sync::broadcast::channel(16);
+    let _task = tracker.run(fake.rpc(RpcCtl::new()), vcc_rx, dag_rx);
+    eventually("the cursor seeded", || cursor(&dir).is_some()).await;
+    let foreground = Foreground::new();
+
+    let (sent, accepting) = (h(0x61), h(0xA6));
+    tracker.watch(&sent.to_string(), WatchSource::Send);
+    let claim = foreground.claim(Duration::from_secs(60));
+    let released = tracker.release_at_acceptance(
+        foreground.clone(),
+        claim,
+        sent.to_string(),
+        Duration::from_secs(30),
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(foreground.is_claimed(), "released before the acceptance");
+    vcc_tx
+        .send(batch(
+            vec![],
+            vec![accepting],
+            vec![(accepting, vec![sent])],
+        ))
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), released)
+        .await
+        .expect("still claimed after the acceptance")
+        .unwrap();
+    assert!(!foreground.is_claimed());
+
+    let never = h(0x62);
+    tracker.watch(&never.to_string(), WatchSource::Send);
+    let claim = foreground.claim(Duration::from_secs(60));
+    let started = Instant::now();
+    tracker
+        .release_at_acceptance(
+            foreground.clone(),
+            claim,
+            never.to_string(),
+            Duration::from_millis(500),
+        )
+        .await
+        .unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(500));
+    assert!(
+        !foreground.is_claimed(),
+        "an unaccepted send kept the socket"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A sink score queued before the cold walk finalizes nothing.** The run
+/// loop's `select!` picks among ready branches at random, so a score waiting
+/// at the start can be folded before the walk is first polled; a record past
+/// the terminal depth would then be finalized, out of reach of the walk's
+/// removal of its block. Fifty starts from one recorded close cover both
+/// orders.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sink_score_queued_before_the_cold_walk_finalizes_nothing() {
+    let base = std::env::temp_dir().join(format!("kv-cursor-sink-first-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let fake = FakeRpc::new(NetworkId::new(NetworkType::Mainnet));
+    let (sent, accepting, after) = (h(0x71), h(0xA7), h(0xB7));
+    {
+        let tracker = AcceptanceTracker::load(base.clone()).unwrap();
+        tracker.watch(&sent.to_string(), WatchSource::Send);
+        let (vcc_tx, vcc_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (_dag_tx, dag_rx) = tokio::sync::broadcast::channel(16);
+        let task = tracker.run(fake.rpc(RpcCtl::new()), vcc_rx, dag_rx);
+        eventually("the cursor seeded", || cursor(&base).is_some()).await;
+        vcc_tx
+            .send(batch(
+                vec![],
+                vec![accepting],
+                vec![(accepting, vec![sent])],
+            ))
+            .unwrap();
+        eventually("the cursor at the accepting block", || {
+            cursor(&base) == Some(accepting)
+        })
+        .await;
+        task.abort();
+    }
+    fake.set_sink_blue_score(3_500);
+    fake.set_vcc_page(
+        accepting,
+        GetVirtualChainFromBlockResponse {
+            removed_chain_block_hashes: vec![accepting],
+            added_chain_block_hashes: vec![after],
+            accepted_transaction_ids: vec![],
+        },
+    );
+    for run in 0..50 {
+        let dir = base.join(format!("run-{run}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in ["acceptance.kvlog", "vcc.cursor"] {
+            std::fs::copy(base.join(file), dir.join(file)).unwrap();
+        }
+        let tracker = AcceptanceTracker::load(dir.clone()).unwrap();
+        let (_vcc_tx, vcc_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (dag_tx, dag_rx) = tokio::sync::broadcast::channel(16);
+        dag_tx.send(DagEvent::SinkBlueScore(3_600)).unwrap();
+        let task = tracker.run(fake.rpc(RpcCtl::new()), vcc_rx, dag_rx);
+        eventually("the walk's removal displaced the send", || {
+            tracker.status(&sent.to_string()) == Some(TxStatus::Displaced)
+        })
+        .await;
+        task.abort();
+    }
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// **A send read ahead during a walk is not written ahead of the cursor.** Its
+/// acceptance is read from a live batch while the walk's page is held; the
+/// process is killed before the walk ends. Written then, the acceptance would
+/// sit on disk at a block `vcc.cursor` is behind, so no later walk could see
+/// that block leave the chain, and a send that never landed would read
+/// Confirmed. Reloaded, it is as it was before the batch: Submitted.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_send_read_ahead_during_a_walk_is_not_written_before_its_batch_folds() {
+    let behind = h(0xC2);
+    let dir = dir_with_cursor("read-ahead-kill", behind);
+    let fake = FakeRpc::new(NetworkId::new(NetworkType::Mainnet));
+    let _page = fake.hold_vcc_pages();
+    let tracker = AcceptanceTracker::load(dir.clone()).unwrap();
+    let (vcc_tx, vcc_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_dag_tx, dag_rx) = tokio::sync::broadcast::channel(16);
+    let task = tracker.run(fake.rpc(RpcCtl::new()), vcc_rx, dag_rx);
+    fake.wait_until("the cold walk's page in flight", WAIT, |f| {
+        f.vcc_calls(1) >= 1
+    })
+    .await;
+    let (sent, accepting) = (h(0x81), h(0xA8));
+    tracker.watch(&sent.to_string(), WatchSource::Send);
+    vcc_tx
+        .send(batch(
+            vec![],
+            vec![accepting],
+            vec![(accepting, vec![sent])],
+        ))
+        .unwrap();
+    eventually("the send read ahead", || {
+        matches!(
+            tracker.status(&sent.to_string()),
+            Some(TxStatus::Accepted { .. })
+        )
+    })
+    .await;
+
+    task.abort();
+    let reloaded = AcceptanceTracker::load(dir.clone()).unwrap();
+    assert_eq!(
+        reloaded.status(&sent.to_string()),
+        Some(TxStatus::Submitted),
+        "an acceptance was written ahead of the cursor"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -642,6 +642,7 @@ pub async fn send_prepare(
     let nonce = next_nonce();
     let summary = prepared.summary().clone();
     *PENDING_SEND.lock().unwrap_or_else(PoisonError::into_inner) = Some((nonce, prepared));
+    dag::claim_socket_for_review();
 
     Ok(project_signable(
         nonce,
@@ -683,6 +684,7 @@ pub async fn sweep_prepare(destination: String) -> Result<SignableSummaryDto, Ap
     let nonce = next_nonce();
     let summary = prepared.summary().clone();
     *PENDING_SEND.lock().unwrap_or_else(PoisonError::into_inner) = Some((nonce, prepared));
+    dag::claim_socket_for_review();
     Ok(project_signable(nonce, SignableKind::Sweep, &summary, None))
 }
 
@@ -726,6 +728,7 @@ pub async fn consolidate_prepare() -> Result<SignableSummaryDto, AppError> {
     let nonce = next_nonce();
     let summary = prepared.summary().clone();
     *PENDING_SEND.lock().unwrap_or_else(PoisonError::into_inner) = Some((nonce, prepared));
+    dag::claim_socket_for_review();
     let mut dto = project_signable(nonce, SignableKind::Consolidate, &summary, None);
     if let Some(saving) = savings {
         dto.typical_amount_sompi = Some(saving.amount_sompi);
@@ -886,6 +889,9 @@ pub(crate) async fn commit_and_advance(prepared: PreparedSend) -> SendOutcomeDto
         }
     };
     let watcher = tracker.clone();
+    // The send has the socket until its acceptance: no catch-up page is asked
+    // for in front of its submit, its acceptance, or its block's read.
+    let socket_claim = dag::claim_socket_for_commit();
     let mut hook = tracker.map(|tracker| {
         move |txid: &str, signed_tx: kaspaverse_chain::RpcTransaction| {
             tracker.watch(txid, kaspaverse_chain::WatchSource::Send);
@@ -923,6 +929,12 @@ pub(crate) async fn commit_and_advance(prepared: PreparedSend) -> SendOutcomeDto
     if let (Some(tracker), Some(txid)) = (&watcher, &outcome.unanswered) {
         tracker.watch(txid, kaspaverse_chain::WatchSource::Send);
     }
+    let awaited = if fully_broadcast(&outcome) {
+        outcome.final_txid.clone()
+    } else {
+        None
+    };
+    dag::release_socket_at_acceptance(socket_claim, awaited, watcher.clone());
 
     SendOutcomeDto {
         final_txid: outcome.final_txid,
@@ -945,6 +957,7 @@ pub async fn send_commit(nonce: u64) -> Result<SendOutcomeDto, AppError> {
 /// Drop any stashed send (confirm dismissed / back-gesture). Idempotent.
 pub fn send_abandon() {
     *PENDING_SEND.lock().unwrap_or_else(PoisonError::into_inner) = None;
+    dag::release_review_claim();
 }
 
 #[cfg(test)]

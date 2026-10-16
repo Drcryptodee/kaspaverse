@@ -327,13 +327,15 @@ fn hygiene_may_degrade(mode: &RaceMode, empty_rounds: u32) -> bool {
     empty_rounds >= 2 && matches!(mode, RaceMode::Cold)
 }
 
-/// How long the V2b fill waits for the message walk to settle after an arm,
-/// so node truth folds before any indexer claim (D-074's order). A run that
-/// cannot reach its node ends in about eight seconds (the walk's retries); one
-/// whose page times out ends at the page timeout (60 s); a full catch-up is up
-/// to three runs of sixteen pages (a landing on the mark a lock left, one on
-/// the arm's own, then the tip), since a budget that lands on a mark walks on
-/// unsettled (D-344). Past this the fill runs anyway, as it did after a
+/// How long the V2b fill waits for the message walk to settle after an arm, so
+/// node truth folds before any indexer claim. A run that cannot reach its node
+/// ends in about eight seconds (the walk's retries); one whose page times out
+/// ends at the page timeout (60 s); a full catch-up is up to three runs of
+/// sixteen pages (a landing on the mark a lock left, one on the arm's own, then
+/// the tip), since a budget that lands on a mark walks on unsettled. A send in
+/// progress holds catch-up pages back for at most its claims (`foreground`):
+/// 20 s under review, then 15 s from its commit, renewed for 15 s at the
+/// broadcast's answer. Past this the fill runs anyway, as it did after a
 /// catch-up that ended early.
 pub const INTAKE_SETTLE_WAIT: Duration = Duration::from_secs(120);
 
@@ -943,6 +945,8 @@ struct Inner {
     /// Poked by this socket's `VirtualChainChanged` and by every publish; armed
     /// by the hub at unlock, held at lock.
     walk: Arc<Walk>,
+    /// The sends on this socket, which every catch-up page waits for.
+    foreground: Arc<crate::foreground::Foreground>,
     /// The walk's transport matcher, kept to hand it the hub's sink at arm.
     transport_matcher: Arc<TransportMatcher>,
     /// Unix-seconds of the last DAA tick, process-wide (0 = none yet). This is
@@ -1081,6 +1085,8 @@ impl DagMonitor {
             devab.clone(),
         );
         let walk = Walk::new(vec![transport_matcher.clone() as Arc<dyn walk::WalkMatcher>]);
+        let foreground = crate::foreground::Foreground::new();
+        walk.yield_to(foreground.clone());
         Ok(Self {
             inner: Arc::new(Inner {
                 link_rpc: LinkRpc::new(),
@@ -1109,6 +1115,7 @@ impl DagMonitor {
                 direct_url: Mutex::new(url),
                 paused: AtomicBool::new(false),
                 walk,
+                foreground,
                 transport_matcher,
                 last_tick_at: AtomicU64::new(0),
                 daa_ticks: AtomicU64::new(0),
@@ -1142,6 +1149,13 @@ impl DagMonitor {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tx);
         rx
+    }
+
+    /// The sends on this socket ([`crate::foreground::Foreground`]): a send
+    /// claims it from its review until its acceptance, and every catch-up
+    /// page, the message walk's and the acceptance tracker's, waits for it.
+    pub fn foreground(&self) -> Arc<crate::foreground::Foreground> {
+        self.inner.foreground.clone()
     }
 
     /// Tell the monitor where to remember the last-good endpoint (app-private

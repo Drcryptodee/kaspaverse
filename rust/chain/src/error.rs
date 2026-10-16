@@ -34,6 +34,13 @@ pub enum ChainError {
     /// DESTROY the covenant's state machine, and any stake riding it, as a
     /// side effect. Not recoverable — a withholding, never a demotion.
     CovenantBoundInput { outpoint: String },
+    /// A payment to this destination got no answer and another send of ours
+    /// in flight spends every coin it holds: a payment built now could
+    /// conflict with neither, so it waits until one settles.
+    PaymentStillSettling,
+    /// A payment to this destination that got no answer has since been seen
+    /// on the network: named once, before another is built.
+    EarlierPaymentWentThrough,
     /// A chain-layer message with no upstream source.
     Message(String),
 }
@@ -58,6 +65,12 @@ impl fmt::Display for ChainError {
                 "coin {outpoint} is locked in a contract and moves only through \
                  the contract's own paths — nothing was sent"
             ),
+            ChainError::PaymentStillSettling => {
+                f.write_str("Your earlier payment to this address may still go through. Try again in a few seconds.")
+            }
+            ChainError::EarlierPaymentWentThrough => {
+                f.write_str("Your earlier payment to this address went through.")
+            }
             ChainError::Message(m) => f.write_str(m),
         }
     }
@@ -73,6 +86,8 @@ impl std::error::Error for ChainError {
             | ChainError::StorageMassExceeded { .. }
             | ChainError::TransactionTooHeavy
             | ChainError::CovenantBoundInput { .. }
+            | ChainError::PaymentStillSettling
+            | ChainError::EarlierPaymentWentThrough
             | ChainError::Message(_) => None,
         }
     }
@@ -135,5 +150,18 @@ mod tests {
         assert!(node.contains("rejected"), "{node:?}");
         let ours = "a message of our own, longer than a node's is allowed. ".repeat(8);
         assert_eq!(ChainError::Message(ours.clone()).to_screen_text(), ours);
+    }
+
+    /// The Send form's two refusals read as approved, word for word.
+    #[test]
+    fn the_send_forms_refusals_read_as_approved() {
+        assert_eq!(
+            ChainError::PaymentStillSettling.to_screen_text(),
+            "Your earlier payment to this address may still go through. Try again in a few seconds."
+        );
+        assert_eq!(
+            ChainError::EarlierPaymentWentThrough.to_screen_text(),
+            "Your earlier payment to this address went through."
+        );
     }
 }

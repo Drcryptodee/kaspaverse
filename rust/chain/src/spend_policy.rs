@@ -87,7 +87,7 @@
 use std::collections::HashSet;
 
 use kaspa_wallet_core::prelude::Address;
-use kaspa_wallet_core::utxo::UtxoEntryReference;
+use kaspa_wallet_core::utxo::{UtxoEntryId, UtxoEntryReference};
 
 /// How many of the wallet's smallest coins ride along on every send — see the
 /// module doc for the derivation and the bounded, stated marginal cost.
@@ -230,6 +230,65 @@ pub(crate) fn select_spend_priority(
     order
 }
 
+/// **The order with the coins of our sends of unknown fate placed**
+/// (`InFlightSends::anchoring`). `first` leads: a build paying the destination
+/// of a send that got no answer spends that send's coins, so the two conflict
+/// and at most one of them lands. A pinned block keeps input[0] at its own
+/// address, so only `first`'s coins at that address go ahead of it, and the
+/// rest of `first` follows it. `last` goes behind everything: another
+/// payment draws such a coin only when nothing else covers it.
+pub(crate) fn anchored(
+    order: Vec<UtxoEntryReference>,
+    pinned: &[UtxoEntryReference],
+    first: &[UtxoEntryReference],
+    last: &[UtxoEntryReference],
+) -> Vec<UtxoEntryReference> {
+    if first.is_empty() && last.is_empty() {
+        return order;
+    }
+    // A pinned coin stays in its block, whatever else wants it: input[0] is a
+    // message's identity, and a message that keeps it conflicts with the
+    // payment that shares it anyway.
+    let pinned_ids: HashSet<UtxoEntryId> = pinned.iter().map(|coin| coin.id()).collect();
+    let mut placed: HashSet<UtxoEntryId> = HashSet::new();
+    let mut take = |coins: &[UtxoEntryReference]| -> Vec<UtxoEntryReference> {
+        coins
+            .iter()
+            .filter(|coin| !is_covenant_bound(coin) && placed.insert(coin.id()))
+            .cloned()
+            .collect()
+    };
+    let first = take(first);
+    let last: Vec<UtxoEntryReference> = last
+        .iter()
+        .filter(|coin| !pinned_ids.contains(&coin.id()))
+        .cloned()
+        .collect();
+    let last = take(&last);
+    let rest: Vec<UtxoEntryReference> = order
+        .into_iter()
+        .filter(|coin| !placed.contains(&coin.id()))
+        .collect();
+    let pinned_len = rest
+        .iter()
+        .take_while(|coin| pinned_ids.contains(&coin.id()))
+        .count();
+    let (pinned_rest, tail) = rest.split_at(pinned_len);
+    let bound = pinned.first().and_then(|coin| coin.utxo.address.clone());
+    let (lead, after): (Vec<UtxoEntryReference>, Vec<UtxoEntryReference>) = match bound {
+        Some(bound) => first
+            .into_iter()
+            .partition(|coin| coin.utxo.address.as_ref() == Some(&bound)),
+        None => (first, Vec::new()),
+    };
+    lead.into_iter()
+        .chain(pinned_rest.iter().cloned())
+        .chain(after)
+        .chain(tail.iter().cloned())
+        .chain(last)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,6 +389,81 @@ mod tests {
 
     fn at(kas: f64, address: &str) -> UtxoEntryReference {
         UtxoEntryReference::simulated_with_address(kaspa_to_sompi(kas), &addr(address))
+    }
+
+    /// **A payment's anchors lead and the other legs' coins trail**, each
+    /// once, and a covenant coin is placed nowhere.
+    #[test]
+    fn anchors_lead_a_payment_and_other_legs_coins_trail() {
+        let (a, b, c, d) = (at(1.0, FREE), at(2.0, FREE), at(3.0, FREE), at(4.0, FREE));
+        let order = vec![a.clone(), b.clone(), c.clone(), d.clone()];
+        let anchored = anchored(order, &[], &[c.clone(), c], std::slice::from_ref(&a));
+        assert_eq!(amounts(&anchored), kas(&[3.0, 2.0, 4.0, 1.0]));
+        let covenant = covenant_entry(9.0);
+        let untouched = anchored_order(std::slice::from_ref(&b), std::slice::from_ref(&covenant));
+        assert!(untouched.iter().all(|e| !is_covenant_bound(e)));
+    }
+
+    fn anchored_order(
+        order: &[UtxoEntryReference],
+        first: &[UtxoEntryReference],
+    ) -> Vec<UtxoEntryReference> {
+        anchored(order.to_vec(), &[], first, &[])
+    }
+
+    /// **A message keeps input[0] at its own address.** Only an anchor at the
+    /// pinned block's address goes ahead of it; the other anchors follow the
+    /// block, then the rest of the order, then the coins drawn last.
+    #[test]
+    fn a_pinned_block_keeps_input_zero_and_its_own_anchor_leads_it() {
+        let own = at(1.0, BOUND);
+        let pinned = vec![at(50.0, BOUND), own.clone()];
+        let elsewhere = at(2.0, FREE);
+        let rest = at(7.0, FREE);
+        let trailing = at(0.5, FREE);
+        let order = select_spend_priority(
+            &[
+                pinned[0].clone(),
+                own.clone(),
+                elsewhere.clone(),
+                rest.clone(),
+                trailing.clone(),
+            ],
+            &pinned,
+            0,
+            &[],
+        );
+        let anchored = anchored(
+            order,
+            &pinned,
+            &[own.clone(), elsewhere.clone()],
+            std::slice::from_ref(&trailing),
+        );
+        assert_eq!(amounts(&anchored), kas(&[1.0, 50.0, 2.0, 7.0, 0.5]));
+        assert_eq!(anchored[0].utxo.address, Some(addr(BOUND)));
+    }
+
+    /// **A pinned coin another leg would draw last stays in its block.**
+    /// Moved to the tail, the message's input[0] would come from another
+    /// address and its identity would split.
+    #[test]
+    fn a_pinned_coin_never_trails_off_input_zero() {
+        let bound = at(3.0, BOUND);
+        let free = at(9.0, FREE);
+        let order = select_spend_priority(
+            &[bound.clone(), free.clone()],
+            std::slice::from_ref(&bound),
+            0,
+            &[],
+        );
+        let anchored = anchored(
+            order,
+            std::slice::from_ref(&bound),
+            &[],
+            std::slice::from_ref(&bound),
+        );
+        assert_eq!(anchored[0].utxo.address, Some(addr(BOUND)));
+        assert_eq!(amounts(&anchored), kas(&[3.0, 9.0]));
     }
 
     /// A conversation's coins sort DEAD LAST — behind every free coin, and
