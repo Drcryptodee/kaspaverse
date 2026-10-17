@@ -486,6 +486,13 @@ Future<WipeReportDto> transportWipePreview() =>
 ///   (`consensus-auditor`, 2026-08-17, dispositioned). IDEAS_BACKLOG carries
 ///   its trigger.
 /// - The vault, keys and coins. This erases messages, never money.
+/// - The record of the wallet's sends in flight (`wallet/activity.sends`): a
+///   send to a conversation or a contact is keyed there by that conversation's
+///   id or that contact's address, public on the wire, until its fate is
+///   settled, and a notice that one landed keeps its key until it is read or
+///   newer ones push it out. Removing the key would let a retry pay twice.
+///   Records of it that could not be decoded are kept in `wallet/unreadable/`
+///   with their keys, and nothing erases those but clearing the app's data.
 ///
 /// **What it cannot do:** reach the chain. Every message is public ciphertext
 /// on a public DAG, permanently, and anyone holding the seed can decrypt it

@@ -1391,7 +1391,7 @@ class _ToHead extends StatelessWidget {
 /// the wallet is doing, and the emphasis marks which one is now.
 ///
 /// Splitting the first two into observed facts means a progress signal
-/// crossing the FFI from `commit_and_advance`'s per-txid submit hook, which is
+/// crossing the FFI from `commit_and_watch`'s per-txid submit hook, which is
 /// a bridge surface change (T3) and is recorded in the phase register, not
 /// faked here.
 class _StagedWait extends StatelessWidget {

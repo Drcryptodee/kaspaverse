@@ -60,7 +60,11 @@
 //!    send after its transaction had left. A submit now holds the fence's read
 //!    side from just before the pinned call until it returns, and a close or a
 //!    stop of the processor takes the write side first: it waits for the submit,
-//!    and a submit that arrives while it is in progress waits for it.
+//!    and a submit that arrives while it is in progress waits for it. From the
+//!    moment a close begins, no submit not yet admitted is admitted until the
+//!    next open: the close's claim on the write side is queued from its own
+//!    task, and a submit that reached the fence before that claim would
+//!    otherwise go first and hold the close behind it.
 //!    A submit is also admitted only once the lane is ready: the processor's
 //!    start has been followed through by the lane's fold (its sends handed back,
 //!    its subscription re-armed, its rescan done). The pin sets `is_connected`
@@ -110,7 +114,9 @@ use kaspa_notify::connection::Connection;
 use kaspa_rpc_core::api::connection::DynRpcConnection;
 use kaspa_wallet_core::events::Events;
 use kaspa_wallet_core::rpc::{DynRpcApi, Rpc, RpcCtl};
-use kaspa_wallet_core::utxo::{UtxoContext, UtxoContextBinding, UtxoProcessor};
+use kaspa_wallet_core::utxo::{
+    UtxoContext, UtxoContextBinding, UtxoEntryId, UtxoEntryReference, UtxoProcessor,
+};
 use kaspa_wrpc_client::prelude::*;
 
 use crate::link_rpc::rpc_call_table;
@@ -554,6 +560,19 @@ pub(crate) struct Lane {
     opens_failed: AtomicU64,
     /// Starts the lane's fold has followed through ([`Lane::start_folded`]).
     starts_folded: AtomicU64,
+    /// A close has begun and no open has followed: no submit is admitted.
+    closing: AtomicBool,
+    /// Closes begun on this lane.
+    closes_begun: AtomicU64,
+    /// The processor's pending coins as the last close found them: its
+    /// `cleanup()` empties the map (pin `processor.rs:609-615`) while the
+    /// context keeps its copy, so a read re-arms them
+    /// ([`crate::wallet_sync::WalletEngine::file_from_node`]).
+    pending_at_close: Mutex<Vec<UtxoEntryReference>>,
+    /// Holds a close's claim on the fence back until it has a permit
+    /// ([`crate::wallet_sync::WalletEngine::hold_close_claims`]): the delay a
+    /// busy scheduler puts between a close beginning and its claim queueing.
+    claim_hold: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
 }
 
 /// Why a submit was refused before anything was broadcast.
@@ -613,6 +632,10 @@ impl Lane {
             opens: AtomicU64::new(0),
             opens_failed: AtomicU64::new(0),
             starts_folded: AtomicU64::new(0),
+            closing: AtomicBool::new(false),
+            closes_begun: AtomicU64::new(0),
+            pending_at_close: Mutex::new(Vec::new()),
+            claim_hold: Mutex::new(None),
         })
     }
 
@@ -631,15 +654,53 @@ impl Lane {
     /// the fold has followed through every start the relay asked for (part 4
     /// above). Every start comes from a counted open: the lane's ctl reads
     /// disconnected until the relay signals one, so the pinned `start()`
-    /// connects on nothing of its own (`processor.rs:704-705`). A close that
-    /// has begun is ordered by the fence, not here.
+    /// connects on nothing of its own (`processor.rs:704-705`). From the
+    /// moment a close begins until the next open the lane is not ready; a
+    /// submit admitted before the close began is ordered by the fence.
     pub(crate) fn is_ready(&self) -> bool {
-        if !self.processor.is_connected() {
+        if self.closing.load(Ordering::SeqCst) || !self.processor.is_connected() {
             return false;
         }
         let opens = self.opens.load(Ordering::SeqCst);
         self.starts_folded.load(Ordering::SeqCst) + self.opens_failed.load(Ordering::SeqCst)
             >= opens
+    }
+
+    /// Whether a close has begun and no open has followed.
+    pub(crate) fn is_closing(&self) -> bool {
+        self.closing.load(Ordering::SeqCst)
+    }
+
+    /// How many closes this lane has begun.
+    pub(crate) fn closes_begun(&self) -> u64 {
+        self.closes_begun.load(Ordering::SeqCst)
+    }
+
+    /// The coins the processor held pending at the last close and that no
+    /// read has re-armed yet.
+    pub(crate) fn pending_at_close(&self) -> Vec<UtxoEntryReference> {
+        self.pending_at_close
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// A read re-armed these, or showed them gone: they leave the list, unless
+    /// a close has begun since the read counted `closes` (its snapshot may
+    /// predate the read's registrations, which its `cleanup()` then empties).
+    /// Checked under the list's lock, which the close's snapshot takes too.
+    pub(crate) fn pending_settled_unless_closed(
+        &self,
+        closes: u64,
+        ids: &std::collections::HashSet<UtxoEntryId>,
+    ) {
+        let mut kept = self
+            .pending_at_close
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if self.closes_begun.load(Ordering::SeqCst) == closes {
+            kept.retain(|coin| !ids.contains(&coin.id()));
+        }
     }
 
     /// The fold has followed a start through: the sends it holds are handed
@@ -693,10 +754,14 @@ impl Lane {
                     tokio::time::timeout_at(deadline, self.processor.notification_lock())
                         .await
                         .map_err(|_| NotAdmitted::NotReady)?;
-                    return Ok(guard);
+                    // A close that began during that wait admits it no more.
+                    if self.is_ready() {
+                        return Ok(guard);
+                    }
                 }
-                // The close it waited for disconnected the processor: wait
-                // for the lane to be ready again like any other submit.
+                // The close it waited for disconnected the processor, or one
+                // has begun: wait for the lane to be ready again like any
+                // other submit.
                 continue;
             }
             tokio::select! {
@@ -719,10 +784,31 @@ impl Lane {
     fn queue_for_fence(&self) -> tokio::sync::oneshot::Receiver<OwnedRwLockWriteGuard<()>> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let fence = self.fence.clone();
+        let hold = self
+            .claim_hold
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
         tokio::spawn(async move {
+            if let Some(hold) = hold {
+                if let Ok(permit) = hold.acquire().await {
+                    permit.forget();
+                }
+            }
             let _ = tx.send(fence.write_owned().await);
         });
         rx
+    }
+
+    /// Hold every later close's claim on the fence until the returned
+    /// semaphore grants a permit.
+    pub(crate) fn hold_close_claims(&self) -> Arc<tokio::sync::Semaphore> {
+        let hold = Arc::new(tokio::sync::Semaphore::new(0));
+        *self
+            .claim_hold
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(hold.clone());
+        hold
     }
 
     /// Arm the dev fault (`lanefault=1`, the dev install only).
@@ -978,6 +1064,7 @@ impl Lane {
     /// An open: carry the descriptor across, and signal the processor. One that
     /// is already connected ignores it (pin `:717-718`), so nothing is awaited.
     fn open(&self) -> Step {
+        self.closing.store(false, Ordering::SeqCst);
         self.ctl.set_descriptor(self.upstream.descriptor());
         if self.processor.is_connected() {
             let _ = self.ctl.try_signal_open();
@@ -989,11 +1076,18 @@ impl Lane {
         Step::AwaitingOpen
     }
 
-    /// A close, first half: end the epoch, so nothing more is admitted; the
+    /// A close, first half: end the epoch and admit no further submit; the
     /// close itself waits for the drain.
     fn close_begin(&self) -> Step {
+        let fault = self.fault_armed.swap(false, Ordering::SeqCst);
+        if !fault {
+            // Before the transition's wake-up, so a submit waiting for
+            // readiness that it wakes reads the close.
+            self.closing.store(true, Ordering::SeqCst);
+            self.closes_begun.fetch_add(1, Ordering::SeqCst);
+        }
         self.begin(Transition::Close);
-        if self.fault_armed.swap(false, Ordering::SeqCst) {
+        if fault {
             return self.replay_pre_fix_close();
         }
         self.gate.sever();
@@ -1004,6 +1098,22 @@ impl Lane {
     /// processor may read disconnected now.
     fn close_deliver(&self) -> Step {
         let connected = self.processor.is_connected();
+        // Before the processor can read the close and clear its maps. A coin
+        // still unsettled from an earlier close stays listed beside them.
+        {
+            let mut kept = self
+                .pending_at_close
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let mut seen: std::collections::HashSet<UtxoEntryId> =
+                kept.iter().map(|coin| coin.id()).collect();
+            for entry in self.processor.pending().iter() {
+                let coin: UtxoEntryReference = entry.value().clone().into();
+                if seen.insert(coin.id()) {
+                    kept.push(coin);
+                }
+            }
+        }
         let _ = self.ctl.try_signal_close();
         if connected {
             Step::AwaitingStop

@@ -385,12 +385,79 @@ pub(crate) async fn shared_monitor() -> Result<DagMonitor, AppError> {
 /// (D-005). Persisted in the app-private `chain/` dir (public data, INV-3).
 static TRACKER: tokio::sync::OnceCell<Arc<AcceptanceTracker>> = tokio::sync::OnceCell::const_new();
 
+/// A failed bootstrap of the shared tracker, remembered so that the callers
+/// that poll it (the chip's status at 1 Hz, each thread read) get its error
+/// without reading the acceptance log again until the backoff allows another
+/// attempt.
+static TRACKER_RETRY: Mutex<RetryAfter> = Mutex::new(RetryAfter::new());
+
+/// **Capped exponential backoff for a bootstrap that failed**, gRPC's
+/// connection backoff without its jitter (one local reader, no herd to
+/// spread): the first retry after [`RetryAfter::FIRST`], each later wait
+/// [`RetryAfter::GROWTH`] times longer, never past [`RetryAfter::CAP`]; a
+/// success forgets every failure.
+#[derive(Debug)]
+struct RetryAfter {
+    failure: Option<(AppError, Instant, Duration)>,
+}
+
+impl RetryAfter {
+    const FIRST: Duration = Duration::from_secs(1);
+    const GROWTH: f64 = 1.6;
+    const CAP: Duration = Duration::from_secs(120);
+
+    const fn new() -> Self {
+        Self { failure: None }
+    }
+
+    /// The remembered error while the backoff still runs at `now`.
+    fn refused(&self, now: Instant) -> Option<AppError> {
+        let (error, at, wait) = self.failure.as_ref()?;
+        (now < *at + *wait).then(|| error.clone())
+    }
+
+    fn failed(&mut self, error: AppError, now: Instant) {
+        let wait = match &self.failure {
+            None => Self::FIRST,
+            Some((_, _, wait)) => wait.mul_f64(Self::GROWTH).min(Self::CAP),
+        };
+        self.failure = Some((error, now, wait));
+    }
+
+    fn succeeded(&mut self) {
+        self.failure = None;
+    }
+}
+
 /// Get the shared acceptance tracker, bootstrapping it on the first call:
 /// load persistence, attach the VCC forward on the shared monitor, spawn the
 /// tracker task (which immediately runs the reopen catch-up) and the V3
-/// stall-escalation task beside it.
+/// stall-escalation task beside it. A bootstrap that failed is not tried again
+/// until its backoff has run ([`RetryAfter`]).
 pub(crate) async fn shared_tracker() -> Result<Arc<AcceptanceTracker>, AppError> {
-    TRACKER
+    tracker_bootstrap(false).await
+}
+
+/// [`shared_tracker`] for a send: it tries a bootstrap even inside the
+/// backoff, once per send, so a send is watched whenever the tracker can be
+/// had at all.
+pub(crate) async fn shared_tracker_for_send() -> Result<Arc<AcceptanceTracker>, AppError> {
+    tracker_bootstrap(true).await
+}
+
+async fn tracker_bootstrap(past_backoff: bool) -> Result<Arc<AcceptanceTracker>, AppError> {
+    if let Some(tracker) = TRACKER.get() {
+        return Ok(tracker.clone());
+    }
+    if let Some(error) = TRACKER_RETRY
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .refused(Instant::now())
+        .filter(|_| !past_backoff)
+    {
+        return Err(error);
+    }
+    let bootstrapped = TRACKER
         .get_or_try_init(|| async {
             let dir = super::vault::chain_store_dir()?;
             let tracker = AcceptanceTracker::load(dir).map_err(AppError::chain)?;
@@ -403,7 +470,15 @@ pub(crate) async fn shared_tracker() -> Result<Arc<AcceptanceTracker>, AppError>
             Ok::<_, AppError>(tracker)
         })
         .await
-        .cloned()
+        .cloned();
+    let mut retry = TRACKER_RETRY
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match &bootstrapped {
+        Ok(_) => retry.succeeded(),
+        Err(error) => retry.failed(error.clone(), Instant::now()),
+    }
+    bootstrapped
 }
 
 /// Signed-tx retention for stall escalation (V3): the send path deposits every
@@ -1189,6 +1264,48 @@ pub async fn subscribe_dag_updates(sink: StreamSink<DagSnapshot>) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A failed tracker bootstrap is not tried again inside its backoff**:
+    /// every caller gets the remembered error, the wait grows by the factor
+    /// up to the cap, and a success forgets the failures.
+    #[test]
+    fn a_failed_bootstrap_waits_out_a_capped_growing_backoff() {
+        let start = Instant::now();
+        let mut retry = RetryAfter::new();
+        assert!(retry.refused(start).is_none(), "nothing has failed yet");
+
+        retry.failed(AppError::msg("the acceptance log is held"), start);
+        let refused = retry.refused(start).expect("inside the first wait");
+        assert_eq!(refused.message, "the acceptance log is held");
+        assert!(retry
+            .refused(start + RetryAfter::FIRST - Duration::from_millis(1))
+            .is_some());
+        assert!(retry.refused(start + RetryAfter::FIRST).is_none());
+
+        // Each failure lengthens the next wait, never past the cap.
+        let mut at = start;
+        let mut last = RetryAfter::FIRST;
+        for _ in 0..20 {
+            at += RetryAfter::CAP;
+            retry.failed(AppError::msg("still held"), at);
+            let wait = retry.failure.as_ref().map(|(_, _, wait)| *wait).unwrap();
+            assert!(
+                wait >= last && wait <= RetryAfter::CAP,
+                "{wait:?} after {last:?}"
+            );
+            last = wait;
+        }
+        assert_eq!(last, RetryAfter::CAP);
+        assert!(retry
+            .refused(at + RetryAfter::CAP - Duration::from_millis(1))
+            .is_some());
+
+        retry.succeeded();
+        assert!(
+            retry.refused(at).is_none(),
+            "a success forgets the failures"
+        );
+    }
 
     /// **A send's socket claim, from review to commit.** A new review replaces
     /// the last one's claim; an abandoned review gives the socket back; a

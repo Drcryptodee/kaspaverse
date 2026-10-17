@@ -103,7 +103,7 @@ async fn engine_on(
     // The bridge installs this at init; a test binary has no bridge.
     kaspaverse_chain::lane_health::install_panic_hook();
     let store = tmp(name);
-    let _ = std::fs::remove_file(&store);
+    support::remove_store(&store);
     let network_id = NetworkId::new(NetworkType::Mainnet);
     let engine =
         WalletEngine::new(fake.rpc(ctl.clone()), network_id, store.clone()).expect("engine");
@@ -184,7 +184,7 @@ async fn a_processor_task_death_anywhere_is_seen_at_once_and_the_lane_rebuilt() 
         .await
         .expect("stop() returned")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    support::remove_store(&store);
 }
 
 /// **A panic is a reason to look, never a verdict** (`consensus-auditor`
@@ -247,7 +247,7 @@ async fn a_wallet_framework_panic_on_another_task_leaves_a_healthy_lane_alone() 
         .await
         .expect("stop() returned")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    support::remove_store(&store);
 }
 
 /// **A negotiation that never answers is the link's case, not a death**
@@ -300,7 +300,7 @@ async fn a_negotiation_that_never_answers_is_the_links_case_not_a_death() {
         .await
         .expect("stop() returned")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    support::remove_store(&store);
 }
 
 /// **A close that is never acknowledged is a death** — the processor wedged on
@@ -355,7 +355,7 @@ async fn a_close_that_is_never_acknowledged_is_a_death_and_rebuilt() {
         .await
         .expect("stop() returned")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    support::remove_store(&store);
 }
 
 /// **A processor stuck between transitions is seen by the frame it holds**
@@ -443,7 +443,7 @@ async fn a_processor_stuck_between_transitions_is_seen_by_the_frame_it_holds() {
         .await
         .expect("stop() returned inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    support::remove_store(&store);
 }
 
 /// **A frame held behind a slow submit on a live socket is not a death.** A
@@ -485,7 +485,7 @@ async fn a_frame_held_behind_a_submit_inside_the_bound_is_not_a_death() {
         .await
         .expect("stop() returned")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    support::remove_store(&store);
 }
 
 /// **A frame held while the socket is quiet waits for the link**
@@ -544,7 +544,7 @@ async fn a_frame_held_while_the_socket_is_quiet_waits_for_the_link() {
         .await
         .expect("stop() returned inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    support::remove_store(&store);
 }
 
 /// **The restart budget, the pull on a dark lane, the sliding window, and the
@@ -621,7 +621,7 @@ async fn a_crash_loop_is_held_dark_until_a_new_socket() {
         .expect("stop() returned inside its bound")
         .expect("stop");
     assert!(stopped_at.elapsed() <= LANE_STEP_WITHIN + Duration::from_secs(1));
-    let _ = std::fs::remove_file(&store);
+    support::remove_store(&store);
 }
 
 /// **An unanswered negotiation is handed to the link's recovery — once per
@@ -671,7 +671,7 @@ async fn an_unanswered_negotiation_is_reported_to_the_link_once() {
         .await
         .expect("stop() returned")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    support::remove_store(&store);
 }
 
 /// **A dead processor's held frames never hold its close** (`consensus-
@@ -733,7 +733,7 @@ async fn a_dead_processors_held_frames_never_hold_its_close() {
         .await
         .expect("stop() returned inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    support::remove_store(&store);
 }
 
 /// **Nothing rebuilds a stopped engine.** A reported death can reach the
@@ -781,5 +781,5 @@ async fn a_stopped_engine_is_never_rebuilt() {
         1 + budget,
         "a lane was built after the stop"
     );
-    let _ = std::fs::remove_file(&store);
+    support::remove_store(&store);
 }

@@ -49,8 +49,10 @@ pub(crate) const DISCOVERY_DEPTH: u32 = 256;
 /// never drift (risk #5): funds you can see are funds you can spend.
 ///
 /// Each branch is `GAP_LIMIT` past its discovered high-water mark, floored at
-/// `GAP_LIMIT`. Change additionally floors at the send cursor (D-041) so a fresh
-/// change address is always signable even before any discovery has run.
+/// `GAP_LIMIT`. Change additionally floors at the change cursor's last value, so
+/// every change address an earlier build handed out stays watched and signable
+/// even before any discovery has run. Sends no longer move the cursor: change
+/// returns to `receive/0`.
 ///
 /// Superseded `change_window()`, which was `max(GAP_LIMIT, change_cursor + 1)`.
 /// That looked like a widening rule and was not: `change_cursor` counts *our own*
@@ -93,11 +95,8 @@ pub(crate) fn window_from(receive_seen: u32, change_seen: u32, change_cursor: u3
 ///
 /// It must sit **above** the index space the persisted counts can name, never
 /// on it. A window is a COUNT: `build_wallet_signer` registers `0..count`, so a
-/// ceiling equal to the highest index [`next_change_index`] can return would
-/// hand out a change address one past the last signable one. The send would
-/// succeed, return change to an address neither watched nor spendable, and the
-/// cursor would keep naming that same dead index on every send after it. Fixing
-/// an abort by opening a fund-loss path at the same boundary is not a fix.
+/// ceiling equal to the highest index the cursor can name would leave the change
+/// address at that index one past the last watched and signable one.
 ///
 /// The cursor is the taller of the two inputs (`MAX_CHANGE_CURSOR` 100 000
 /// against `MAX_SCAN_MARK` 2048), so this is its ceiling plus one.
@@ -124,24 +123,6 @@ const _: () = assert!(MAX_DISCOVERY_DEPTH <= MANUAL_DISCOVERY_DEPTH);
 /// would silently narrow a window discovery had just proven — the same class of
 /// bug from the other end.
 const _: () = assert!(MANUAL_DISCOVERY_DEPTH + GAP_LIMIT <= MAX_WINDOW);
-
-/// The next change index to hand out — the send cursor (D-041), floored at what
-/// discovery found.
-///
-/// D-041's property is *fresh change per send*, and on a restored wallet the
-/// cursor alone cannot deliver it: `change.cursor` counts broadcasts THIS app
-/// made, so a wallet whose external history already reaches index 77 reads 0 and
-/// the next send returns change to change/0 — an address that history already
-/// spent from, linking the new transaction to it. Discovery knows better, so the
-/// cursor is floored at the discovered mark (a count, so it is already the
-/// next-unused index).
-///
-/// The bound is discovery's bound: it sees only *funded* addresses, so this
-/// floors at the highest index still holding coins, not the highest ever used.
-/// Strictly better than the cursor alone, not perfect.
-pub(crate) fn next_change_index() -> u32 {
-    vault::change_cursor().max(vault::scan_high_water().1)
-}
 
 /// Who asked for a discovery pass — and therefore how deep it may probe and how
 /// long it may take.
@@ -1529,9 +1510,9 @@ mod tests {
     }
 
     #[test]
-    fn the_send_cursor_still_floors_the_change_branch() {
-        // D-041 must survive: a fresh change address is signable the moment the
-        // cursor names it, even before any discovery pass has run.
+    fn the_change_cursor_still_floors_the_change_branch() {
+        // Every change address an earlier build handed out stays watched and
+        // signable, even before any discovery pass has run.
         let (_, change) = window_from(0, 0, 200);
         assert_eq!(change, 201);
     }
@@ -1624,23 +1605,6 @@ mod tests {
             receive, GAP_LIMIT,
             "a collapsed window is the defect itself"
         );
-    }
-
-    #[test]
-    fn the_change_index_is_floored_at_what_discovery_found() {
-        // C3 / D-041: `change.cursor` counts OUR broadcasts, so a restored
-        // wallet reads 0 and would hand out change/0 — an index its external
-        // history already spent from, linking the new tx to that history and
-        // defeating the fresh-per-send property outright. The pure rule, with
-        // the disk reads factored out:
-        let floor = |cursor: u32, change_seen: u32| cursor.max(change_seen);
-        assert_eq!(floor(0, 78), 78, "restored wallet: discovery wins");
-        assert_eq!(
-            floor(120, 78),
-            120,
-            "our own sends went deeper: cursor wins"
-        );
-        assert_eq!(floor(0, 0), 0, "a genuinely fresh wallet still starts at 0");
     }
 
     // ── the retry (the BLOCK: discovery vs a socket that is not up yet) ─────
@@ -1887,11 +1851,11 @@ mod tests {
     }
 
     #[test]
-    fn the_signable_window_always_covers_the_change_index_it_hands_out() {
-        // The invariant that makes C3 safe to apply: whatever index the send
-        // path takes, the signer's window must already reach it, or the fix
-        // would create the very "visible but unspendable" state this track
-        // exists to kill. Both sides read the same two numbers.
+    fn the_signable_window_covers_every_change_index_handed_out_or_found() {
+        // Whatever change index an earlier build's send path took (the cursor)
+        // or discovery found funded, the signer's window must reach it, or a
+        // coin there is visible but unspendable. Both sides read the same two
+        // numbers.
         //
         // The last four pairs are the ones the first version of this test
         // missed: five hand-picked values, none near the ceiling the clamp had
@@ -1916,7 +1880,7 @@ mod tests {
             let (_, window) = window_from(0, change_seen, cursor);
             assert!(
                 window > index,
-                "change window {window} must cover the index {index} it hands out"
+                "change window {window} must cover the index {index}"
             );
         }
     }

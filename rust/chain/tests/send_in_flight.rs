@@ -70,7 +70,7 @@ use kaspaverse_chain::{
     Address, ChainError, Hash, PreparedSend, WalletEngine, WalletEvent, LANE_HOLD_WITHIN,
     LANE_STEP_WITHIN,
 };
-use support::{FakeRpc, SubmitAnswer};
+use support::{remove_store, FakeRpc, SubmitAnswer};
 
 const WAIT: Duration = Duration::from_secs(15);
 const SOMPI_PER_KAS: u64 = 100_000_000;
@@ -212,7 +212,7 @@ async fn funded_with(
     let total: u64 = coins.iter().map(|c| c.utxo_entry.amount).sum();
     fake.set_utxos(coins);
     let store = tmp(name);
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
     let engine = WalletEngine::new(
         fake.rpc(ctl.clone()),
         NetworkId::new(NetworkType::Mainnet),
@@ -337,7 +337,7 @@ async fn a_close_during_a_submit_waits_for_it() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A submit whose request may have left is named; one refused before it is
@@ -413,7 +413,7 @@ async fn a_submit_without_an_answer_is_named_and_a_refused_one_is_not() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// The outpoints a transaction spends.
@@ -486,7 +486,7 @@ async fn a_retry_after_a_send_with_no_answer_conflicts_with_it() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A retry the node takes is no news of the first, even when it is the
@@ -542,7 +542,7 @@ async fn an_identical_retry_the_node_takes_is_no_news_of_the_first() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **The same when the retry's submit straddles a lane rebuild:** the retired
@@ -625,7 +625,7 @@ async fn an_identical_retry_across_a_rebuild_is_no_news_of_the_first() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// Whether `coin` is on the spendable list.
@@ -710,7 +710,7 @@ async fn retry_after_a_reopen(rebuild: bool, name: &str) -> (RpcTransaction, Rpc
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
     (first, second)
 }
 
@@ -791,13 +791,8 @@ async fn a_retry_after_a_failed_reopen_read_still_conflicts() {
         f.utxo_scans(epoch) >= 1
     })
     .await;
-    tokio::time::timeout(WAIT, async {
-        while !engine.lane_up() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the lane serves after the failed read");
+    // The reopen's read took the failure, not a later one.
+    read_failed(&mut events).await;
     assert!(
         !spendable_holds(&engine, &held).await,
         "the failed read filed the coin after all"
@@ -816,7 +811,7 @@ async fn a_retry_after_a_failed_reopen_read_still_conflicts() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// A send with no answer spends one coin at `change()`, old enough for any
@@ -861,13 +856,8 @@ async fn retry_after_an_unseen_spend(name: &str) -> (RpcUtxosByAddressesEntry, R
         f.utxo_scans(epoch) >= 1
     })
     .await;
-    tokio::time::timeout(WAIT, async {
-        while !engine.lane_up() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the lane serves after the failed read");
+    // The reopen's read took the failure, not a later one.
+    read_failed(&mut events).await;
     // Spent while it was off the list: no frame could say so.
     fake.set_utxos(arrived);
     fake.answer_submits(SubmitAnswer::Accept);
@@ -878,7 +868,7 @@ async fn retry_after_an_unseen_spend(name: &str) -> (RpcUtxosByAddressesEntry, R
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
     (held, second)
 }
 
@@ -987,7 +977,7 @@ async fn retry_after_a_young_coin_goes_missing(
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
     (young, second)
 }
 
@@ -1127,13 +1117,8 @@ async fn a_retry_with_no_answer_still_anchors_the_coins_it_led_with() {
         f.utxo_scans(epoch) >= 1
     })
     .await;
-    tokio::time::timeout(WAIT, async {
-        while !engine.lane_up() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the lane serves after the failed read");
+    // The reopen's read took the failure, not a later one.
+    read_failed(&mut events).await;
 
     // The retry leads with the young coins, needs no third, and gets no
     // answer either.
@@ -1167,7 +1152,7 @@ async fn a_retry_with_no_answer_still_anchors_the_coins_it_led_with() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// One KAS to the payee, prepared only: the refusal, if any.
@@ -1286,7 +1271,7 @@ async fn a_retry_waits_while_another_payment_holds_the_unanswered_sends_coins() 
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// A send with no answer whose coin leaves: when `landed`, the send itself
@@ -1363,7 +1348,7 @@ async fn retry_after_an_unanswered_send_left(
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
     (refusal, builds)
 }
 
@@ -1453,7 +1438,7 @@ async fn a_cancelled_legs_coin_spent_before_its_register_is_not_spendable() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A payment to another destination leaves a send of unknown fate alone
@@ -1524,7 +1509,7 @@ async fn another_payment_draws_a_send_of_unknown_fate_last() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A message sent again after one with no answer conflicts with it, from
@@ -1620,7 +1605,7 @@ async fn a_message_sent_again_after_no_answer_conflicts_from_its_own_address() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// The latest activity rows the engine publishes within `within`, read off
@@ -1701,7 +1686,7 @@ async fn a_send_that_lost_to_a_conflict_is_purged_and_never_reads_confirmed() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// Whether some published activity list reads `txid` Confirmed.
@@ -1752,7 +1737,7 @@ async fn a_payment_that_landed_reads_confirmed() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A sweep that landed reads Confirmed.** It leaves no change, so its frame
@@ -1803,7 +1788,7 @@ async fn a_sweep_that_landed_reads_confirmed() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A send a read settled never reads Confirmed from the frame after.** The
@@ -1845,7 +1830,7 @@ async fn a_send_a_read_settled_never_reads_confirmed_from_the_frame_after() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A send that straddles a rebuild still reaches the activity.** The close
@@ -1894,7 +1879,7 @@ async fn a_send_that_straddles_a_rebuild_reaches_the_activity() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A send whose submit fails while the processor's handler is stuck still
@@ -1943,7 +1928,7 @@ async fn a_failed_submit_behind_a_stuck_handler_still_comes_back() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A send in flight across a lane rebuild keeps its coins out until it
@@ -2037,7 +2022,7 @@ async fn a_send_in_flight_across_a_rebuild_keeps_its_coins_out_until_it_lands() 
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A send behind a stuck processor is refused before its broadcast.** The
@@ -2114,7 +2099,7 @@ async fn a_send_behind_a_stuck_processor_is_refused_before_its_broadcast() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// The output of a submitted transaction that pays `to`: its index and value.
@@ -2244,7 +2229,7 @@ async fn a_merge_in_flight_is_unsettled_not_gone() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// A one-KAS payment submitted, then its socket closed before its acceptance
@@ -2321,7 +2306,7 @@ async fn a_send_that_outlives_its_socket_and_landed_is_counted_once() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A send the node may still hold keeps its coin out at a reopen.** The
@@ -2408,8 +2393,7 @@ async fn a_send_the_node_may_still_hold_keeps_its_coin_out_at_a_reopen() {
         (left + change, 0, 0, 0),
         "(mature, pending, outgoing, unsettled)"
     );
-    past_maturity(&fake).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    past_maturity_handled(&fake, &engine).await;
     assert_eq!(WALLET_CORE_PANICS.load(Ordering::SeqCst), panics_before);
     assert_eq!(engine.lane_deaths(), 0);
 
@@ -2417,7 +2401,7 @@ async fn a_send_the_node_may_still_hold_keeps_its_coin_out_at_a_reopen() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A leg the pin cancelled, which landed while the socket was down, is not
@@ -2478,7 +2462,7 @@ async fn a_cancelled_leg_that_landed_while_down_is_not_spendable_again() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A send waiting through a reopen goes out after the reopen's rescan.**
@@ -2525,7 +2509,7 @@ async fn a_send_waiting_through_a_reopen_goes_out_after_its_rescan() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A send built on a lane that has since been replaced is refused before
@@ -2589,7 +2573,7 @@ async fn a_send_built_on_a_replaced_lane_is_refused_before_its_broadcast() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// One more DAA tick, past the user maturity hold (100 DAA, pin
@@ -2605,6 +2589,53 @@ async fn past_maturity(fake: &FakeRpc) {
         .await
             >= 1
     );
+}
+
+/// [`past_maturity`], then wait until the processor's handler has finished
+/// that tick and everything delivered before it: the handler takes the
+/// notification lock's write side for each frame in turn
+/// (`processor.rs:636-637` @ `01b532e`) and stores a tick's score first
+/// (`:263-264`), so once the score is in, the read side is free only after
+/// the tick's promotions.
+async fn past_maturity_handled(fake: &FakeRpc, engine: &WalletEngine) {
+    let processor = engine.context().processor().clone();
+    assert!(
+        processor.current_daa_score() < Some(1_000_200),
+        "the processor is already past the tick: waiting for it proves nothing"
+    );
+    past_maturity(fake).await;
+    tokio::time::timeout(WAIT, async {
+        while processor.current_daa_score() < Some(1_000_200) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        drop(processor.notification_lock().await);
+    })
+    .await
+    .expect("the processor handled the tick");
+}
+
+/// Wait until the wallet lane has begun a close after `before` closes: from
+/// then on it admits no submit until the next open.
+async fn close_begun(engine: &WalletEngine, before: u64) {
+    tokio::time::timeout(WAIT, async {
+        while engine.closes_begun() <= before {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the lane began the close");
+}
+
+/// Wait for the error a read that the fake failed reports
+/// ([`FakeRpc::fail_scans`]).
+async fn read_failed(events: &mut tokio::sync::broadcast::Receiver<WalletEvent>) {
+    next_event(
+        events,
+        WAIT,
+        |e| matches!(e, WalletEvent::Error(text) if text.contains("the UTXO index is unavailable")),
+    )
+    .await
+    .expect("the read failed");
 }
 
 fn txid_of(transaction: &RpcTransaction) -> Hash {
@@ -2654,7 +2685,7 @@ async fn a_send_that_outlives_its_socket_and_landed_matures_its_change() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **An exit sweep the node may still hold keeps its coin out at a reopen.**
@@ -2739,7 +2770,7 @@ async fn an_exit_sweep_the_node_may_still_hold_keeps_its_coin_out_at_a_reopen() 
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A merge chain's accepted batch output, promoted after a reconnect, is no
@@ -2853,7 +2884,7 @@ async fn an_accepted_batch_output_promoted_after_a_reconnect_is_no_lane_death() 
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A batch leg that lands and is purged while the reopen's read is out is
@@ -2981,7 +3012,7 @@ async fn a_batch_leg_purged_while_the_reopen_reads_is_folded_as_landed() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A stop with a submit stuck in flight still returns inside its bound.**
@@ -3019,7 +3050,7 @@ async fn a_stop_with_a_submit_in_flight_returns_inside_its_bound() {
         panics_before,
         "a panic in the pinned wallet framework"
     );
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **An open that ends in the processor's error owes no start.** The
@@ -3068,7 +3099,7 @@ async fn a_send_after_a_failed_open_goes_out_on_the_next_start() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A node's own words reach the receipt filtered.** The pinned client
@@ -3094,7 +3125,7 @@ async fn a_nodes_error_text_reaches_the_receipt_filtered() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// Three hundred coins of half a KAS at the receive address: a merge or a
@@ -3251,8 +3282,7 @@ async fn a_chain_in_flight_across_a_reopen_keeps_every_leg() {
     })
     .await;
     assert_eq!(settled.0 + settled.1, merged);
-    past_maturity(&fake).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    past_maturity_handled(&fake, &engine).await;
     assert_eq!(WALLET_CORE_PANICS.load(Ordering::SeqCst), panics_before);
     assert_eq!(engine.lane_deaths(), 0);
 
@@ -3260,7 +3290,7 @@ async fn a_chain_in_flight_across_a_reopen_keeps_every_leg() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A chain whose earlier legs landed and whose last is in flight keeps
@@ -3339,7 +3369,7 @@ async fn a_chain_whose_last_leg_is_in_flight_withholds_what_it_spends() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A chained payment whose last leg got no answer, and which landed after
@@ -3418,7 +3448,7 @@ async fn a_chained_payment_with_no_answer_that_lands_reads_as_sent() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A reopen whose one read of the node fails files nothing and decides
@@ -3493,7 +3523,7 @@ async fn a_reopen_whose_read_fails_files_nothing_until_the_next_read() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A cancelled last leg's parent output is counted once.** The pin's
@@ -3574,7 +3604,7 @@ async fn a_cancelled_last_legs_parent_output_counts_once() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A read for some addresses judges no send by the coins it did not ask
@@ -3652,7 +3682,7 @@ async fn a_narrow_read_leaves_a_send_it_did_not_ask_about_in_flight() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A read while a submit is out leaves that send to its submit.** The
@@ -3707,7 +3737,7 @@ async fn a_read_during_a_submit_leaves_that_send_to_its_submit() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A send accepted after the node answered keeps its coins out.** The
@@ -3788,7 +3818,7 @@ async fn a_send_accepted_after_the_answer_keeps_its_coins_out() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A read files the coins it found without holding the processor's
@@ -3842,7 +3872,7 @@ async fn a_read_files_new_coins_without_holding_the_handler() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A cancelled leg's parent output, filed by a reopen's read, is taken out
@@ -3883,7 +3913,9 @@ async fn a_cancelled_legs_parent_filed_by_a_reopen_is_taken_out() {
     .await;
     // A close behind that leg's submit: it lands once the submit returns, and
     // the last leg waits for the reopen.
+    let closes = engine.closes_begun();
     ctl.signal_close().await.expect("signal close");
+    close_begun(&engine, closes).await;
     hold.add_permits(1);
     next_event(&mut events, WAIT, |e| {
         matches!(e, WalletEvent::Disconnected)
@@ -3935,7 +3967,7 @@ async fn a_cancelled_legs_parent_filed_by_a_reopen_is_taken_out() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A read before the reopen has handed back the sends files nothing they
@@ -4036,7 +4068,7 @@ async fn a_read_before_the_reopen_hands_back_the_sends_files_nothing_they_create
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// A merge of [`many_coins`] committed with every leg taken and none yet
@@ -4186,7 +4218,7 @@ async fn a_parent_accepted_between_the_answer_and_the_lock_proves_nothing() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A send settled before its acceptance reaches the processor keeps its
@@ -4221,7 +4253,7 @@ async fn a_send_settled_before_its_frame_keeps_its_record_for_it() {
         .await
             >= 1
     );
-    past_maturity(&fake).await;
+    past_maturity_handled(&fake, &engine).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(
         !any_filed(&engine, &added).await,
@@ -4234,7 +4266,7 @@ async fn a_send_settled_before_its_frame_keeps_its_record_for_it() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A send a read settles keeps its record past a stalled handler.** The
@@ -4289,11 +4321,16 @@ async fn a_send_a_read_settles_keeps_its_record_past_a_stalled_handler() {
     // The index shows the earlier legs accepted: the read settles them, at
     // the score it read before waiting for the lock.
     fake.set_utxos(node);
+    let reads = fake.utxo_scans_all();
     let pull = tokio::spawn({
         let engine = engine.clone();
         async move { engine.rescan().await }
     });
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Its score is read as its answer comes back, with no wait in between.
+    fake.wait_until("the pull's read at the node", WAIT, |f| {
+        f.utxo_scans_all() > reads
+    })
+    .await;
     poll.add_permits(usize::MAX >> 4);
     pull.await.expect("the pull's task").expect("the pull");
 
@@ -4327,7 +4364,7 @@ async fn a_send_a_read_settles_keeps_its_record_past_a_stalled_handler() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A read before the reopen withholds an accepted parent's output its last
@@ -4402,7 +4439,7 @@ async fn a_read_before_the_reopen_withholds_an_accepted_parents_output() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A kept leg's parent output, filed by a reopen's read, counts once.** The
@@ -4437,7 +4474,9 @@ async fn a_kept_legs_parent_filed_by_a_reopen_counts_once() {
         f.submitted().len() == legs - 1
     })
     .await;
+    let closes = engine.closes_begun();
     ctl.signal_close().await.expect("signal close");
+    close_begun(&engine, closes).await;
     hold.add_permits(1);
     next_event(&mut events, WAIT, |e| {
         matches!(e, WalletEvent::Disconnected)
@@ -4458,7 +4497,7 @@ async fn a_kept_legs_parent_filed_by_a_reopen_counts_once() {
         !any_filed(&engine, &added).await,
         "the parents' output counts beside the last leg that spends it"
     );
-    past_maturity(&fake).await;
+    past_maturity_handled(&fake, &engine).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(
         !any_filed(&engine, &added).await,
@@ -4470,7 +4509,7 @@ async fn a_kept_legs_parent_filed_by_a_reopen_counts_once() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A send accepted and purged while a read is out keeps its coins out.** The
@@ -4557,7 +4596,7 @@ async fn a_send_purged_inside_the_read_keeps_its_coins_out() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A read while a submit is out leaves that send to its submit, whatever
@@ -4614,7 +4653,7 @@ async fn a_read_during_a_refused_submit_leaves_that_send_to_its_submit() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A send submitted and accepted while a read is out keeps its coins out.**
@@ -4692,7 +4731,7 @@ async fn a_send_submitted_and_accepted_inside_a_read_keeps_its_coins_out() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A send submitted, accepted and purged while a read is out keeps its
@@ -4778,7 +4817,7 @@ async fn a_send_submitted_accepted_and_purged_inside_a_read_keeps_its_coins_out(
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A send in its submit when a read begins, accepted and purged before the
@@ -4868,7 +4907,7 @@ async fn a_send_in_its_submit_when_a_read_begins_keeps_its_coins_out() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// A merge whose legs before the last were taken and accepted (their output
@@ -4964,8 +5003,7 @@ async fn a_close_inside_a_read_leaves_no_landed_send_for_a_promotion() {
         engine.context().pending_utxo_size() > 0,
         "the earlier legs' output was not filed as pending: nothing to promote"
     );
-    past_maturity(&fake).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    past_maturity_handled(&fake, &engine).await;
     assert_eq!(
         WALLET_CORE_PANICS.load(Ordering::SeqCst),
         panics_before,
@@ -4977,7 +5015,7 @@ async fn a_close_inside_a_read_leaves_no_landed_send_for_a_promotion() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
 }
 
 /// **A read after a close, before the reopen, leaves no accepted send's record
@@ -5009,8 +5047,7 @@ async fn a_read_after_a_close_leaves_no_accepted_send_for_a_promotion() {
         engine.context().pending_utxo_size() > 0,
         "the earlier legs' output was not filed as pending: nothing to promote"
     );
-    past_maturity(&fake).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    past_maturity_handled(&fake, &engine).await;
     assert_eq!(
         WALLET_CORE_PANICS.load(Ordering::SeqCst),
         panics_before,
@@ -5022,5 +5059,1425 @@ async fn a_read_after_a_close_leaves_no_accepted_send_for_a_promotion() {
         .await
         .expect("stop inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    remove_store(&store);
+}
+
+/// The activity log and the two send records beside it, as bytes on disk.
+fn store_bytes(store: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    [
+        store.to_path_buf(),
+        kaspaverse_chain::sends_path(store),
+        kaspaverse_chain::spent_path(store),
+    ]
+    .into_iter()
+    .filter_map(|path| Some((path.clone(), std::fs::read(&path).ok()?)))
+    .collect()
+}
+
+/// Stop `engine` and start another on a copy of the store's files as they
+/// stand now, as a relaunch of the app does: a new path, so nothing in this
+/// process's memory carries over; a fresh socket; and the start's read filed
+/// before this returns (its balance follows `Syncing`, `wallet_sync.rs`'s
+/// start arm).
+async fn relaunched(
+    engine: WalletEngine,
+    fake: &Arc<FakeRpc>,
+    store: &std::path::Path,
+) -> Relaunched {
+    let files = store_bytes(store);
+    tokio::time::timeout(Duration::from_secs(10), engine.stop())
+        .await
+        .expect("stop inside its bound")
+        .expect("stop");
+    drop(engine);
+    relaunched_from(files, fake, store).await
+}
+
+/// Start an engine on `files` (taken from the store at `store`) copied to a
+/// new path beside it, as a new process finds them after a crash.
+async fn relaunched_from(
+    files: Vec<(std::path::PathBuf, Vec<u8>)>,
+    fake: &Arc<FakeRpc>,
+    store: &std::path::Path,
+) -> Relaunched {
+    static RUN: AtomicUsize = AtomicUsize::new(0);
+    let next = store.with_file_name(format!(
+        "{}-run{}.kvlog",
+        store
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("store"),
+        RUN.fetch_add(1, Ordering::SeqCst)
+    ));
+    remove_store(&next);
+    for (path, bytes) in files {
+        let to = if path == store {
+            next.clone()
+        } else if path == kaspaverse_chain::sends_path(store) {
+            kaspaverse_chain::sends_path(&next)
+        } else {
+            kaspaverse_chain::spent_path(&next)
+        };
+        std::fs::write(to, bytes).expect("the copied store");
+    }
+    let ctl = RpcCtl::new();
+    let engine = WalletEngine::new(
+        fake.rpc(ctl.clone()),
+        NetworkId::new(NetworkType::Mainnet),
+        next.clone(),
+    )
+    .expect("the relaunched engine");
+    let mut events = engine.subscribe();
+    engine
+        .start(vec![receive(), change()], vec![change()])
+        .await
+        .expect("engine start");
+    fake.begin_epoch();
+    ctl.signal_open().await.expect("signal open");
+    next_event(&mut events, WAIT, |e| matches!(e, WalletEvent::Syncing))
+        .await
+        .expect("the relaunched lane's start");
+    balance_where(&mut events, "the start's read filed", |_, _, _, _| true).await;
+    (engine, events, ctl, next)
+}
+
+/// A relaunched engine, its events, its socket and its store.
+type Relaunched = (
+    WalletEngine,
+    tokio::sync::broadcast::Receiver<WalletEvent>,
+    RpcCtl,
+    std::path::PathBuf,
+);
+
+/// Three 10 KAS coins at the receive address: a one-KAS send draws two (the
+/// Generator tops a small payment up against storage mass,
+/// `generator.rs:838-852` @ `01b532e`) and leaves one.
+fn three_coins() -> Vec<RpcUtxosByAddressesEntry> {
+    [0x51u8, 0x52, 0x53]
+        .into_iter()
+        .map(|n| coin(&receive(), n, 10 * SOMPI_PER_KAS))
+        .collect()
+}
+
+/// `coins` split into those `sent` leaves and those it spends.
+fn left_and_spent(
+    coins: &[RpcUtxosByAddressesEntry],
+    sent: &RpcTransaction,
+) -> (Vec<RpcUtxosByAddressesEntry>, Vec<RpcUtxosByAddressesEntry>) {
+    let spent = spends(sent);
+    coins
+        .iter()
+        .cloned()
+        .partition(|c| !spent.contains(&(c.outpoint.transaction_id, c.outpoint.index)))
+}
+
+/// **A send in flight across a relaunch keeps its coin out until it lands.**
+/// The node took it and the app ends before its acceptance; the node's index
+/// still lists the coin it spends (the send waits in a mempool, which the
+/// index does not see). The relaunched wallet files the other coin and not
+/// that one, and once the send's own output arrives it holds nothing back.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_send_in_flight_across_a_relaunch_keeps_its_coin_out() {
+    let _serial = SERIAL.lock().await;
+    count_wallet_core_panics();
+    let panics_before = WALLET_CORE_PANICS.load(Ordering::SeqCst);
+    let fake = mainnet_fake();
+    let ctl = RpcCtl::new();
+    let coins = three_coins();
+    let (engine, _events, store) =
+        funded_with("relaunch-sent.kvlog", &fake, &ctl, coins.clone()).await;
+    let outcome = one_kas(&engine, &fake, &ctl).await.commit(None).await;
+    assert_eq!((outcome.submitted, outcome.error.clone()), (1, None));
+    let sent = fake.submitted().pop().expect("the payment at the node");
+    let txid = txid_of(&sent);
+    let (left, spent) = left_and_spent(&coins, &sent);
+    assert_eq!(left.len(), 1, "the send leaves one coin");
+
+    let (engine, mut events, _ctl, _) = relaunched(engine, &fake, &store).await;
+    for coin in &spent {
+        assert!(
+            !spendable_holds(&engine, coin).await,
+            "the relaunch filed a coin a send in flight spends"
+        );
+    }
+    assert!(spendable_holds(&engine, &left[0]).await);
+
+    // It lands: its coin goes and its change comes home.
+    let (index, change) = output_to(&sent, &receive());
+    let homed = output_coin(&receive(), txid, index, change, 1_000_001);
+    fake.set_utxos(vec![left[0].clone(), homed.clone()]);
+    assert!(
+        fake.deliver(Notification::UtxosChanged(UtxosChangedNotification {
+            added: Arc::new(vec![homed]),
+            removed: Arc::new(spent.clone()),
+        }))
+        .await
+            >= 1
+    );
+    balance_where(&mut events, "the change home", |m, p, _, _| {
+        m == 10 * SOMPI_PER_KAS && p == change
+    })
+    .await;
+    past_maturity(&fake).await;
+    let matured = balance_where(&mut events, "the change matured", |m, _, _, _| {
+        m == 10 * SOMPI_PER_KAS + change
+    })
+    .await;
+    assert_eq!(matured, (10 * SOMPI_PER_KAS + change, 0, 0, 0));
+    assert_eq!(WALLET_CORE_PANICS.load(Ordering::SeqCst), panics_before);
+
+    tokio::time::timeout(Duration::from_secs(10), engine.stop())
+        .await
+        .expect("stop inside its bound")
+        .expect("stop");
+    remove_store(&store);
+}
+
+/// **A send with no answer still anchors the retry after a relaunch.** The
+/// first payment got no answer and the app ends; coins the policy prefers
+/// arrive. A retry of the same payment from the relaunched wallet spends the
+/// first's coin, so at most one of the two can land.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_leg_of_unknown_fate_across_a_relaunch_still_anchors_the_retry() {
+    let _serial = SERIAL.lock().await;
+    count_wallet_core_panics();
+    let fake = mainnet_fake();
+    let ctl = RpcCtl::new();
+    let held = coin(&receive(), 0x51, 10 * SOMPI_PER_KAS);
+    let (engine, _events, store) =
+        funded_with("relaunch-unknown.kvlog", &fake, &ctl, vec![held.clone()]).await;
+    fake.answer_submits(SubmitAnswer::Fail("WebSocket disconnected".into()));
+    let outcome = one_kas(&engine, &fake, &ctl).await.commit(None).await;
+    assert!(outcome.unanswered.is_some(), "{outcome:?}");
+    let first = fake.submitted().pop().expect("the first at the node");
+
+    // Coins arrive while the app is closed: one larger, two smaller.
+    let arrived = vec![
+        coin(&receive(), 0x63, 50 * SOMPI_PER_KAS),
+        coin(&receive(), 0x64, 3 * SOMPI_PER_KAS / 10),
+        coin(&receive(), 0x65, 4 * SOMPI_PER_KAS / 10),
+    ];
+    let mut node = vec![held];
+    node.extend(arrived);
+    fake.set_utxos(node);
+    let (engine, _events, ctl, _) = relaunched(engine, &fake, &store).await;
+
+    fake.answer_submits(SubmitAnswer::Accept);
+    let retry = one_kas(&engine, &fake, &ctl).await.commit(None).await;
+    assert_eq!((retry.submitted, retry.error.clone()), (1, None));
+    let second = fake.submitted().pop().expect("the retry at the node");
+    assert!(
+        !spends(&first).is_disjoint(&spends(&second)),
+        "the retry after a relaunch spends none of the first's coins: both can land"
+    );
+
+    tokio::time::timeout(Duration::from_secs(10), engine.stop())
+        .await
+        .expect("stop inside its bound")
+        .expect("stop");
+    remove_store(&store);
+}
+
+/// **A deposit still pending at a close matures after the reopen.** The close
+/// clears the processor's pending map and not the context's
+/// (`processor.rs:609-615` @ `01b532e`); the reopen's read skips a coin the
+/// context's map holds (`context.rs:457`), and the processor promotes only
+/// what its own map holds (`:272-283`).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deposit_pending_at_a_close_matures_after_the_reopen() {
+    let _serial = SERIAL.lock().await;
+    count_wallet_core_panics();
+    let panics_before = WALLET_CORE_PANICS.load(Ordering::SeqCst);
+    let fake = mainnet_fake();
+    let ctl = RpcCtl::new();
+    let (engine, mut events, store) = funded("pending-across-close.kvlog", &fake, &ctl).await;
+    // A deposit at the node's own DAA score: pending for the maturity window.
+    let deposit = output_coin(
+        &receive(),
+        Hash::from_bytes([0x66; 32]),
+        0,
+        5 * SOMPI_PER_KAS,
+        1_000_000,
+    );
+    let mut node = vec![
+        coin(&receive(), 0x51, 10 * SOMPI_PER_KAS),
+        coin(&receive(), 0x52, 10 * SOMPI_PER_KAS),
+    ];
+    node.push(deposit.clone());
+    fake.set_utxos(node);
+    assert!(
+        fake.deliver(Notification::UtxosChanged(UtxosChangedNotification {
+            added: Arc::new(vec![deposit]),
+            removed: Arc::new(vec![]),
+        }))
+        .await
+            >= 1
+    );
+    balance_where(&mut events, "the deposit pending", |m, p, _, _| {
+        m == 20 * SOMPI_PER_KAS && p == 5 * SOMPI_PER_KAS
+    })
+    .await;
+
+    ctl.signal_close().await.expect("signal close");
+    next_event(&mut events, WAIT, |e| {
+        matches!(e, WalletEvent::Disconnected)
+    })
+    .await
+    .expect("the processor's disconnect");
+    fake.begin_epoch();
+    ctl.signal_open().await.expect("signal reopen");
+    next_event(&mut events, WAIT, |e| matches!(e, WalletEvent::Syncing))
+        .await
+        .expect("the reopen's start");
+    balance_where(&mut events, "the reopen's read filed", |m, p, _, _| {
+        m == 20 * SOMPI_PER_KAS && p == 5 * SOMPI_PER_KAS
+    })
+    .await;
+
+    past_maturity(&fake).await;
+    let matured = balance_where(&mut events, "the deposit matured", |m, _, _, _| {
+        m == 25 * SOMPI_PER_KAS
+    })
+    .await;
+    assert_eq!(matured, (25 * SOMPI_PER_KAS, 0, 0, 0));
+    assert_eq!(WALLET_CORE_PANICS.load(Ordering::SeqCst), panics_before);
+
+    tokio::time::timeout(Duration::from_secs(10), engine.stop())
+        .await
+        .expect("stop inside its bound")
+        .expect("stop");
+    remove_store(&store);
+}
+
+/// **A reopen onto a node whose index trails our own acceptance files no coin
+/// we spent.** The send landed and its record was purged a hundred DAA after
+/// (`processor.rs:336-349` @ `01b532e`); the reopen reaches a node that has
+/// not yet reached that acceptance: it reports an older virtual DAA score and
+/// still lists the coin the send spent, with no `UtxosChanged` to come for it
+/// until it catches up.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reopen_onto_a_trailing_node_files_no_coin_we_spent() {
+    let _serial = SERIAL.lock().await;
+    count_wallet_core_panics();
+    let fake = mainnet_fake();
+    let ctl = RpcCtl::new();
+    let coins = three_coins();
+    let (engine, mut events, store) =
+        funded_with("trailing-node.kvlog", &fake, &ctl, coins.clone()).await;
+    let outcome = one_kas(&engine, &fake, &ctl).await.commit(None).await;
+    assert_eq!((outcome.submitted, outcome.error.clone()), (1, None));
+    let sent = fake.submitted().pop().expect("the payment at the node");
+    let txid = txid_of(&sent);
+    let (left, spent) = left_and_spent(&coins, &sent);
+    assert_eq!(left.len(), 1, "the send leaves one coin");
+    let (index, change) = output_to(&sent, &receive());
+    let homed = output_coin(&receive(), txid, index, change, 1_000_001);
+    fake.set_utxos(vec![left[0].clone(), homed.clone()]);
+    assert!(
+        fake.deliver(Notification::UtxosChanged(UtxosChangedNotification {
+            added: Arc::new(vec![homed]),
+            removed: Arc::new(spent.clone()),
+        }))
+        .await
+            >= 1
+    );
+    balance_where(&mut events, "the send landed", |m, _, o, _| {
+        o == 0 && m == 10 * SOMPI_PER_KAS + change
+    })
+    .await;
+    // Past the purge of the send's record.
+    past_maturity_handled(&fake, &engine).await;
+
+    ctl.signal_close().await.expect("signal close");
+    next_event(&mut events, WAIT, |e| {
+        matches!(e, WalletEvent::Disconnected)
+    })
+    .await
+    .expect("the processor's disconnect");
+    // The node at the reopen trails: before the send's acceptance.
+    fake.set_virtual_daa_score(999_000);
+    let mut trailing = left.clone();
+    trailing.extend(spent.iter().cloned());
+    fake.set_utxos(trailing);
+    let epoch = fake.begin_epoch();
+    ctl.signal_open().await.expect("signal reopen");
+    next_event(&mut events, WAIT, |e| matches!(e, WalletEvent::Syncing))
+        .await
+        .expect("the reopen's start");
+    fake.wait_until("the reopen's read at the node", WAIT, |f| {
+        f.utxo_scans(epoch) >= 1
+    })
+    .await;
+    balance_where(&mut events, "the reopen's read filed", |_, _, _, _| true).await;
+    for coin in &spent {
+        assert!(
+            !spendable_holds(&engine, coin).await,
+            "a trailing node's listing of a coin we spent was filed as spendable"
+        );
+    }
+    assert!(spendable_holds(&engine, &left[0]).await);
+
+    tokio::time::timeout(Duration::from_secs(10), engine.stop())
+        .await
+        .expect("stop inside its bound")
+        .expect("stop");
+    remove_store(&store);
+}
+
+/// **A close that has begun admits no further leg.** The close claims the
+/// submit fence from a task of its own, which a busy scheduler can run after
+/// the chain's next leg is ready to go: here that claim is held back. The leg
+/// released in that window is not admitted (the close has begun, so the lane
+/// is not ready) and, with the close unable to finish, is refused at its bound
+/// with nothing broadcast. Without the hold it reaches the node and holds the
+/// close behind it. Paused time: every wait resolves in a fixed order.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn a_close_that_has_begun_admits_no_further_leg() {
+    let _serial = SERIAL.lock().await;
+    count_wallet_core_panics();
+    let fake = mainnet_fake();
+    let ctl = RpcCtl::new();
+    let (coins, _) = many_coins();
+    let (engine, _events, store) = funded_with("close-begun.kvlog", &fake, &ctl, coins).await;
+    let prepared = engine
+        .prepare_consolidate(receive(), &[], Arc::new(Unsigned), fake.rpc(ctl.clone()))
+        .await
+        .expect("a buildable merge");
+    let legs = prepared.summary().tx_count as usize;
+    assert!(legs >= 2, "the merge must be a chain, built {legs} leg(s)");
+    let hold = fake.hold_submits();
+    let commit = tokio::spawn(prepared.commit(None));
+    fake.wait_until("the first leg at the node", WAIT, |f| {
+        f.submitted().len() == 1
+    })
+    .await;
+    let claims = engine.hold_close_claims();
+    let closes = engine.closes_begun();
+    ctl.signal_close().await.expect("signal close");
+    close_begun(&engine, closes).await;
+    hold.add_permits(1);
+    let outcome = tokio::time::timeout(LANE_HOLD_WITHIN * 2, commit)
+        .await
+        .expect("the next leg was admitted after the close began and held it")
+        .expect("the send's task must not panic");
+    assert_eq!(outcome.submitted, 1, "{outcome:?}");
+    assert!(
+        outcome.error.is_some() && outcome.unanswered.is_none(),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        fake.submitted().len(),
+        1,
+        "a leg reached the node after the close began"
+    );
+
+    claims.add_permits(64);
+    hold.add_permits(64);
+    tokio::time::timeout(Duration::from_secs(10), engine.stop())
+        .await
+        .expect("stop inside its bound")
+        .expect("stop");
+    remove_store(&store);
+}
+
+/// **A leg in its submit when the app dies still anchors the retry.** Its
+/// record is on disk before the request leaves: a copy of the store taken while
+/// the node holds the submit, as a crash at that instant leaves it, comes back
+/// as a leg that may have left, and a retry of the same payment spends its coin.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_leg_in_its_submit_at_a_crash_still_anchors_the_retry() {
+    let _serial = SERIAL.lock().await;
+    count_wallet_core_panics();
+    let fake = mainnet_fake();
+    let ctl = RpcCtl::new();
+    let held = coin(&receive(), 0x51, 10 * SOMPI_PER_KAS);
+    let (engine, _events, store) =
+        funded_with("crash-in-submit.kvlog", &fake, &ctl, vec![held.clone()]).await;
+    let hold = fake.hold_submits();
+    let prepared = one_kas(&engine, &fake, &ctl).await;
+    let commit = tokio::spawn(prepared.commit(None));
+    fake.wait_until("the submit at the node", WAIT, |f| f.submitted().len() == 1)
+        .await;
+    // The crash: what is on disk while the request is at the node.
+    let files = store_bytes(&store);
+    let first = fake.submitted().pop().expect("the first at the node");
+
+    let arrived = vec![
+        coin(&receive(), 0x63, 50 * SOMPI_PER_KAS),
+        coin(&receive(), 0x64, 3 * SOMPI_PER_KAS / 10),
+        coin(&receive(), 0x65, 4 * SOMPI_PER_KAS / 10),
+    ];
+    let mut node = vec![held];
+    node.extend(arrived);
+    fake.set_utxos(node);
+    let (relaunched, _events, ctl_two, _) = relaunched_from(files, &fake, &store).await;
+    hold.add_permits(64);
+    let _ = commit.await;
+    let retry = one_kas(&relaunched, &fake, &ctl_two)
+        .await
+        .commit(None)
+        .await;
+    assert_eq!((retry.submitted, retry.error.clone()), (1, None));
+    let second = fake.submitted().pop().expect("the retry at the node");
+    assert!(
+        !spends(&first).is_disjoint(&spends(&second)),
+        "the retry after a crash in the submit spends none of its coins: both can land"
+    );
+
+    for engine in [engine, relaunched] {
+        tokio::time::timeout(Duration::from_secs(10), engine.stop())
+            .await
+            .expect("stop inside its bound")
+            .expect("stop");
+    }
+    remove_store(&store);
+}
+
+/// **The notice that an unanswered payment went through survives a
+/// relaunch.** The node's frame proves it landed; the app ends before the
+/// person retries; the relaunched wallet refuses the retry once with the
+/// news, as it would have without the relaunch.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_payment_proven_landed_is_named_after_a_relaunch() {
+    let _serial = SERIAL.lock().await;
+    count_wallet_core_panics();
+    let fake = mainnet_fake();
+    let ctl = RpcCtl::new();
+    let held = coin(&receive(), 0x51, 10 * SOMPI_PER_KAS);
+    let (engine, mut events, store) = funded_with(
+        "landed-notice-relaunch.kvlog",
+        &fake,
+        &ctl,
+        vec![held.clone()],
+    )
+    .await;
+    fake.answer_submits(SubmitAnswer::Fail("WebSocket disconnected".into()));
+    let outcome = one_kas(&engine, &fake, &ctl).await.commit(None).await;
+    assert!(outcome.unanswered.is_some(), "{outcome:?}");
+    let first = fake.submitted().pop().expect("the first at the node");
+    let (index, value) = output_to(&first, &receive());
+    let change = output_coin(&receive(), txid_of(&first), index, value, 1_000_001);
+    let deposit = coin(&receive(), 0x66, 5 * SOMPI_PER_KAS);
+    fake.set_utxos(vec![deposit.clone(), change.clone()]);
+    assert!(
+        fake.deliver(Notification::UtxosChanged(UtxosChangedNotification {
+            added: Arc::new(vec![deposit, change]),
+            removed: Arc::new(vec![held]),
+        }))
+        .await
+            >= 1
+    );
+    balance_where(&mut events, "the frame folded", |m, p, _, _| {
+        m + p == 5 * SOMPI_PER_KAS + value
+    })
+    .await;
+
+    let (engine, _events, ctl, _) = relaunched(engine, &fake, &store).await;
+    fake.answer_submits(SubmitAnswer::Accept);
+    let refusal = one_kas_refusal(&engine, &fake, &ctl).await;
+    assert!(
+        matches!(refusal, Some(ChainError::EarlierPaymentWentThrough)),
+        "{refusal:?}"
+    );
+    tokio::time::timeout(Duration::from_secs(10), engine.stop())
+        .await
+        .expect("stop inside its bound")
+        .expect("stop");
+    remove_store(&store);
+}
+
+/// **A send carried across a relaunch and unaccepted for a day is of unknown
+/// fate, not free.** The node that took it keeps an RPC submit for good, so
+/// it may still land: its coin returns to the spendable list (nothing stays
+/// stuck), drawn last by other builds and spent first by a payment to the
+/// same address, so the two conflict.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_send_carried_for_a_day_anchors_and_is_not_freed() {
+    let _serial = SERIAL.lock().await;
+    count_wallet_core_panics();
+    let fake = mainnet_fake();
+    let ctl = RpcCtl::new();
+    let held = coin(&receive(), 0x51, 10 * SOMPI_PER_KAS);
+    let (engine, _events, store) =
+        funded_with("carried-a-day.kvlog", &fake, &ctl, vec![held.clone()]).await;
+    let outcome = one_kas(&engine, &fake, &ctl).await.commit(None).await;
+    assert_eq!((outcome.submitted, outcome.error.clone()), (1, None));
+    let first = fake.submitted().pop().expect("the first at the node");
+    let arrived = vec![
+        coin(&receive(), 0x63, 50 * SOMPI_PER_KAS),
+        coin(&receive(), 0x64, 3 * SOMPI_PER_KAS / 10),
+        coin(&receive(), 0x65, 4 * SOMPI_PER_KAS / 10),
+    ];
+    let mut node = vec![held.clone()];
+    node.extend(arrived);
+    fake.set_utxos(node);
+
+    let (engine, _events, _ctl, next) = relaunched(engine, &fake, &store).await;
+    assert!(
+        !spendable_holds(&engine, &held).await,
+        "a carried send's coin was filed inside its day"
+    );
+    // A day passes: the record's own times, aged.
+    let path = kaspaverse_chain::sends_path(&next);
+    let mut record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("the legs file")).expect("json");
+    let legs = record["legs"].as_array_mut().expect("legs");
+    assert_eq!(legs.len(), 1, "{legs:?}");
+    assert_eq!(legs[0]["state"], "sent");
+    legs[0]["since_unix_ms"] = serde_json::json!(1);
+    legs[0]["since_daa"] = serde_json::json!(0);
+    std::fs::write(&path, serde_json::to_vec(&record).expect("json")).expect("aged");
+
+    let (engine, _events, ctl, _) = relaunched(engine, &fake, &next).await;
+    assert!(
+        spendable_holds(&engine, &held).await,
+        "a send unaccepted for a day kept its coin out for good"
+    );
+    // Another payment draws it last; one to the same address leads with it.
+    let other = kas_to(&engine, &fake, &ctl, payee_two(), SOMPI_PER_KAS)
+        .await
+        .commit(None)
+        .await;
+    assert_eq!((other.submitted, other.error.clone()), (1, None));
+    let other = fake.submitted().pop().expect("the other payment");
+    let id = (held.outpoint.transaction_id, held.outpoint.index);
+    assert!(!spends(&other).contains(&id), "another payment led with it");
+    let retry = one_kas(&engine, &fake, &ctl).await.commit(None).await;
+    assert_eq!((retry.submitted, retry.error.clone()), (1, None));
+    let retry = fake.submitted().pop().expect("the retry");
+    assert!(
+        !spends(&first).is_disjoint(&spends(&retry)),
+        "a payment to the same address after a day does not conflict with the first"
+    );
+    tokio::time::timeout(Duration::from_secs(10), engine.stop())
+        .await
+        .expect("stop inside its bound")
+        .expect("stop");
+    remove_store(&store);
+}
+
+/// **A leg whose record cannot be written is not sent.** The write comes
+/// before the request; a failure there (here the store's folder turns
+/// read-only after the start, as a full or failing disk refuses a write)
+/// refuses the leg with nothing broadcast, in the words approved for it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_leg_whose_record_cannot_be_written_is_not_sent() {
+    use std::os::unix::fs::PermissionsExt;
+    let _serial = SERIAL.lock().await;
+    count_wallet_core_panics();
+    let fake = mainnet_fake();
+    let ctl = RpcCtl::new();
+    let folder = tmp("unwritable");
+    let _ = std::fs::remove_dir_all(&folder);
+    std::fs::create_dir_all(&folder).expect("the store's folder");
+    let (engine, _events, store) = funded("unwritable/activity.kvlog", &fake, &ctl).await;
+    let prepared = one_kas(&engine, &fake, &ctl).await;
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o555)).expect("read-only");
+    let outcome = prepared.commit(None).await;
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755))
+        .expect("writable again");
+    assert_eq!(outcome.submitted, 0, "{outcome:?}");
+    assert_eq!(
+        outcome.error.as_deref(),
+        Some("This phone could not save the send first. Try again."),
+        "{outcome:?}"
+    );
+    assert!(outcome.unanswered.is_none(), "{outcome:?}");
+    assert!(fake.submitted().is_empty(), "a leg left without its record");
+    tokio::time::timeout(Duration::from_secs(10), engine.stop())
+        .await
+        .expect("stop inside its bound")
+        .expect("stop");
+    remove_store(&store);
+    let _ = std::fs::remove_dir_all(&folder);
+}
+
+/// **A young coin a trailing node has not indexed yet proves nothing.** A
+/// send spends the change of an earlier one (at the node's own score); a
+/// reopen reaches a node that does not list that change yet. The send may
+/// still land, so it is not settled, and when the node lists the change its
+/// coin stays out.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_young_input_a_trailing_node_does_not_list_settles_nothing() {
+    let _serial = SERIAL.lock().await;
+    count_wallet_core_panics();
+    let fake = mainnet_fake();
+    let ctl = RpcCtl::new();
+    let (engine, mut events, store) = funded_with(
+        "young-input-trailing.kvlog",
+        &fake,
+        &ctl,
+        vec![coin(&receive(), 0x51, 10 * SOMPI_PER_KAS)],
+    )
+    .await;
+    // A send lands; its change is home at once, created at DAA 1_000_001.
+    let outcome = one_kas(&engine, &fake, &ctl).await.commit(None).await;
+    assert_eq!((outcome.submitted, outcome.error.clone()), (1, None));
+    let landed = fake.submitted().pop().expect("the first payment");
+    let (index, value) = output_to(&landed, &receive());
+    let (_, spent) = split_by(&landed);
+    let young = output_coin(&receive(), txid_of(&landed), index, value, 1_000_001);
+    fake.set_utxos(vec![young.clone()]);
+    assert!(
+        fake.deliver(Notification::UtxosChanged(UtxosChangedNotification {
+            added: Arc::new(vec![young.clone()]),
+            removed: Arc::new(spent),
+        }))
+        .await
+            >= 1
+    );
+    balance_where(&mut events, "the change home", |m, _, o, _| {
+        m == value && o == 0
+    })
+    .await;
+    // A send from that change; the node takes it.
+    let outcome = one_kas(&engine, &fake, &ctl).await.commit(None).await;
+    assert_eq!((outcome.submitted, outcome.error.clone()), (1, None));
+    let second = fake.submitted().pop().expect("the second payment");
+    assert!(spends(&second).contains(&(young.outpoint.transaction_id, young.outpoint.index)));
+    ctl.signal_close().await.expect("signal close");
+    next_event(&mut events, WAIT, |e| {
+        matches!(e, WalletEvent::Disconnected)
+    })
+    .await
+    .expect("the processor's disconnect");
+
+    // The node at the reopen has not indexed the change yet.
+    fake.set_utxos(vec![]);
+    let epoch = fake.begin_epoch();
+    ctl.signal_open().await.expect("signal reopen");
+    fake.wait_until("the reopen's read", WAIT, |f| f.utxo_scans(epoch) >= 1)
+        .await;
+    next_event(&mut events, WAIT, |e| matches!(e, WalletEvent::Syncing))
+        .await
+        .expect("the reopen's start");
+    balance_where(&mut events, "the reopen's read filed", |_, _, _, _| true).await;
+
+    // It indexes it; the second send is still in a mempool. A pull.
+    fake.set_utxos(vec![young.clone()]);
+    engine.rescan().await.expect("the pull");
+    assert!(
+        !spendable_holds(&engine, &young).await,
+        "a coin a send in flight spends was filed after a trailing node's absence settled it"
+    );
+    tokio::time::timeout(Duration::from_secs(10), engine.stop())
+        .await
+        .expect("stop inside its bound")
+        .expect("stop");
+    remove_store(&store);
+}
+
+/// **A merge accepted whole while the socket was down is settled by the
+/// reopen's read.** Its later legs spend outputs of its earlier ones, which
+/// the pin's Generator builds with no score of their own
+/// (`UNACCEPTED_DAA_SCORE`, `wallet/core/src/tx/generator/generator.rs:1233` @
+/// `01b532e`): their absence counts once the leg that created them is settled
+/// in the same read, parents first. The merged coin is then filed and nothing
+/// stays unsettled.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_merge_accepted_while_closed_is_settled_by_the_reopen() {
+    let _serial = SERIAL.lock().await;
+    count_wallet_core_panics();
+    let fake = mainnet_fake();
+    let ctl = RpcCtl::new();
+    let (coins, by_index) = many_coins();
+    let (engine, mut events, store) = funded_with(
+        "merge-landed-while-closed.kvlog",
+        &fake,
+        &ctl,
+        coins.clone(),
+    )
+    .await;
+    let sent = merge_in_flight(&engine, &fake, &ctl).await;
+    ctl.signal_close().await.expect("signal close");
+    next_event(&mut events, WAIT, |e| {
+        matches!(e, WalletEvent::Disconnected)
+    })
+    .await
+    .expect("the processor's disconnect");
+
+    // Every leg landed while the socket was down.
+    let (node, _, added) = after_landing(&coins, &sent, &by_index, 1_000_001);
+    assert_eq!(added.len(), 1, "a merge ends in one coin");
+    let merged = added[0].utxo_entry.amount;
+    fake.set_utxos(node);
+    fake.begin_epoch();
+    ctl.signal_open().await.expect("signal reopen");
+    next_event(&mut events, WAIT, |e| matches!(e, WalletEvent::Syncing))
+        .await
+        .expect("the reopen's start");
+    let settled = balance_where(
+        &mut events,
+        "the merge settled by the reopen",
+        |m, p, _, u| u == 0 && m + p == merged,
+    )
+    .await;
+    assert_eq!(settled.0 + settled.1, merged);
+
+    tokio::time::timeout(Duration::from_secs(10), engine.stop())
+        .await
+        .expect("stop inside its bound")
+        .expect("stop");
+    remove_store(&store);
+}
+
+/// **A chain carried across a relaunch keeps every coin it spends out, and
+/// settles parents first when it lands.** The merge's legs all reached the
+/// node; the app ends before any acceptance. The relaunched wallet files none
+/// of the coins the legs spend; once every leg has landed, a pull settles the
+/// whole chain from the answer alone and the merged coin is counted.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chain_carried_across_a_relaunch_settles_parents_first() {
+    let _serial = SERIAL.lock().await;
+    count_wallet_core_panics();
+    let fake = mainnet_fake();
+    let ctl = RpcCtl::new();
+    let (coins, by_index) = many_coins();
+    let (engine, _events, store) =
+        funded_with("chain-relaunch.kvlog", &fake, &ctl, coins.clone()).await;
+    let sent = merge_in_flight(&engine, &fake, &ctl).await;
+    let spent: HashSet<(Hash, u32)> = sent.iter().flat_map(spends).collect();
+
+    let (engine, mut events, _ctl, _) = relaunched(engine, &fake, &store).await;
+    let filed = engine
+        .context()
+        .get_utxos(None, None)
+        .await
+        .expect("the spendable set");
+    assert!(
+        filed.iter().all(|entry| {
+            let id = entry.outpoint.inner();
+            !spent.contains(&(id.transaction_id, id.index))
+        }),
+        "the relaunch filed a coin a carried leg spends"
+    );
+
+    let (node, _, added) = after_landing(&coins, &sent, &by_index, 1_000_001);
+    let merged = added[0].utxo_entry.amount;
+    fake.set_utxos(node);
+    engine.rescan().await.expect("the pull");
+    let settled = balance_where(
+        &mut events,
+        "the chain settled by the pull",
+        |m, p, _, u| u == 0 && m + p == merged,
+    )
+    .await;
+    assert_eq!(settled.0 + settled.1, merged);
+    tokio::time::timeout(Duration::from_secs(10), engine.stop())
+        .await
+        .expect("stop inside its bound")
+        .expect("stop");
+    remove_store(&store);
+}
+
+/// A merge's legs all landed and its merged coin was then spent elsewhere, so
+/// the node lists neither the coins the merge spent nor the coin it made: the
+/// final leg can be judged only through the batch outputs it spent, whose
+/// creators this same answer settles.
+fn after_landing_and_spent(
+    coins: &[RpcUtxosByAddressesEntry],
+    legs: &[RpcTransaction],
+    by_index: &std::collections::HashMap<u32, RpcUtxosByAddressesEntry>,
+) -> Vec<RpcUtxosByAddressesEntry> {
+    let (node, _, added) = after_landing(coins, legs, by_index, 1_000_001);
+    let made: HashSet<(Hash, u32)> = added
+        .iter()
+        .map(|coin| (coin.outpoint.transaction_id, coin.outpoint.index))
+        .collect();
+    node.into_iter()
+        .filter(|coin| !made.contains(&(coin.outpoint.transaction_id, coin.outpoint.index)))
+        .collect()
+}
+
+/// **A carried chain whose final coin is not listed settles through its
+/// parents.** Relaunched after every leg landed and the merged coin was spent
+/// elsewhere: the first read settles the earlier legs from their own coins,
+/// and the final leg from the batch outputs they made, in one read. Nothing
+/// stays carried, so nothing counts as coming home.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_carried_chain_settles_through_its_parents_when_its_coin_is_gone() {
+    let _serial = SERIAL.lock().await;
+    count_wallet_core_panics();
+    let fake = mainnet_fake();
+    let ctl = RpcCtl::new();
+    let (coins, by_index) = many_coins();
+    let (engine, _events, store) =
+        funded_with("chain-relaunch-spent.kvlog", &fake, &ctl, coins.clone()).await;
+    let sent = merge_in_flight(&engine, &fake, &ctl).await;
+    fake.set_utxos(after_landing_and_spent(&coins, &sent, &by_index));
+    let files = store_bytes(&store);
+    tokio::time::timeout(Duration::from_secs(10), engine.stop())
+        .await
+        .expect("stop inside its bound")
+        .expect("stop");
+    drop(engine);
+
+    // The start's read is the one that must settle it.
+    let ctl = RpcCtl::new();
+    let next = store.with_file_name("chain-relaunch-spent-run.kvlog");
+    remove_store(&next);
+    for (path, bytes) in files {
+        let to = if path == store {
+            next.clone()
+        } else if path == kaspaverse_chain::sends_path(&store) {
+            kaspaverse_chain::sends_path(&next)
+        } else {
+            kaspaverse_chain::spent_path(&next)
+        };
+        std::fs::write(to, bytes).expect("the copied store");
+    }
+    let engine = WalletEngine::new(
+        fake.rpc(ctl.clone()),
+        NetworkId::new(NetworkType::Mainnet),
+        next.clone(),
+    )
+    .expect("the relaunched engine");
+    let mut events = engine.subscribe();
+    engine
+        .start(vec![receive(), change()], vec![change()])
+        .await
+        .expect("engine start");
+    fake.begin_epoch();
+    ctl.signal_open().await.expect("signal open");
+    next_event(&mut events, WAIT, |e| matches!(e, WalletEvent::Syncing))
+        .await
+        .expect("the relaunched lane's start");
+    let first = balance_where(&mut events, "the start's read filed", |_, _, _, _| true).await;
+    assert_eq!(
+        first,
+        (0, 0, 0, 0),
+        "a carried leg the answer settles still counts as coming home"
+    );
+    tokio::time::timeout(Duration::from_secs(10), engine.stop())
+        .await
+        .expect("stop inside its bound")
+        .expect("stop");
+    remove_store(&store);
+    remove_store(&next);
+}
+
+/// **The same on the reopen:** a merge accepted whole while the socket was
+/// down, its merged coin spent elsewhere since, is settled by the reopen's
+/// read through its parents, with nothing left unsettled.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_merge_whose_coin_is_gone_is_settled_by_the_reopen_through_its_parents() {
+    let _serial = SERIAL.lock().await;
+    count_wallet_core_panics();
+    let fake = mainnet_fake();
+    let ctl = RpcCtl::new();
+    let (coins, by_index) = many_coins();
+    let (engine, mut events, store) =
+        funded_with("merge-gone-while-closed.kvlog", &fake, &ctl, coins.clone()).await;
+    let sent = merge_in_flight(&engine, &fake, &ctl).await;
+    ctl.signal_close().await.expect("signal close");
+    next_event(&mut events, WAIT, |e| {
+        matches!(e, WalletEvent::Disconnected)
+    })
+    .await
+    .expect("the processor's disconnect");
+    fake.set_utxos(after_landing_and_spent(&coins, &sent, &by_index));
+    fake.begin_epoch();
+    ctl.signal_open().await.expect("signal reopen");
+    next_event(&mut events, WAIT, |e| matches!(e, WalletEvent::Syncing))
+        .await
+        .expect("the reopen's start");
+    let settled = balance_where(
+        &mut events,
+        "the merge settled by the reopen",
+        |_, _, o, u| u == 0 && o == 0,
+    )
+    .await;
+    assert_eq!(settled, (0, 0, 0, 0));
+    tokio::time::timeout(Duration::from_secs(10), engine.stop())
+        .await
+        .expect("stop inside its bound")
+        .expect("stop");
+    remove_store(&store);
+}
+
+/// **A cancelled leg's input that another chain of ours built is checked like
+/// any other.** A chained payment's final leg, spending only the batch outputs
+/// of its earlier legs, gets no answer: a leg of unknown fate. A retry to the
+/// same payee leads with those batch outputs and gets no answer either. The
+/// pin's cancel puts every input of the retry back on the spendable list
+/// (`context.rs:280-291` @ `01b532e`), whether or not the context ever held
+/// it; a batch output the context never held must come off again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancelled_retrys_batch_output_input_does_not_read_as_spendable() {
+    let _serial = SERIAL.lock().await;
+    count_wallet_core_panics();
+    let fake = mainnet_fake();
+    let ctl = RpcCtl::new();
+    let (coins, _) = many_coins();
+    let (engine, _events, store) =
+        funded_with("retry-on-batch-output.kvlog", &fake, &ctl, coins).await;
+    let prepared = kas_to(&engine, &fake, &ctl, payee(), 100 * SOMPI_PER_KAS).await;
+    let legs = prepared.summary().tx_count as usize;
+    assert!(
+        legs >= 2,
+        "the payment must be a chain, built {legs} leg(s)"
+    );
+    let mut answers = vec![SubmitAnswer::Accept; legs - 1];
+    answers.push(SubmitAnswer::Fail("WebSocket disconnected".into()));
+    fake.queue_submit_answers(answers);
+    let outcome = prepared.commit(None).await;
+    assert!(outcome.unanswered.is_some(), "{outcome:?}");
+    let sent = fake.submitted();
+    let earlier: HashSet<Hash> = sent[..legs - 1].iter().map(txid_of).collect();
+    let last = sent.last().expect("the final leg");
+    let batch: Vec<(Hash, u32)> = spends(last)
+        .into_iter()
+        .filter(|(txid, _)| earlier.contains(txid))
+        .collect();
+    assert_eq!(
+        batch.len(),
+        spends(last).len(),
+        "the final leg must spend only its earlier legs' outputs"
+    );
+
+    fake.answer_submits(SubmitAnswer::Fail("WebSocket disconnected".into()));
+    let retry = kas_to(&engine, &fake, &ctl, payee(), 100 * SOMPI_PER_KAS)
+        .await
+        .commit(None)
+        .await;
+    assert!(retry.unanswered.is_some(), "{retry:?}");
+    let led = fake
+        .submitted()
+        .last()
+        .cloned()
+        .expect("the retry at the node");
+    assert!(
+        spends(&led).iter().any(|coin| batch.contains(coin)),
+        "the retry did not lead with the batch outputs"
+    );
+    let spendable: HashSet<(Hash, u32)> = engine
+        .context()
+        .get_utxos(None, None)
+        .await
+        .expect("the spendable set")
+        .iter()
+        .map(|entry| {
+            let id = entry.outpoint.inner();
+            (id.transaction_id, id.index)
+        })
+        .collect();
+    assert!(
+        batch.iter().all(|coin| !spendable.contains(coin)),
+        "a batch output no context holds reads as spendable after the cancel"
+    );
+    tokio::time::timeout(Duration::from_secs(10), engine.stop())
+        .await
+        .expect("stop inside its bound")
+        .expect("stop");
+    remove_store(&store);
+}
+
+/// **A cancelled retry never writes a batch output's scoreless copy over the
+/// one a read filed.** A chained payment's earlier legs land and a read files
+/// their batch outputs, young, as pending; its final leg got no answer. A retry
+/// to the same payee leads with those outputs as its chain built them (no score
+/// of their own, `UNACCEPTED_DAA_SCORE`) and is cancelled. Written over the
+/// filed entry, that copy overflows the pin's maturity sum at the next tick
+/// (`wallet/core/src/utxo/reference.rs:44` @ `01b532e`); left beside it, the
+/// coin counts twice. Neither may happen: the cancel takes the coin out
+/// whole, and the next read files it once at its own score.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancelled_retry_takes_out_a_filed_batch_output_until_the_next_read() {
+    let _serial = SERIAL.lock().await;
+    count_wallet_core_panics();
+    let panics_before = WALLET_CORE_PANICS.load(Ordering::SeqCst);
+    let fake = mainnet_fake();
+    let ctl = RpcCtl::new();
+    let (coins, by_index) = many_coins();
+    let (engine, mut events, store) = funded_with(
+        "retry-on-filed-batch-output.kvlog",
+        &fake,
+        &ctl,
+        coins.clone(),
+    )
+    .await;
+    let prepared = kas_to(&engine, &fake, &ctl, payee(), 100 * SOMPI_PER_KAS).await;
+    let legs = prepared.summary().tx_count as usize;
+    assert!(
+        legs >= 2,
+        "the payment must be a chain, built {legs} leg(s)"
+    );
+    let mut answers = vec![SubmitAnswer::Accept; legs - 1];
+    answers.push(SubmitAnswer::Fail("WebSocket disconnected".into()));
+    fake.queue_submit_answers(answers);
+    let outcome = prepared.commit(None).await;
+    assert!(outcome.unanswered.is_some(), "{outcome:?}");
+    let sent = fake.submitted();
+
+    // The earlier legs land; a read files their outputs, young.
+    let (node, _, made) = after_landing(&coins, &sent[..legs - 1], &by_index, 1_000_001);
+    assert!(!made.is_empty(), "the earlier legs made batch outputs");
+    fake.set_utxos(node);
+    engine.rescan().await.expect("the pull");
+    let filed_pending = engine.context().pending_utxo_size();
+    assert!(
+        filed_pending >= made.len(),
+        "the read did not file the batch outputs"
+    );
+
+    fake.answer_submits(SubmitAnswer::Fail("WebSocket disconnected".into()));
+    let retry = kas_to(&engine, &fake, &ctl, payee(), 100 * SOMPI_PER_KAS)
+        .await
+        .commit(None)
+        .await;
+    assert!(retry.unanswered.is_some(), "{retry:?}");
+    let made_ids: HashSet<(Hash, u32)> = made
+        .iter()
+        .map(|c| (c.outpoint.transaction_id, c.outpoint.index))
+        .collect();
+    let led = fake.submitted().last().cloned().expect("the retry");
+    assert!(
+        spends(&led).iter().any(|coin| made_ids.contains(coin)),
+        "the retry did not lead with the filed batch outputs"
+    );
+
+    // A tick, and past maturity: no panic, and each coin counted once.
+    past_maturity_handled(&fake, &engine).await;
+    assert_eq!(
+        WALLET_CORE_PANICS.load(Ordering::SeqCst),
+        panics_before,
+        "a panic in the pinned wallet framework"
+    );
+    engine.rescan().await.expect("the pull after the tick");
+    let mature = engine
+        .context()
+        .get_utxos(None, None)
+        .await
+        .expect("the spendable set");
+    for coin in &made_ids {
+        let copies = mature
+            .iter()
+            .filter(|entry| {
+                let id = entry.outpoint.inner();
+                (id.transaction_id, id.index) == *coin
+            })
+            .count();
+        assert_eq!(copies, 1, "a batch output counted {copies} times");
+    }
+    assert_eq!(
+        engine.context().pending_utxo_size(),
+        0,
+        "a pending copy of a batch output stayed beside the mature one"
+    );
+    let _ = &mut events;
+    tokio::time::timeout(Duration::from_secs(10), engine.stop())
+        .await
+        .expect("stop inside its bound")
+        .expect("stop");
+    remove_store(&store);
+}
+
+/// **A retry that lost to a conflict gives back the batch outputs it led
+/// with.** A chained payment's final leg got no answer; its earlier legs land,
+/// a read files their batch outputs and they mature. A retry to the same payee
+/// leads with them (as its chain built them, with no score of their own) plus
+/// coins of its own, and the node takes it. Another spend of one of its own
+/// coins lands first: the retry can never land. Its inputs return to the
+/// spendable list, the batch outputs among them once a read files them again
+/// at their own score.
+async fn retry_lost_to_a_conflict(matured: bool, name: &str) {
+    let panics_before = WALLET_CORE_PANICS.load(Ordering::SeqCst);
+    let fake = mainnet_fake();
+    let ctl = RpcCtl::new();
+    let (coins, by_index) = many_coins();
+    let (engine, _events, store) = funded_with(name, &fake, &ctl, coins.clone()).await;
+    let prepared = kas_to(&engine, &fake, &ctl, payee(), 100 * SOMPI_PER_KAS).await;
+    let legs = prepared.summary().tx_count as usize;
+    assert!(
+        legs >= 2,
+        "the payment must be a chain, built {legs} leg(s)"
+    );
+    let mut answers = vec![SubmitAnswer::Accept; legs - 1];
+    answers.push(SubmitAnswer::Fail("WebSocket disconnected".into()));
+    fake.queue_submit_answers(answers);
+    let outcome = prepared.commit(None).await;
+    assert!(outcome.unanswered.is_some(), "{outcome:?}");
+    let sent = fake.submitted();
+
+    // The earlier legs land; a read files their outputs; they mature.
+    let (node, _, made) = after_landing(&coins, &sent[..legs - 1], &by_index, 1_000_001);
+    let made_ids: HashSet<(Hash, u32)> = made
+        .iter()
+        .map(|c| (c.outpoint.transaction_id, c.outpoint.index))
+        .collect();
+    let made_value: u64 = made.iter().map(|c| c.utxo_entry.amount).sum();
+    fake.set_utxos(node.clone());
+    engine.rescan().await.expect("the pull");
+    if matured {
+        past_maturity_handled(&fake, &engine).await;
+    }
+
+    // A retry larger than the batch outputs: it leads with them and draws
+    // coins of its own.
+    fake.answer_submits(SubmitAnswer::Accept);
+    let retry = kas_to(
+        &engine,
+        &fake,
+        &ctl,
+        payee(),
+        made_value + 20 * SOMPI_PER_KAS,
+    )
+    .await
+    .commit(None)
+    .await;
+    assert_eq!(
+        (retry.submitted, retry.error.clone()),
+        (1, None),
+        "{retry:?}"
+    );
+    let r = fake.submitted().last().cloned().expect("the retry");
+    let r_spends = spends(&r);
+    assert!(
+        made_ids.iter().all(|coin| r_spends.contains(coin)),
+        "the retry did not lead with every batch output"
+    );
+    let own = coins
+        .iter()
+        .find(|c| r_spends.contains(&(c.outpoint.transaction_id, c.outpoint.index)))
+        .cloned()
+        .expect("the retry draws a coin of its own");
+    let gone = (own.outpoint.transaction_id, own.outpoint.index);
+
+    // Another spend of that coin lands: the retry can never land.
+    let after_conflict: Vec<RpcUtxosByAddressesEntry> = node
+        .iter()
+        .filter(|c| {
+            (c.outpoint.transaction_id, c.outpoint.index)
+                != (own.outpoint.transaction_id, own.outpoint.index)
+        })
+        .cloned()
+        .collect();
+    fake.set_utxos(after_conflict);
+    assert!(
+        fake.deliver(Notification::UtxosChanged(UtxosChangedNotification {
+            added: Arc::new(vec![]),
+            removed: Arc::new(vec![own]),
+        }))
+        .await
+            >= 1
+    );
+    // The conflict's own effect: the retry's other coins are spendable again.
+    let others: Vec<(Hash, u32)> = coins
+        .iter()
+        .map(|c| (c.outpoint.transaction_id, c.outpoint.index))
+        .filter(|id| r_spends.contains(id) && *id != gone)
+        .collect();
+    assert!(
+        !others.is_empty(),
+        "the retry spends other coins of its own"
+    );
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let listed: HashSet<(Hash, u32)> = engine
+                .context()
+                .get_utxos(None, None)
+                .await
+                .expect("the spendable set")
+                .iter()
+                .map(|entry| {
+                    let id = entry.outpoint.inner();
+                    (id.transaction_id, id.index)
+                })
+                .collect();
+            if others.iter().all(|id| listed.contains(id)) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the retry judged lost to the conflict");
+    if !matured {
+        // Still young: they went back pending, at their own score, and mature
+        // at the next tick past the window with no overflow.
+        let mature: HashSet<(Hash, u32)> = engine
+            .context()
+            .get_utxos(None, None)
+            .await
+            .expect("the spendable set")
+            .iter()
+            .map(|entry| {
+                let id = entry.outpoint.inner();
+                (id.transaction_id, id.index)
+            })
+            .collect();
+        assert!(
+            made_ids.iter().all(|coin| !mature.contains(coin)),
+            "a young batch output went back mature"
+        );
+        assert!(engine.context().pending_utxo_size() >= made_ids.len());
+        past_maturity_handled(&fake, &engine).await;
+        assert_eq!(engine.context().pending_utxo_size(), 0);
+    }
+    // Once a read files them, the batch outputs are spendable again, once each.
+    engine.rescan().await.expect("the pull after the conflict");
+    let spendable: HashSet<(Hash, u32)> = engine
+        .context()
+        .get_utxos(None, None)
+        .await
+        .expect("the spendable set")
+        .iter()
+        .map(|entry| {
+            let id = entry.outpoint.inner();
+            (id.transaction_id, id.index)
+        })
+        .collect();
+    assert!(
+        made_ids.iter().all(|coin| spendable.contains(coin)),
+        "a batch output the lost retry led with is in no list"
+    );
+    let listed = engine
+        .context()
+        .get_utxos(None, None)
+        .await
+        .expect("the spendable set");
+    for coin in &made_ids {
+        let copies = listed
+            .iter()
+            .filter(|entry| {
+                let id = entry.outpoint.inner();
+                (id.transaction_id, id.index) == *coin
+            })
+            .count();
+        assert_eq!(copies, 1, "a batch output counted {copies} times");
+    }
+    // At their own score: never the scoreless copy the retry carried.
+    assert!(
+        listed
+            .iter()
+            .filter(|entry| {
+                let id = entry.outpoint.inner();
+                made_ids.contains(&(id.transaction_id, id.index))
+            })
+            .all(|entry| entry.block_daa_score == 1_000_001),
+        "a batch output filed at the retry's scoreless copy"
+    );
+    assert_eq!(WALLET_CORE_PANICS.load(Ordering::SeqCst), panics_before);
+    tokio::time::timeout(Duration::from_secs(10), engine.stop())
+        .await
+        .expect("stop inside its bound")
+        .expect("stop");
+    remove_store(&store);
+}
+
+/// **A retry that lost to a conflict gives back the batch outputs it led
+/// with**, once they have matured: as a read files them again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_lost_to_a_conflict_gives_back_the_batch_outputs_it_led_with() {
+    let _serial = SERIAL.lock().await;
+    count_wallet_core_panics();
+    retry_lost_to_a_conflict(true, "retry-lost-batch-output.kvlog").await;
+}
+
+/// **The same while they are young**: they go back pending at their own
+/// score, never with the scoreless copy the retry carried, and mature at the
+/// next tick past the window.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_lost_to_a_conflict_gives_back_young_batch_outputs_pending() {
+    let _serial = SERIAL.lock().await;
+    count_wallet_core_panics();
+    retry_lost_to_a_conflict(false, "retry-lost-young-batch-output.kvlog").await;
+}
+
+/// **A send whose own change a read lists has landed, however young the coin it
+/// spent.** It spends the change of an earlier send, too young for a node's
+/// absence to prove anything; it lands while the socket is down. The reopen's
+/// read lists its change (a node's index holds accepted transactions only): it
+/// is settled as landed, its change is filed, and the young coin it spent is
+/// kept as spent, so a node that has not reached that acceptance cannot hand it
+/// back as spendable.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_send_whose_change_a_read_lists_has_landed_though_its_input_is_young() {
+    let _serial = SERIAL.lock().await;
+    count_wallet_core_panics();
+    let fake = mainnet_fake();
+    let ctl = RpcCtl::new();
+    let (engine, mut events, store) = funded_with(
+        "listed-landed-young.kvlog",
+        &fake,
+        &ctl,
+        vec![coin(&receive(), 0x51, 10 * SOMPI_PER_KAS)],
+    )
+    .await;
+    // A send lands; its change is home at once, created at DAA 1_000_001.
+    let outcome = one_kas(&engine, &fake, &ctl).await.commit(None).await;
+    assert_eq!((outcome.submitted, outcome.error.clone()), (1, None));
+    let first = fake.submitted().pop().expect("the first payment");
+    let (index, value) = output_to(&first, &receive());
+    let (_, spent) = split_by(&first);
+    let young = output_coin(&receive(), txid_of(&first), index, value, 1_000_001);
+    fake.set_utxos(vec![young.clone()]);
+    assert!(
+        fake.deliver(Notification::UtxosChanged(UtxosChangedNotification {
+            added: Arc::new(vec![young.clone()]),
+            removed: Arc::new(spent),
+        }))
+        .await
+            >= 1
+    );
+    balance_where(&mut events, "the change home", |m, _, o, _| {
+        m == value && o == 0
+    })
+    .await;
+    // A send from that change; it lands while the socket is down.
+    let outcome = one_kas(&engine, &fake, &ctl).await.commit(None).await;
+    assert_eq!((outcome.submitted, outcome.error.clone()), (1, None));
+    let second = fake.submitted().pop().expect("the second payment");
+    ctl.signal_close().await.expect("signal close");
+    next_event(&mut events, WAIT, |e| {
+        matches!(e, WalletEvent::Disconnected)
+    })
+    .await
+    .expect("the processor's disconnect");
+    let (index, change) = output_to(&second, &receive());
+    let homed = output_coin(&receive(), txid_of(&second), index, change, 1_000_002);
+    fake.set_utxos(vec![homed.clone()]);
+    fake.begin_epoch();
+    ctl.signal_open().await.expect("signal reopen");
+    next_event(&mut events, WAIT, |e| matches!(e, WalletEvent::Syncing))
+        .await
+        .expect("the reopen's start");
+    balance_where(
+        &mut events,
+        "the second send settled by its listed change",
+        |m, p, o, u| o == 0 && u == 0 && m + p == change,
+    )
+    .await;
+
+    // Past the window, the pin purges its record of the send
+    // (`processor.rs:336-349` @ `01b532e`): only the kept spent coin remains.
+    past_maturity_handled(&fake, &engine).await;
+    // A node that has not reached that acceptance lists the young coin again.
+    ctl.signal_close().await.expect("signal close");
+    next_event(&mut events, WAIT, |e| {
+        matches!(e, WalletEvent::Disconnected)
+    })
+    .await
+    .expect("the processor's disconnect");
+    fake.set_virtual_daa_score(1_000_000);
+    fake.set_utxos(vec![young.clone()]);
+    fake.begin_epoch();
+    ctl.signal_open().await.expect("signal reopen");
+    next_event(&mut events, WAIT, |e| matches!(e, WalletEvent::Syncing))
+        .await
+        .expect("the trailing reopen's start");
+    // Young at that node's score, a coin filed by mistake would be pending:
+    // the read's own balance shows it either way.
+    let trailing = balance_where(&mut events, "the trailing read filed", |_, _, _, _| true).await;
+    assert_eq!(
+        trailing,
+        (change, 0, 0, 0),
+        "a trailing node handed back a coin a landed send of ours spent"
+    );
+    assert!(!spendable_holds(&engine, &young).await);
+    tokio::time::timeout(Duration::from_secs(10), engine.stop())
+        .await
+        .expect("stop inside its bound")
+        .expect("stop");
+    remove_store(&store);
 }

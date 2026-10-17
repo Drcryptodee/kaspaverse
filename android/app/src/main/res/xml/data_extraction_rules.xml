@@ -2,16 +2,30 @@
 <!-- API 31+. The sealed seed blob, the Path-A Keystore blob, and the lockout
      counter must never leave the device via cloud backup OR device-to-device
      transfer (vault_architecture §5; wallet-security item 2). allowBackup is
-     already false; these explicit exclusions are defence in depth. -->
+     already false; these explicit exclusions are defence in depth. The record
+     of this wallet's sends in flight (wallet/activity.sends, .spent, their
+     temporary files and the unreadable copies set aside beside them) stays
+     with the wallet it names: carried to another, it would anchor builds on
+     coins that wallet cannot sign. -->
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="file" path="vault.kvsb"/>
         <exclude domain="file" path="vault.keystore.blob"/>
         <exclude domain="file" path="vault.lockout"/>
+        <exclude domain="file" path="wallet/activity.sends"/>
+        <exclude domain="file" path="wallet/activity.spent"/>
+        <exclude domain="file" path="wallet/.activity.sends.tmp"/>
+        <exclude domain="file" path="wallet/.activity.spent.tmp"/>
+        <exclude domain="file" path="wallet/unreadable"/>
     </cloud-backup>
     <device-transfer>
         <exclude domain="file" path="vault.kvsb"/>
         <exclude domain="file" path="vault.keystore.blob"/>
         <exclude domain="file" path="vault.lockout"/>
+        <exclude domain="file" path="wallet/activity.sends"/>
+        <exclude domain="file" path="wallet/activity.spent"/>
+        <exclude domain="file" path="wallet/.activity.sends.tmp"/>
+        <exclude domain="file" path="wallet/.activity.spent.tmp"/>
+        <exclude domain="file" path="wallet/unreadable"/>
     </device-transfer>
 </data-extraction-rules>

@@ -5,8 +5,7 @@
 //! - [`send_prepare`] builds the whole tx chain (pinned Generator — INV-9) and
 //!   STASHES the unsigned [`PreparedSend`], returning only a summary DTO.
 //! - [`send_commit`] signs + broadcasts the SAME stashed txs (signing in Rust
-//!   only — INV-1/2; only the txid leaves), advancing the change cursor on full
-//!   success (D-041).
+//!   only — INV-1/2; only the txid leaves).
 //! - [`send_abandon`] drops the stash (confirm dismissed / back).
 //!
 //! Nothing secret crosses: the signer is built inside `vault.rs` (the keychain
@@ -215,8 +214,8 @@ pub(crate) fn validate_mainnet_address(s: &str) -> Result<Address, AppError> {
     Ok(address)
 }
 
-/// Whether a [`SendOutcome`] is a clean, fully-broadcast send (every leg landed)
-/// — the only case in which the change cursor advances (D-041). Pure; tested.
+/// Whether a [`SendOutcome`] is a clean, fully-broadcast send (every leg landed).
+/// Pure; tested.
 fn fully_broadcast(outcome: &SendOutcome) -> bool {
     !outcome.partial
         && outcome.error.is_none()
@@ -429,7 +428,7 @@ fn kas_exact(sompi: u64) -> String {
 /// address never rotates and is published to every counterpart it messages, and
 /// a payment's `input[0]` already links its change to it on chain. The lane
 /// staying alive is worth more than hygiene that an observer defeats for free.
-/// Reverting is this one function.
+/// Reverting means this function and a change cursor that advances again.
 pub(crate) fn payment_change_address() -> Result<Address, AppError> {
     vault::wallet_address_at(Branch::Receive, 0)
 }
@@ -849,28 +848,15 @@ pub(crate) fn take_stashed(
     }
 }
 
-/// Sign + broadcast a taken plan, advancing the change cursor only on a
-/// fully-broadcast outcome (D-041).
+/// Sign + broadcast a taken plan, every leg watched by the acceptance tracker.
 ///
-/// **The cursor is now vestigial and deliberately left alone.** Since
-/// `payment_change_address` routes every send's change back to `receive/0`,
-/// nothing consumes a `change/N` address — and this advance was already
-/// meaningless for transport sends, which have always returned change to
-/// `receive/0`. `wallet_window` floors the change window at `cursor + 1`, so
-/// each such send widens the derived-and-registered window by one for nothing:
-/// measured on the founder's device 2026-08-15, cursor **108** against a
-/// handful of change addresses that ever held a coin. That is waste, not a
-/// fault — it grows no faster than it did before and risks no funds — so it is
-/// logged as follow-up rather than fixed inside a bug fix it does not belong
-/// to (INV-12). Retiring it means retiring `set_change_cursor` and the
-/// window floor together, under their own auditor pass.
-pub(crate) async fn commit_and_advance(prepared: PreparedSend) -> SendOutcomeDto {
-    // The change index this send used (neither input moves during a send —
-    // the cursor advances only on full success, and the discovery mark that
-    // floors it only ever grows — so this still reads as the index we prepared
-    // with; a pass landing mid-send could only skip an index, never reuse one).
-    let used_cursor = wallet::next_change_index();
-
+/// A send no longer moves the change cursor: every send's change returns to
+/// `receive/0` ([`payment_change_address`]), so no `change/N` address is handed
+/// out, and an advance widened the derived and registered window by one per
+/// send for nothing. The cursor's last value still floors the change window
+/// ([`wallet::wallet_window`]), so every change address an earlier build handed
+/// out stays watched and signable.
+pub(crate) async fn commit_and_watch(prepared: PreparedSend) -> SendOutcomeDto {
     // V1 acceptance spine: resolve the tracker BEFORE committing so every
     // leg is watched the instant its submit is acked — a fast acceptance of
     // an early leg must not slip past the live VCC stream while later legs
@@ -878,7 +864,7 @@ pub(crate) async fn commit_and_advance(prepared: PreparedSend) -> SendOutcomeDto
     // legs are covered by construction (the hook fired when they submitted).
     // One hook covers payments AND transport sends (both commit paths flow
     // through here); a tracker failure never fails the send.
-    let tracker = match super::dag::shared_tracker().await {
+    let tracker = match super::dag::shared_tracker_for_send().await {
         Ok(tracker) => Some(tracker),
         Err(e) => {
             log::warn!(
@@ -915,11 +901,6 @@ pub(crate) async fn commit_and_advance(prepared: PreparedSend) -> SendOutcomeDto
         )
         .await;
 
-    if fully_broadcast(&outcome) {
-        // The change at `used_cursor` is now in use → next send uses the next.
-        let _ = vault::set_change_cursor(used_cursor.saturating_add(1));
-    }
-
     // A leg sent with no answer back may be on the network: watched, so the
     // tracker records whether it lands. Nothing shows that yet: the receipt
     // follows only a fully broadcast send's final txid, and the pin files a
@@ -947,11 +928,10 @@ pub(crate) async fn commit_and_advance(prepared: PreparedSend) -> SendOutcomeDto
 }
 
 /// Phase 2: sign + broadcast the stashed plan identified by `nonce`. Refuses a
-/// stale/mismatched nonce or an empty stash (the user re-confirms). Advances the
-/// change cursor only on a fully-broadcast send.
+/// stale/mismatched nonce or an empty stash (the user re-confirms).
 pub async fn send_commit(nonce: u64) -> Result<SendOutcomeDto, AppError> {
     let prepared = take_stashed(&PENDING_SEND, nonce)?;
-    Ok(commit_and_advance(prepared).await)
+    Ok(commit_and_watch(prepared).await)
 }
 
 /// Drop any stashed send (confirm dismissed / back-gesture). Idempotent.
@@ -1281,7 +1261,7 @@ mod tests {
     }
 
     #[test]
-    fn cursor_advances_only_on_a_clean_full_broadcast() {
+    fn only_a_clean_full_broadcast_reads_as_fully_broadcast() {
         let clean = SendOutcome {
             final_txid: Some("a".repeat(64)),
             submitted: 2,

@@ -27,6 +27,7 @@ pub mod node_config;
 pub mod prefs;
 pub mod read_marks;
 mod send;
+mod sends_store;
 pub mod spans;
 mod spend_policy;
 mod transport;
@@ -53,6 +54,7 @@ pub use read_marks::{ReadMark, ReadMarks};
 // tx — no key material). Named here so the bridge never imports rpc-core.
 pub use kaspa_wrpc_client::prelude::RpcTransaction;
 pub use send::{PreparedSend, SendOutcome, SendSummary, SpendComparison};
+pub use sends_store::{sends_path, spent_path};
 pub use spend_policy::is_covenant_bound;
 pub use transport::{
     compose_bcast, compose_comm_wire, compose_comm_wire_in, compose_handshake_wire,

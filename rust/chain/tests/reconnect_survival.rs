@@ -86,7 +86,7 @@ async fn wallet_lane_rearms_utxos_changed_on_every_connection() {
     let fake = FakeRpc::new(network_id);
     let ctl = RpcCtl::new();
     let store = tmp("wallet-lane.kvlog");
-    let _ = std::fs::remove_file(&store);
+    support::remove_store(&store);
 
     let engine =
         WalletEngine::new(fake.rpc(ctl.clone()), network_id, store.clone()).expect("engine");
@@ -138,7 +138,7 @@ async fn wallet_lane_rearms_utxos_changed_on_every_connection() {
         .await;
 
     engine.stop().await.expect("engine stop");
-    let _ = std::fs::remove_file(&store);
+    support::remove_store(&store);
 }
 
 /// The V6 soft pull-refresh pin: `WalletEngine::rescan()` re-asks the node
@@ -153,7 +153,7 @@ async fn soft_rescan_reasks_the_node_without_touching_the_connection() {
     let fake = FakeRpc::new(network_id);
     let ctl = RpcCtl::new();
     let store = tmp("soft-rescan.kvlog");
-    let _ = std::fs::remove_file(&store);
+    support::remove_store(&store);
 
     let engine =
         WalletEngine::new(fake.rpc(ctl.clone()), network_id, store.clone()).expect("engine");
@@ -185,7 +185,7 @@ async fn soft_rescan_reasks_the_node_without_touching_the_connection() {
     );
 
     engine.stop().await.expect("engine stop");
-    let _ = std::fs::remove_file(&store);
+    support::remove_store(&store);
 }
 
 /// **KM5 (PRE3-LANE; run 3's F15): a pull repairs a deaf lane on the NODE.**
@@ -209,7 +209,7 @@ async fn a_pull_restores_a_lost_subscription_on_the_node() {
     let fake = FakeRpc::new(network_id);
     let ctl = RpcCtl::new();
     let store = tmp("pull-rearm.kvlog");
-    let _ = std::fs::remove_file(&store);
+    support::remove_store(&store);
 
     let engine =
         WalletEngine::new(fake.rpc(ctl.clone()), network_id, store.clone()).expect("engine");
@@ -263,7 +263,7 @@ async fn a_pull_restores_a_lost_subscription_on_the_node() {
     );
 
     engine.stop().await.expect("engine stop");
-    let _ = std::fs::remove_file(&store);
+    support::remove_store(&store);
 }
 
 /// The acceptance-spine guard: on every `DagEvent::Connected` the tracker

@@ -21,7 +21,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
@@ -29,13 +29,15 @@ use std::time::Duration;
 
 use borsh::BorshDeserialize;
 use kaspa_addresses::{Address, Prefix};
+use kaspa_consensus_core::constants::UNACCEPTED_DAA_SCORE;
 use kaspa_consensus_core::tx::TransactionOutpoint;
 use kaspa_txscript::extract_script_pub_key_address;
 use kaspa_wallet_core::events::Events;
 use kaspa_wallet_core::rpc::Rpc;
 use kaspa_wallet_core::storage::transaction::{TransactionData, TransactionId, TransactionRecord};
 use kaspa_wallet_core::utxo::{
-    Maturity, NetworkParams, OutgoingTransaction, UtxoContext, UtxoEntryId, UtxoEntryReference,
+    Maturity, NetworkParams, OutgoingTransaction, PendingUtxoEntryReference, UtxoContext,
+    UtxoEntryId, UtxoEntryReference,
 };
 use kaspa_wrpc_client::prelude::{NetworkId, NetworkType};
 use tokio::sync::{broadcast, oneshot, OwnedRwLockWriteGuard};
@@ -46,6 +48,7 @@ use crate::wallet_lane::{Lane, Transition, LANE_HOLD_WITHIN, LANE_STEP_WITHIN};
 
 use crate::error::{ChainError, Result};
 use crate::kvlog::{Frame, Log};
+use crate::sends_store::{self, CoinRecord, LegRecord, LegState, OutputRecord, SpentRecord};
 
 /// **The maturity thresholds this wallet actually applies**, read from the
 /// pinned wallet framework's own `NetworkParams` for the network in hand.
@@ -363,6 +366,246 @@ pub(crate) struct InFlightSends {
     landed: VecDeque<(String, u64)>,
     /// Legs retired on other evidence, with their key and when.
     retired: VecDeque<(TransactionId, String, u64)>,
+    /// What the store keeps of each leg of ours from just before its request
+    /// leaves until its fate is settled ([`Self::remember_leg`]).
+    meta: HashMap<TransactionId, LegMeta>,
+    /// **Sends an earlier run of the app had a node take, whose acceptance it
+    /// never saw** ([`Self::shared`]). Every read withholds what they spend and
+    /// create, and judges them from its answer alone, as it judges a send a
+    /// replaced lane took ([`Self::judge_carried`]).
+    carried: HashMap<TransactionId, LegMeta>,
+    /// **Coins our accepted sends spent**, with the DAA score the lane had
+    /// reached when it saw the acceptance: a read from a node that has not
+    /// reached it yet still lists them ([`Self::spent_withheld`]).
+    spent_by_us: VecDeque<SpentByUs>,
+    /// The addresses this wallet watches: a carried send's outputs to them
+    /// come home ([`Self::unsettled`]).
+    ours: HashSet<Address>,
+    /// A carried send unresolved for this many DAA (and [`CARRIED_FOR_MS`])
+    /// becomes a leg of unknown fate.
+    carried_for_daa: u64,
+    /// Where all of the above is kept between runs of the app.
+    store: Option<Arc<SendsStore>>,
+}
+
+/// What the store keeps of a leg of ours ([`InFlightSends::remember_leg`]).
+#[derive(Debug, Clone)]
+pub(crate) struct LegMeta {
+    /// What a build for the same payment carries; empty for a chain's earlier
+    /// leg, which pays us.
+    pub(crate) paid_to: String,
+    /// Its inputs other than its own send's earlier legs' outputs.
+    pub(crate) direct: Vec<UtxoEntryReference>,
+    /// Its inputs that are its own send's earlier legs' outputs.
+    pub(crate) earlier: Vec<UtxoEntryReference>,
+    /// Its outputs: index, value and the address each pays.
+    pub(crate) outputs: Vec<(u32, u64, Option<Address>)>,
+    /// When it was logged (unix ms).
+    pub(crate) since_unix_ms: u64,
+    /// The DAA score the lane had reached when it was logged.
+    pub(crate) since_daa: u64,
+}
+
+impl LegMeta {
+    fn inputs(&self) -> impl Iterator<Item = &UtxoEntryReference> {
+        self.direct.iter().chain(self.earlier.iter())
+    }
+
+    fn record(&self, txid: &TransactionId, state: LegState) -> LegRecord {
+        LegRecord {
+            txid: txid.to_string(),
+            state,
+            paid_to: self.paid_to.clone(),
+            direct: self.direct.iter().map(CoinRecord::of).collect(),
+            earlier: self.earlier.iter().map(CoinRecord::of).collect(),
+            outputs: self
+                .outputs
+                .iter()
+                .map(|(index, value, address)| OutputRecord {
+                    index: *index,
+                    value: *value,
+                    address: address.as_ref().map(|a| a.to_string()),
+                })
+                .collect(),
+            since_unix_ms: self.since_unix_ms,
+            since_daa: self.since_daa,
+        }
+    }
+
+    /// The leg again, or `None` if a coin or an address does not parse.
+    fn from_record(record: &LegRecord) -> Option<Self> {
+        let coins = |list: &[CoinRecord]| -> Option<Vec<UtxoEntryReference>> {
+            list.iter().map(CoinRecord::coin).collect()
+        };
+        let mut outputs = Vec::with_capacity(record.outputs.len());
+        for output in &record.outputs {
+            let address = match &output.address {
+                Some(text) => Some(Address::try_from(text.as_str()).ok()?),
+                None => None,
+            };
+            outputs.push((output.index, output.value, address));
+        }
+        Some(Self {
+            paid_to: record.paid_to.clone(),
+            direct: coins(&record.direct)?,
+            earlier: coins(&record.earlier)?,
+            outputs,
+            since_unix_ms: record.since_unix_ms,
+            since_daa: record.since_daa,
+        })
+    }
+}
+
+/// **Where a wallet's sends are kept between runs of the app**
+/// ([`crate::sends_store`]): the legs file, written before each request leaves,
+/// and the spent-coins file, written off the submit path.
+pub(crate) struct SendsStore {
+    network: String,
+    sends: sends_store::DurableFile,
+    spent: sends_store::DurableFile,
+}
+
+/// A snapshot of [`InFlightSends`] to land outside its lock.
+pub(crate) struct Snapshot {
+    store: Arc<SendsStore>,
+    sends: (u64, std::io::Result<Vec<u8>>),
+    spent: Option<(u64, std::io::Result<Vec<u8>>)>,
+}
+
+impl Snapshot {
+    /// Write the legs file, then the spent coins if they are part of it.
+    pub(crate) async fn land(self) -> std::io::Result<()> {
+        let (generation, sends) = self.sends;
+        self.store.sends.write(generation, sends?).await?;
+        if let Some((generation, spent)) = self.spent {
+            self.store.spent.write(generation, spent?).await?;
+        }
+        Ok(())
+    }
+}
+
+/// What one read of the node's unspent set can prove.
+struct ReadEvidence<'a> {
+    /// The addresses the read asked about.
+    asked: &'a HashSet<Address>,
+    /// The coins the answer lists.
+    unspent: &'a HashSet<UtxoEntryId>,
+    /// The lower of the node's scores before and after the request.
+    score_read: u64,
+    /// The pin's maturity window: a coin this far below the node's score is
+    /// in its index.
+    indexed_after: u64,
+}
+
+impl ReadEvidence<'_> {
+    /// **Whether the answer proves `coin` spent**: its address was asked, the
+    /// answer does not list it, it was created by no send of ours that may
+    /// still land or by one this answer proves, and the node is far enough on
+    /// to list it if it were unspent. A coin
+    /// created at least the maturity window below the node's score is in its
+    /// index; a younger one may not be yet. A batch output of a chain of ours
+    /// has no score of its own (`UNACCEPTED_DAA_SCORE`, pin
+    /// `wallet/core/src/tx/generator/generator.rs:1233` @ `01b532e`): its age
+    /// is its creator's acceptance, which only a send this same answer proves
+    /// (`proven`) vouches for.
+    fn spent(
+        &self,
+        coin: &UtxoEntryReference,
+        may_land: &HashSet<TransactionId>,
+        proven: &HashSet<TransactionId>,
+    ) -> bool {
+        let id = coin.id();
+        let indexed = if coin.block_daa_score() == UNACCEPTED_DAA_SCORE {
+            proven.contains(&id.transaction_id)
+        } else {
+            coin.block_daa_score().saturating_add(self.indexed_after) <= self.score_read
+        };
+        // A creator this answer proves is settled, whatever `may_land` still
+        // says of it mid-judgement: it landed (its outputs are indexed, so an
+        // absent one was spent) or it can never land (nor can what spends it).
+        let settled_creator =
+            proven.contains(&id.transaction_id) || !may_land.contains(&id.transaction_id);
+        coin.utxo
+            .address
+            .as_ref()
+            .is_some_and(|address| self.asked.contains(address))
+            && !self.unspent.contains(&id)
+            && settled_creator
+            && indexed
+    }
+}
+
+/// What a read decided about the sends an earlier run carried in
+/// ([`InFlightSends::judge_carried`]).
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct CarriedJudgement {
+    /// The coins the ended ones spent that the answer proves spent.
+    pub(crate) spent: Vec<UtxoEntryId>,
+    /// Landed, or settled: no longer carried, and proven by this read.
+    pub(crate) ended: Vec<TransactionId>,
+    /// Unresolved for a day: now legs of unknown fate.
+    pub(crate) converted: Vec<TransactionId>,
+}
+
+/// How the context holds a coin a send of ours spends ([`held_copy`]).
+enum Held {
+    /// Pending, in the processor's map too: its filed copy.
+    Pending(UtxoEntryReference),
+    /// In the map, on the mature list or off it (a register takes a coin off
+    /// the mature list and leaves it in the map, `context.rs:254`), or pending
+    /// in the context alone (a close clears the processor's pending map and not
+    /// the context's): the copy the map now holds.
+    Listed(UtxoEntryReference),
+}
+
+/// **How the context holds `coin`, if it does.** A pending coin is looked up,
+/// never written: a batch output a send of ours carries has no score
+/// (`UNACCEPTED_DAA_SCORE`, `generator.rs:1233` @ `01b532e`), and a pending
+/// entry left with that copy overflows the pin's maturity sum at the next tick
+/// (`reference.rs:44`). Otherwise the map is asked as the pin answers it
+/// (`UtxoContext::update`, `context.rs:328-353`, which moves nothing between
+/// lists and writes the copy given into the map and onto any list holding the
+/// coin): with the filed mature copy if one is listed, else the send's own.
+async fn held_copy(lane: &Lane, coin: &UtxoEntryReference) -> Option<Held> {
+    let id = coin.id();
+    if let Some(entry) = lane.processor.pending().get(&id) {
+        return Some(Held::Pending(entry.value().clone().into()));
+    }
+    let probe = if coin.block_daa_score() == UNACCEPTED_DAA_SCORE {
+        lane.context
+            .get_utxos(None, None)
+            .await
+            .ok()
+            .and_then(|mature| {
+                mature.into_iter().find(|entry| {
+                    let at = entry.outpoint.inner();
+                    at.transaction_id == id.transaction_id && at.index == id.index
+                })
+            })
+            .map(UtxoEntryReference::from)
+            .unwrap_or_else(|| coin.clone())
+    } else {
+        coin.clone()
+    };
+    lane.context
+        .update(probe.clone(), 0, false)
+        .await
+        .unwrap_or(false)
+        .then_some(Held::Listed(probe))
+}
+
+/// Write `in_flight`'s legs and spent coins, logging a failure: a removal
+/// written late only carries a settled send one read longer.
+pub(crate) async fn persist_in_flight(in_flight: &Mutex<InFlightSends>) {
+    let snapshot = in_flight
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .snapshot(true);
+    if let Some(snapshot) = snapshot {
+        if let Err(e) = snapshot.land().await {
+            log::warn!("sends: the record of our sends was not written ({e})");
+        }
+    }
 }
 
 /// **How long a leg proven landed is named to the next build for the same
@@ -388,6 +631,49 @@ const READ_SETTLED_KEPT: usize = 1024;
 /// that holds a coin of its own is anchored on it instead and is retired only
 /// on evidence ([`InFlightSends::retire_unknown`]).
 const EARLIER_ANCHOR_FOR_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// How many coins our accepted sends spent [`InFlightSends::spent_by_us`]
+/// keeps: more than any one send spends (a merge of every coin), with
+/// [`SPENT_FOR_MS`] the bound that matters.
+const SPENT_KEPT: usize = 4096;
+
+/// **How long a coin our accepted send spent is withheld from a node that has
+/// not reached the acceptance, a policy**: a node trailing by more than this
+/// is not one a wallet should be reading, and the score a coin is withheld
+/// against is a node's word, so an inflated one costs at most this long.
+const SPENT_FOR_MS: u64 = 60 * 60 * 1000;
+
+/// A coin one of our accepted sends spent ([`InFlightSends::spent_by_us`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpentByUs {
+    coin: UtxoEntryId,
+    /// The DAA score the lane had reached when it saw the acceptance.
+    seen_at_daa: u64,
+    /// When it was seen (unix ms).
+    seen_at_ms: u64,
+}
+
+/// **How long a send an earlier run took to the node stays carried, a
+/// policy**: the network's own expiry of a transaction it relays
+/// (`DEFAULT_TRANSACTION_EXPIRE_INTERVAL_SECONDS`,
+/// `mining/src/mempool/config.rs:7` @ `01b532e`), counted in DAA as the
+/// mempool counts it (`:108`, from `target_time_per_block`) and on the wall
+/// clock both. The node that took it keeps it for good
+/// (`transactions_pool.rs:354-366`), so past this it is not "never landing":
+/// it becomes a leg of unknown fate, its coins filed and anchoring a payment to
+/// the same destination.
+const CARRIED_FOR_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// [`CARRIED_FOR_MS`] in DAA on `network_id`'s kind of network. The pin's
+/// parameters by network id `panic!` on a testnet suffix it does not know
+/// (`consensus/core/src/config/params.rs:567-579` @ `01b532e`); by network type
+/// they never do.
+fn carried_for_daa(network_id: NetworkId) -> u64 {
+    let per_block = kaspa_consensus_core::config::params::Params::from(network_id.network_type)
+        .target_time_per_block()
+        .max(1);
+    CARRIED_FOR_MS / per_block
+}
 
 /// A leg's coins, largest first; ties in outpoint order.
 fn largest_first(mut coins: Vec<UtxoEntryReference>) -> Vec<UtxoEntryReference> {
@@ -540,6 +826,7 @@ impl InFlightSends {
         if self.taken.remove(txid).is_some() {
             self.accepted.insert(*txid);
         }
+        self.carried.remove(txid);
         let Some(send) = self.sends.remove(txid) else {
             self.fate_seen(txid);
             return false;
@@ -581,6 +868,27 @@ impl InFlightSends {
                 }
             } else {
                 self.legs.remove(&seq);
+            }
+        }
+        if may_have_left {
+            self.carried.remove(txid);
+        }
+        // A leg that may have left with no record of its fate (its commit was
+        // dropped mid-submit) is of unknown fate: it anchors a retry as one
+        // with no answer does.
+        if may_have_left
+            && !self.taken.contains_key(txid)
+            && !self.unknown.iter().any(|leg| leg.txid == *txid)
+        {
+            if let Some(meta) = self.meta.get(txid).cloned() {
+                self.fate_unknown(UnknownLeg {
+                    txid: *txid,
+                    paid_to: meta.paid_to,
+                    held: meta.direct,
+                    earlier: meta.earlier,
+                    since_unix_ms: now_unix_ms(),
+                    seq: 0,
+                });
             }
         }
         self.prune();
@@ -666,6 +974,7 @@ impl InFlightSends {
                 .filter(|record| !record.is_accepted())
                 .flat_map(|record| record.utxo_entries().keys().cloned().collect::<Vec<_>>()),
         );
+        ours.extend(self.carried_inputs());
         let free = |coin: &&UtxoEntryReference| !ours.contains(&coin.id());
         let mut anchoring = Anchoring::default();
         let mut each: Vec<Vec<UtxoEntryReference>> = Vec::new();
@@ -703,9 +1012,10 @@ impl InFlightSends {
     }
 
     /// **Legs whose fate a read of the node settles**, under the read's lock:
-    /// one of their coins is gone from the answer (`spent`: asked for, not
-    /// listed, old enough for any synced node's index to list it, and created
-    /// by no send of ours that may still land), so the leg landed or a
+    /// one of their coins is gone from the answer (`spent`, the read's
+    /// [`ReadEvidence::spent`]: asked for, not listed, old enough for any synced
+    /// node's index to list it, and created by no send of ours that may still
+    /// land or by one this answer proves), so the leg landed or a
     /// conflict did and it can never land again. Only legs registered before
     /// the read's snapshot (`before`) are judged: a later one's coins may
     /// postdate the answer. A leg with only earlier-leg outputs and none of
@@ -716,6 +1026,11 @@ impl InFlightSends {
         before: u64,
         now_unix_ms: u64,
     ) {
+        // A time later than now (a clock set back) is taken as now, so the
+        // earlier-leg window runs from there instead of never.
+        for leg in self.unknown.iter_mut() {
+            leg.since_unix_ms = leg.since_unix_ms.min(now_unix_ms);
+        }
         self.retire(
             |leg| {
                 !(leg.seq < before && leg.held.iter().chain(leg.earlier.iter()).any(&spent))
@@ -814,6 +1129,7 @@ impl InFlightSends {
         self.taken.contains_key(txid)
             || self.sends.contains_key(txid)
             || self.read_settled.contains(txid)
+            || self.carried.contains_key(txid)
     }
 
     /// The next leg of unknown fate's place: a read taken now judges only the
@@ -962,6 +1278,411 @@ impl InFlightSends {
             .any(|leg| coins.iter().any(|coin| leg.spends(coin)))
     }
 
+    /// **The record of the sends of the wallet whose activity log is
+    /// `store`**, one per store in the process: a second engine on the same
+    /// files (an unlock while the last engine winds down) shares it rather
+    /// than writing beside it.
+    pub(crate) fn shared(store: &Path, network_id: NetworkId) -> Arc<Mutex<Self>> {
+        type Open = Vec<(PathBuf, Weak<Mutex<InFlightSends>>)>;
+        static OPEN: Mutex<Open> = Mutex::new(Vec::new());
+        let mut open = OPEN.lock().unwrap_or_else(PoisonError::into_inner);
+        open.retain(|(_, weak)| weak.strong_count() > 0);
+        if let Some(shared) = open
+            .iter()
+            .find(|(path, _)| path == store)
+            .and_then(|(_, weak)| weak.upgrade())
+        {
+            return shared;
+        }
+        let shared = Arc::new(Mutex::new(Self::load(store, network_id)));
+        open.push((store.to_path_buf(), Arc::downgrade(&shared)));
+        shared
+    }
+
+    /// What an earlier run of the app left: a leg logged or of unknown fate
+    /// comes back as a leg of unknown fate (it may have left), a sent one as
+    /// carried, with their persisted times; the notices and the spent coins as
+    /// they were.
+    fn load(store: &Path, network_id: NetworkId) -> Self {
+        let network = network_id.to_string();
+        let sends_path = sends_store::sends_path(store);
+        let spent_path = sends_store::spent_path(store);
+        let sends_loaded = sends_store::load_sends(&sends_path, &network);
+        let spent_loaded = sends_store::load_spent(&spent_path, &network);
+        let sends = &sends_loaded.records;
+        let spent = &spent_loaded.records;
+        let mut this = Self {
+            carried_for_daa: carried_for_daa(network_id),
+            ..Self::default()
+        };
+        let mut unusable: Vec<&LegRecord> = Vec::new();
+        for record in &sends.legs {
+            let (Ok(txid), Some(meta)) = (
+                record.txid.parse::<TransactionId>(),
+                LegMeta::from_record(record),
+            ) else {
+                unusable.push(record);
+                continue;
+            };
+            match record.state {
+                LegState::Sent => {
+                    this.carried.insert(txid, meta);
+                }
+                LegState::Submitting | LegState::Unknown => {
+                    this.unknown.push(UnknownLeg {
+                        txid,
+                        paid_to: meta.paid_to.clone(),
+                        held: meta.direct.clone(),
+                        earlier: meta.earlier.clone(),
+                        since_unix_ms: meta.since_unix_ms,
+                        seq: this.next_unknown,
+                    });
+                    this.next_unknown += 1;
+                    this.meta.insert(txid, meta);
+                }
+            }
+        }
+        if !unusable.is_empty() {
+            sends_store::keep_aside(&sends_path, &unusable);
+        }
+        this.landed = sends
+            .landed
+            .iter()
+            .map(|notice| (notice.paid_to.clone(), notice.at_unix_ms))
+            .collect();
+        this.retired = sends
+            .retired
+            .iter()
+            .filter_map(|retired| {
+                Some((
+                    retired.txid.parse().ok()?,
+                    retired.paid_to.clone(),
+                    retired.at_unix_ms,
+                ))
+            })
+            .collect();
+        this.spent_by_us = spent
+            .iter()
+            .filter_map(|coin| {
+                Some(SpentByUs {
+                    coin: UtxoEntryId::new(coin.txid.parse().ok()?, coin.index),
+                    seen_at_daa: coin.seen_at_daa,
+                    seen_at_ms: coin.seen_at_ms,
+                })
+            })
+            .collect();
+        if !this.carried.is_empty() || !this.unknown.is_empty() {
+            log::info!(
+                "sends: an earlier run left {} send(s) in flight and {} of unknown fate",
+                this.carried.len(),
+                this.unknown.len()
+            );
+        }
+        this.store = Some(Arc::new(SendsStore {
+            network,
+            sends: sends_store::DurableFile::new(
+                sends_path,
+                sends_loaded.bytes.clone(),
+                sends_loaded.kept,
+            ),
+            spent: sends_store::DurableFile::new(
+                spent_path,
+                spent_loaded.bytes.clone(),
+                spent_loaded.kept,
+            ),
+        }));
+        this
+    }
+
+    /// **Only this wallet's legs.** A copy of the files carried to another
+    /// wallet (a device transfer, then a restore from another seed) names
+    /// coins at addresses it does not watch at all: such a leg is dropped. One
+    /// with any coin at a watched address is kept, since the window this run
+    /// starts with can be narrower than the one that sent it.
+    pub(crate) fn keep_watched(&mut self, watched: &HashSet<Address>) {
+        self.ours = watched.clone();
+        let foreign = |coin: &UtxoEntryReference| {
+            coin.utxo
+                .address
+                .as_ref()
+                .is_some_and(|address| !watched.contains(address))
+        };
+        let before = self.unknown.len() + self.carried.len();
+        self.unknown
+            .retain(|leg| !leg.held.iter().chain(leg.earlier.iter()).all(foreign));
+        self.carried.retain(|_, meta| !meta.inputs().all(foreign));
+        let dropped = before - self.unknown.len() - self.carried.len();
+        if dropped > 0 {
+            log::warn!(
+                "sends: {dropped} leg(s) on record spend only coins this wallet does not watch; dropped"
+            );
+        }
+    }
+
+    /// Keep what the store needs of a leg about to be submitted. A send of an
+    /// earlier run with the same txid becomes this one once its request may
+    /// have left ([`Self::submit_returned`]); a refusal before then leaves it
+    /// carried.
+    pub(crate) fn remember_leg(&mut self, txid: TransactionId, meta: LegMeta) {
+        self.meta.insert(txid, meta);
+    }
+
+    /// A leg refused before its request: nothing of it is kept.
+    pub(crate) fn forget_leg(&mut self, txid: &TransactionId) {
+        self.meta.remove(txid);
+        self.submit_returned(txid, false);
+    }
+
+    /// **The store's copy of these records, numbered** (`with_spent`: the
+    /// spent-coins file too). `None` when there is no store.
+    pub(crate) fn snapshot(&mut self, with_spent: bool) -> Option<Snapshot> {
+        let store = self.store.clone()?;
+        let submitting: HashSet<TransactionId> = self
+            .legs
+            .values()
+            .filter(|leg| !leg.returned)
+            .map(|leg| leg.txid)
+            .collect();
+        let unknown: HashSet<TransactionId> = self.unknown.iter().map(|leg| leg.txid).collect();
+        let taken = &self.taken;
+        self.meta.retain(|txid, _| {
+            unknown.contains(txid) || taken.contains_key(txid) || submitting.contains(txid)
+        });
+        let mut legs: Vec<LegRecord> = Vec::new();
+        for leg in &self.unknown {
+            let meta = self.meta.get(&leg.txid);
+            let record = LegMeta {
+                paid_to: leg.paid_to.clone(),
+                direct: leg.held.clone(),
+                earlier: leg.earlier.clone(),
+                outputs: meta.map(|meta| meta.outputs.clone()).unwrap_or_default(),
+                since_unix_ms: leg.since_unix_ms,
+                since_daa: meta.map_or(0, |meta| meta.since_daa),
+            }
+            .record(&leg.txid, LegState::Unknown);
+            legs.push(record);
+        }
+        for (txid, meta) in &self.meta {
+            if unknown.contains(txid) {
+                continue;
+            }
+            let state = if self.taken.contains_key(txid) {
+                LegState::Sent
+            } else {
+                LegState::Submitting
+            };
+            legs.push(meta.record(txid, state));
+        }
+        for (txid, meta) in &self.carried {
+            if !self.meta.contains_key(txid) {
+                legs.push(meta.record(txid, LegState::Sent));
+            }
+        }
+        legs.sort_by(|a, b| a.txid.cmp(&b.txid));
+        let sends = sends_store::Sends {
+            legs,
+            landed: self
+                .landed
+                .iter()
+                .map(|(paid_to, at)| sends_store::LandedRecord {
+                    paid_to: paid_to.clone(),
+                    at_unix_ms: *at,
+                })
+                .collect(),
+            retired: self
+                .retired
+                .iter()
+                .map(|(txid, paid_to, at)| sends_store::RetiredRecord {
+                    txid: txid.to_string(),
+                    paid_to: paid_to.clone(),
+                    at_unix_ms: *at,
+                })
+                .collect(),
+        };
+        let spent = with_spent.then(|| {
+            let coins: Vec<SpentRecord> = self
+                .spent_by_us
+                .iter()
+                .map(|kept| SpentRecord {
+                    txid: kept.coin.transaction_id.to_string(),
+                    index: kept.coin.index,
+                    seen_at_daa: kept.seen_at_daa,
+                    seen_at_ms: kept.seen_at_ms,
+                })
+                .collect();
+            (
+                store.spent.next_generation(),
+                sends_store::encode_spent(&store.network, &coins),
+            )
+        });
+        Some(Snapshot {
+            sends: (
+                store.sends.next_generation(),
+                sends_store::encode_sends(&store.network, &sends),
+            ),
+            spent,
+            store,
+        })
+    }
+
+    /// The txids of the sends an earlier run carried in.
+    pub(crate) fn carried_txids(&self) -> Vec<TransactionId> {
+        self.carried.keys().copied().collect()
+    }
+
+    /// Every coin a carried send spends.
+    pub(crate) fn carried_inputs(&self) -> Vec<UtxoEntryId> {
+        self.carried
+            .values()
+            .flat_map(|meta| meta.inputs().map(|coin| coin.id()))
+            .collect()
+    }
+
+    /// **Judge the carried sends against a read's answer**, under the read's
+    /// lock, parents first. Landed: the answer lists one of its outputs (a
+    /// node's index holds accepted transactions only). Settled: it spends a
+    /// coin `gone` finds the answer proves spent, given the txids this read has
+    /// proven so far (`proven`, grown as sends settle): it landed or a conflict
+    /// did, and can never land again. Unresolved past [`CARRIED_FOR_MS`] and
+    /// `carried_for_daa` at `score`: a leg of unknown fate from `now`. A saved
+    /// time later than the read's own is taken as the read's, and the day runs
+    /// from there.
+    pub(crate) fn judge_carried(
+        &mut self,
+        proven: &mut HashSet<TransactionId>,
+        gone: impl Fn(&UtxoEntryReference, &HashSet<TransactionId>) -> bool,
+        score: u64,
+        now: u64,
+    ) -> CarriedJudgement {
+        let mut judgement = CarriedJudgement::default();
+        for meta in self.carried.values_mut() {
+            meta.since_daa = meta.since_daa.min(score);
+            meta.since_unix_ms = meta.since_unix_ms.min(now);
+        }
+        loop {
+            let ended: Vec<(TransactionId, Vec<UtxoEntryId>)> = self
+                .carried
+                .iter()
+                .filter_map(|(txid, meta)| {
+                    if proven.contains(txid) {
+                        return Some((*txid, meta.inputs().map(|coin| coin.id()).collect()));
+                    }
+                    let missing: Vec<UtxoEntryId> = meta
+                        .inputs()
+                        .filter(|coin| gone(coin, proven))
+                        .map(|coin| coin.id())
+                        .collect();
+                    (!missing.is_empty()).then_some((*txid, missing))
+                })
+                .collect();
+            if ended.is_empty() {
+                break;
+            }
+            for (txid, spent) in ended {
+                self.carried.remove(&txid);
+                proven.insert(txid);
+                judgement.spent.extend(spent);
+                judgement.ended.push(txid);
+            }
+        }
+        let stale: Vec<TransactionId> = self
+            .carried
+            .iter()
+            .filter(|(_, meta)| {
+                now.saturating_sub(meta.since_unix_ms) >= CARRIED_FOR_MS
+                    && score >= meta.since_daa.saturating_add(self.carried_for_daa)
+            })
+            .map(|(txid, _)| *txid)
+            .collect();
+        for txid in stale {
+            if let Some(meta) = self.carried.remove(&txid) {
+                log::info!(
+                    "sends: a send an earlier run carried in was not accepted inside a day; \
+                     it is now of unknown fate"
+                );
+                self.fate_unknown(UnknownLeg {
+                    txid,
+                    paid_to: meta.paid_to.clone(),
+                    held: meta.direct.clone(),
+                    earlier: meta.earlier.clone(),
+                    since_unix_ms: now,
+                    seq: 0,
+                });
+                self.meta.insert(txid, meta);
+                judgement.converted.push(txid);
+            }
+        }
+        judgement
+    }
+
+    /// Our send `txid` was accepted, seen with the lane at `daa`: what it and
+    /// every send of ours it spends from spent is kept for a read from a node
+    /// that has not reached that acceptance yet.
+    pub(crate) fn note_accepted(&mut self, txid: &TransactionId, daa: u64) {
+        let mut coins: Vec<UtxoEntryId> = Vec::new();
+        let mut walk = vec![*txid];
+        let mut seen: HashSet<TransactionId> = HashSet::new();
+        while let Some(at) = walk.pop() {
+            if !seen.insert(at) {
+                continue;
+            }
+            if let Some(send) = self.sends.get(&at) {
+                for spent in &send.spends {
+                    coins.push(UtxoEntryId::from(*spent));
+                    walk.push(spent.transaction_id);
+                }
+            }
+            if let Some(record) = self.taken.get(&at) {
+                coins.extend(record.utxo_entries().keys().cloned());
+            }
+            if let Some(meta) = self.carried.get(&at).or_else(|| self.meta.get(&at)) {
+                coins.extend(meta.inputs().map(|coin| coin.id()));
+            }
+        }
+        self.note_spent(coins, daa);
+    }
+
+    /// Keep `coins` as spent by an accepted send of ours, seen at `daa`.
+    pub(crate) fn note_spent(&mut self, coins: impl IntoIterator<Item = UtxoEntryId>, daa: u64) {
+        self.note_spent_at(coins, daa, now_unix_ms());
+    }
+
+    fn note_spent_at(&mut self, coins: impl IntoIterator<Item = UtxoEntryId>, daa: u64, now: u64) {
+        for coin in coins {
+            if let Some(kept) = self.spent_by_us.iter_mut().find(|kept| kept.coin == coin) {
+                kept.seen_at_daa = kept.seen_at_daa.max(daa);
+                kept.seen_at_ms = now;
+                continue;
+            }
+            self.spent_by_us.push_back(SpentByUs {
+                coin,
+                seen_at_daa: daa,
+                seen_at_ms: now,
+            });
+        }
+        while self.spent_by_us.len() > SPENT_KEPT {
+            self.spent_by_us.pop_front();
+        }
+    }
+
+    /// The coins our accepted sends spent that a node at `score` may not have
+    /// seen spent yet: the acceptance was seen at a DAA score `margin` or less
+    /// below it, or above it, within [`SPENT_FOR_MS`] of `now`. Older ones
+    /// leave the list.
+    pub(crate) fn spent_withheld(&mut self, score: u64, margin: u64, now: u64) -> Vec<UtxoEntryId> {
+        // A time later than now (a clock set back) is taken as now.
+        for kept in self.spent_by_us.iter_mut() {
+            kept.seen_at_ms = kept.seen_at_ms.min(now);
+        }
+        self.spent_by_us
+            .retain(|kept| now.saturating_sub(kept.seen_at_ms) < SPENT_FOR_MS);
+        self.spent_by_us
+            .iter()
+            .filter(|kept| kept.seen_at_daa.saturating_add(margin) > score)
+            .map(|kept| kept.coin.clone())
+            .collect()
+    }
+
     #[cfg(test)]
     fn insert_parts(
         &mut self,
@@ -976,17 +1697,37 @@ impl InFlightSends {
     /// the returning outputs of the sends in flight, less any another send in
     /// flight spends again (a chain's legs feed each other, so only what its
     /// last leg leaves comes home).
+    ///
+    /// A send an earlier run carried in is in no figure of the pin's at all:
+    /// every output of it paying a watched address counts here.
     fn unsettled(&self) -> u64 {
-        let spent: HashSet<TransactionOutpoint> = self
+        let mut spent: HashSet<TransactionOutpoint> = self
             .sends
             .values()
             .flat_map(|send| send.spends.iter().copied())
             .collect();
+        spent.extend(self.carried.values().flat_map(|meta| {
+            meta.inputs().map(|coin| {
+                let id = coin.id();
+                TransactionOutpoint::new(id.transaction_id, id.index)
+            })
+        }));
+        let carried = self.carried.iter().flat_map(|(txid, meta)| {
+            meta.outputs
+                .iter()
+                .filter(|(_, _, address)| {
+                    address
+                        .as_ref()
+                        .is_some_and(|address| self.ours.contains(address))
+                })
+                .map(move |(index, value, _)| (TransactionOutpoint::new(*txid, *index), *value))
+        });
         self.sends
             .values()
-            .flat_map(|send| send.returning.iter())
+            .flat_map(|send| send.returning.iter().copied())
+            .chain(carried)
             .filter(|(outpoint, _)| !spent.contains(outpoint))
-            .fold(0u64, |sum, (_, value)| sum.saturating_add(*value))
+            .fold(0u64, |sum, (_, value)| sum.saturating_add(value))
     }
 }
 
@@ -1601,7 +2342,8 @@ impl WalletEngine {
     /// One `UtxoContext` = one account (P1 §0.8). `store_path` is an app-private
     /// file for the activity log (INV-3).
     pub fn new(rpc: Rpc, network_id: NetworkId, store_path: PathBuf) -> Result<Self> {
-        let lane = Lane::new(1, &rpc, network_id, Default::default());
+        let in_flight = InFlightSends::shared(&store_path, network_id);
+        let lane = Lane::new(1, &rpc, network_id, in_flight);
         let store = ActivityStore::load(store_path.clone())?;
         let (events, _) = broadcast::channel(256);
         Ok(Self {
@@ -1807,6 +2549,13 @@ impl WalletEngine {
         self.emit_activity(&self.change_set());
 
         let lane = self.lane();
+        // Only this wallet's legs from an earlier run, before any read.
+        let watched: HashSet<Address> = self.watched().iter().cloned().collect();
+        lane.in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .keep_watched(&watched);
+        persist_in_flight(&lane.in_flight).await;
         // The dev install's fault arm (D-340's fence; `lanefault=1`): staged
         // once, on the first lane only.
         if crate::devab::lane_fault_armed(&self.inner.store_path) {
@@ -2008,7 +2757,13 @@ impl WalletEngine {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) =
             Arc::new(change_addresses.into_iter().collect());
-        self.file_from_node(&self.lane(), added).await?;
+        let lane = self.lane();
+        lane.in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .ours
+            .extend(added.iter().cloned());
+        self.file_from_node(&lane, added).await?;
         log::info!(
             "wallet-sync: watch window widened by {count} to {total} addresses (late discovery)"
         );
@@ -2121,6 +2876,20 @@ impl WalletEngine {
     /// How many lanes this engine has built (1 + rebuilds).
     pub fn lanes_built(&self) -> u64 {
         self.inner.lanes_built.load(Ordering::SeqCst)
+    }
+
+    /// How many closes the current lane has begun. A close that has begun
+    /// admits no further submit until the next open.
+    pub fn closes_begun(&self) -> u64 {
+        self.lane().closes_begun()
+    }
+
+    /// Hold every later close's claim on the current lane's submit fence until
+    /// the returned semaphore grants a permit: the delay a busy scheduler puts
+    /// between a close beginning and its claim queueing, staged for a test.
+    #[doc(hidden)]
+    pub fn hold_close_claims(&self) -> Arc<tokio::sync::Semaphore> {
+        self.lane().hold_close_claims()
     }
 
     /// The wallet lane's health, as last published.
@@ -2722,6 +3491,9 @@ impl WalletEngine {
             .filter(|record| record.is_accepted())
             .map(|record| record.id())
             .collect();
+        // The node's own score as the request leaves: the answer reflects at
+        // least this, and the score read after it may overstate it.
+        let score_before = lane.processor.current_daa_score();
         let entries = tokio::time::timeout(
             LANE_HOLD_WITHIN,
             lane.processor.rpc_api().get_utxos_by_addresses(addresses),
@@ -2754,6 +3526,11 @@ impl WalletEngine {
             .network_params()
             .map(|params| params.user_transaction_maturity_period_daa())
             .unwrap_or(u64::MAX / 2);
+        // What the node can be relied on to have seen: an absence older than
+        // this is evidence, a listing of a coin we spent after it is not.
+        let score_read = score_before
+            .unwrap_or(current_daa_score)
+            .min(current_daa_score);
         let tag_daa_score = lane
             .processor
             .current_daa_score()
@@ -2800,26 +3577,38 @@ impl WalletEngine {
         for txid in &landed_before {
             may_land.remove(txid);
         }
+        let evidence = ReadEvidence {
+            asked: &asked,
+            unspent: &unspent,
+            score_read,
+            indexed_after,
+        };
+        // The sends this answer proves accepted or settled so far: it lists an
+        // output of each, or one was settled from it below.
+        let mut proven: HashSet<TransactionId> = listed.clone();
+        // Sends an earlier run of the app had the node take: withheld with
+        // every coin they create, and judged from this answer alone. So are the
+        // coins our accepted sends spent, while this node may not have reached
+        // their acceptance.
         {
             let mut in_flight = lane
                 .in_flight
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            in_flight.outputs_listed(&listed);
-            in_flight.retire_unknown(
-                |coin| {
-                    let id = coin.id();
-                    coin.utxo
-                        .address
-                        .as_ref()
-                        .is_some_and(|address| asked.contains(address))
-                        && !unspent.contains(&id)
-                        && !may_land.contains(&id.transaction_id)
-                        && coin.block_daa_score().saturating_add(indexed_after) <= current_daa_score
-                },
-                read.unknown_before,
+            may_land.extend(in_flight.carried_txids());
+            let judgement = in_flight.judge_carried(
+                &mut proven,
+                |coin, proven| evidence.spent(coin, &may_land, proven),
+                score_read,
                 now_unix_ms(),
             );
+            for txid in judgement.ended.iter().chain(judgement.converted.iter()) {
+                may_land.remove(txid);
+            }
+            held.extend(in_flight.carried_inputs());
+            held.extend(in_flight.spent_withheld(score_read, indexed_after, now_unix_ms()));
+            in_flight.note_spent(judgement.spent, tag_daa_score);
+            in_flight.outputs_listed(&listed);
         }
         let seen_accepted = lane
             .in_flight
@@ -2835,19 +3624,18 @@ impl WalletEngine {
         }
         let mut settled = 0;
         loop {
+            // Landed: the answer lists an output of it. Or settled: the
+            // answer proves a coin it spends spent (it landed or a conflict
+            // did). Parents first: a send settled here proves its own outputs'
+            // age for the legs that spend them.
             let done: Vec<TransactionId> = judged
                 .values()
                 .filter(|record| {
-                    record.utxo_entries().values().any(|coin| {
-                        let id = coin.id();
-                        !may_land.contains(&id.transaction_id)
-                            && coin
-                                .utxo
-                                .address
-                                .as_ref()
-                                .is_some_and(|address| asked.contains(address))
-                            && !unspent.contains(&id)
-                    })
+                    proven.contains(&record.id())
+                        || record
+                            .utxo_entries()
+                            .values()
+                            .any(|coin| evidence.spent(coin, &may_land, &proven))
                 })
                 .map(|record| record.id())
                 .collect();
@@ -2858,13 +3646,27 @@ impl WalletEngine {
                 let Some(record) = judged.remove(&txid) else {
                     continue;
                 };
+                // Landed, by an output of its own this answer lists: every coin
+                // it spends is spent.
+                let landed = listed.contains(&txid);
                 may_land.remove(&txid);
+                proven.insert(txid);
                 // Recorded before the tag, so a fold that sees the tag also
                 // sees that a read set it ([`Self::proves_landed`]).
-                lane.in_flight
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .settled(&txid);
+                {
+                    let gone: Vec<UtxoEntryId> = record
+                        .utxo_entries()
+                        .values()
+                        .filter(|coin| landed || evidence.spent(coin, &may_land, &proven))
+                        .map(|coin| coin.id())
+                        .collect();
+                    let mut in_flight = lane
+                        .in_flight
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    in_flight.settled(&txid);
+                    in_flight.note_spent(gone, tag_daa_score);
+                }
                 record.tag_as_accepted_at_daa_score(tag_daa_score);
                 lane.context.remove_outgoing_transaction(&txid);
                 if let Err(e) = lane
@@ -2877,6 +3679,16 @@ impl WalletEngine {
                 settled += 1;
             }
         }
+        // Legs of unknown fate, once every send this answer can settle is
+        // settled: a coin it proves spent retires its leg.
+        lane.in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retire_unknown(
+                |coin| evidence.spent(coin, &may_land, &proven),
+                read.unknown_before,
+                now_unix_ms(),
+            );
         let found = entries.len();
         let coins: Vec<UtxoEntryReference> = entries
             .into_iter()
@@ -2887,11 +3699,19 @@ impl WalletEngine {
             })
             .collect();
         let withheld = found - coins.len();
+        let rearmed =
+            Self::rearm_pending(lane, &coins, &asked, &unspent, score_read, indexed_after).await?;
         drop(quiet);
         lane.context
             .extend_from_scan(coins, current_daa_score)
             .await?;
         lane.context.update_balance().await?;
+        persist_in_flight(&lane.in_flight).await;
+        if rearmed > 0 {
+            log::info!(
+                "wallet-sync: {rearmed} coin(s) pending at the last close re-armed to mature"
+            );
+        }
         if settled > 0 || withheld > 0 {
             log::info!(
                 "wallet-sync: unspent set read: {settled} send(s) of ours settled, {withheld} \
@@ -2900,6 +3720,111 @@ impl WalletEngine {
             );
         }
         Ok(())
+    }
+
+    /// The DAA score the lane has reached or been handed: an acceptance seen
+    /// now happened at or below it.
+    fn seen_at(lane: &Lane) -> u64 {
+        lane.processor
+            .current_daa_score()
+            .unwrap_or(0)
+            .max(lane.newest_admitted_daa())
+    }
+
+    /// **Re-arm the coins the processor held pending at the last close.** Its
+    /// `cleanup()` empties its pending map (pin `processor.rs:609-615`) while
+    /// the context keeps its copy; `extend_from_scan` skips a coin the map
+    /// holds (`context.rs:457`), and the processor promotes only from its own
+    /// map (`:272-283`). So a read that lists such a coin, and would itself file
+    /// it (no send of ours spends it, none that may still land created it),
+    /// hands it back as the pin registers a new pending coin
+    /// (`context.rs:310-315`), if the context map holds it, it is not already
+    /// mature, the processor does not hold it, and it is not a coinbase coin
+    /// (stasis is not handed back). A coin the read asked about and no longer
+    /// lists, old enough to be listed, is gone and is dropped. Under the
+    /// notification lock, so no frame lands between the checks and the
+    /// registration; never while a close is in progress. Returns how many were
+    /// re-armed.
+    async fn rearm_pending(
+        lane: &Lane,
+        filing: &[UtxoEntryReference],
+        asked: &HashSet<Address>,
+        unspent: &HashSet<UtxoEntryId>,
+        score_read: u64,
+        indexed_after: u64,
+    ) -> Result<usize> {
+        // A read during a close would hand coins to a processor whose
+        // `cleanup()` is about to empty its map: the reopen's read takes them.
+        // Read before the check, so a close the check misses is one this count
+        // does not include.
+        let closes = lane.closes_begun();
+        if lane.is_closing() {
+            return Ok(0);
+        }
+        let at_close = lane.pending_at_close();
+        if at_close.is_empty() {
+            return Ok(0);
+        }
+        let answer: HashMap<UtxoEntryId, &UtxoEntryReference> =
+            filing.iter().map(|coin| (coin.id(), coin)).collect();
+        let mature: HashSet<UtxoEntryId> = lane
+            .context
+            .get_utxos(None, None)
+            .await?
+            .iter()
+            .map(|entry| {
+                let id = entry.outpoint.inner();
+                UtxoEntryId::new(id.transaction_id, id.index)
+            })
+            .collect();
+        let mut resolved: HashSet<UtxoEntryId> = HashSet::new();
+        let mut rearmed = 0;
+        for kept in at_close {
+            let id = kept.id();
+            if !kept
+                .utxo
+                .address
+                .as_ref()
+                .is_some_and(|address| asked.contains(address))
+            {
+                continue;
+            }
+            if kept.utxo.is_coinbase
+                || mature.contains(&id)
+                || lane.processor.pending().contains_key(&id)
+            {
+                resolved.insert(id);
+                continue;
+            }
+            if !unspent.contains(&id) {
+                if kept.block_daa_score().saturating_add(indexed_after) <= score_read {
+                    resolved.insert(id);
+                }
+                continue;
+            }
+            let Some(listed) = answer.get(&id) else {
+                // Listed, but held by a send of ours: a later read decides.
+                continue;
+            };
+            if lane
+                .context
+                .update((*listed).clone(), 0, false)
+                .await
+                .unwrap_or(false)
+            {
+                lane.processor.pending().insert(
+                    id.clone(),
+                    PendingUtxoEntryReference::new((*listed).clone(), lane.context.clone()),
+                );
+                rearmed += 1;
+            }
+            resolved.insert(id);
+        }
+        // A close that began meanwhile may have taken its snapshot before these
+        // registrations, and its `cleanup()` empties them: they stay listed for
+        // the reopen's read.
+        lane.pending_settled_unless_closed(closes, &resolved);
+        Ok(rearmed)
     }
 
     /// **Whether a `Maturity` of a send of ours proves it landed.** The pin
@@ -2984,15 +3909,10 @@ impl WalletEngine {
             return !tracked;
         };
         let coins: Vec<UtxoEntryReference> = outgoing.utxo_entries().values().cloned().collect();
-        let mut held = Vec::new();
+        let mut held: Vec<Held> = Vec::new();
         for coin in &coins {
-            if lane
-                .context
-                .update(coin.clone(), 0, false)
-                .await
-                .unwrap_or(false)
-            {
-                held.push(coin.clone());
+            if let Some(filed) = held_copy(lane, coin).await {
+                held.push(filed);
             }
         }
         if !held.is_empty() {
@@ -3011,19 +3931,40 @@ impl WalletEngine {
                         .collect::<Vec<_>>()
                 })
                 .collect();
-            let held: Vec<UtxoEntryReference> = held
+            let held: Vec<Held> = held
                 .into_iter()
-                .filter(|coin| !spent_elsewhere.contains(&coin.id()))
+                .filter(|coin| {
+                    let (Held::Pending(coin) | Held::Listed(coin)) = coin;
+                    !spent_elsewhere.contains(&coin.id())
+                })
                 .collect();
             lane.processor.cancel_outgoing_transaction(txid);
             lane.context.remove_outgoing_transaction(&txid);
             // Off the mature list since the register, in the map still:
-            // `remove` sheds the map entry, `insert` files it on both.
-            if let Err(e) = lane.context.remove(held.clone()).await {
+            // `remove` sheds the map entry, `insert` files it again. A pending
+            // coin goes back pending at its own score; a listed one on the
+            // mature list; a batch output with no score of its own is left for
+            // the next read to file at its real one.
+            let copies: Vec<UtxoEntryReference> = held
+                .iter()
+                .map(|coin| {
+                    let (Held::Pending(coin) | Held::Listed(coin)) = coin;
+                    coin.clone()
+                })
+                .collect();
+            if let Err(e) = lane.context.remove(copies).await {
                 self.emit_error(&e.to_string());
             }
+            let score = lane.processor.current_daa_score().unwrap_or(0);
             for coin in &held {
-                if let Err(e) = lane.context.insert(coin.clone(), 0, true).await {
+                let filed = match coin {
+                    Held::Pending(coin) => lane.context.insert(coin.clone(), score, false).await,
+                    Held::Listed(coin) if coin.block_daa_score() == UNACCEPTED_DAA_SCORE => {
+                        continue;
+                    }
+                    Held::Listed(coin) => lane.context.insert(coin.clone(), 0, true).await,
+                };
+                if let Err(e) = filed {
                     self.emit_error(&e.to_string());
                 }
             }
@@ -3039,7 +3980,8 @@ impl WalletEngine {
                 self.emit_error(&e.to_string());
             }
             log::info!(
-                "wallet-sync: send {txid} lost to a conflict; purged, {} coin(s) spendable again",
+                "wallet-sync: send {txid} lost to a conflict; purged, {} coin(s) returned (a \
+                 scoreless one is filed by the next read)",
                 held.len()
             );
             return false;
@@ -3270,6 +4212,7 @@ impl WalletEngine {
                 });
             }
             Events::Pending { record } => {
+                let seen_at = Self::seen_at(lane);
                 {
                     let mut in_flight = lane
                         .in_flight
@@ -3281,9 +4224,10 @@ impl WalletEngine {
                         in_flight.fate_seen(record.id());
                     }
                     // A send of ours whose output this processor files as it
-                    // arrives, with no record of its own (a replaced lane took
-                    // it): it landed.
+                    // arrives, with no record of its own (a replaced lane or
+                    // an earlier run of the app took it): it landed.
                     if !is_own_send(&record) && in_flight.tracks(record.id()) {
+                        in_flight.note_accepted(record.id(), seen_at);
                         in_flight.leave(record.id());
                     }
                 }
@@ -3295,6 +4239,7 @@ impl WalletEngine {
                         .enter(&record, &ours);
                 }
                 self.fold_record(record, change_set);
+                persist_in_flight(&lane.in_flight).await;
             }
             Events::Maturity { record } => {
                 if let TransactionData::External { utxo_entries, .. } = record.transaction_data() {
@@ -3308,19 +4253,28 @@ impl WalletEngine {
                         .coins_spent(&spent);
                 }
                 if self.proves_landed(lane, &record).await {
-                    lane.in_flight
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .leave(record.id());
+                    let seen_at = Self::seen_at(lane);
+                    {
+                        let mut in_flight = lane
+                            .in_flight
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner);
+                        if is_own_send(&record) {
+                            in_flight.note_accepted(record.id(), seen_at);
+                        }
+                        in_flight.leave(record.id());
+                    }
                     self.fold_record(record, change_set);
                 }
+                persist_in_flight(&lane.in_flight).await;
             }
             Events::Discovery { record } => {
                 lane.in_flight
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .fate_seen(record.id());
-                self.fold_record(record, change_set)
+                self.fold_record(record, change_set);
+                persist_in_flight(&lane.in_flight).await;
             }
             Events::Reorg { record } => {
                 log::info!("wallet-sync: reorg — removing tx {}", record.id());
@@ -3399,6 +4353,379 @@ impl WalletEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn unit_txid(n: u8) -> TransactionId {
+        TransactionId::from_bytes([n; 32])
+    }
+
+    fn unit_coin(n: u8, daa: u64) -> UtxoEntryReference {
+        let address = Address::try_from(
+            "kaspa:qrqrnyzdwh9ec2q05guzy3vv33f86nvdyw52qwlmk0mewzx3dgdss3pmcd692",
+        )
+        .expect("address");
+        UtxoEntryReference::from(kaspa_rpc_core::RpcUtxosByAddressesEntry {
+            address: Some(address.clone()),
+            outpoint: kaspa_rpc_core::RpcTransactionOutpoint {
+                transaction_id: unit_txid(n),
+                index: 0,
+            },
+            utxo_entry: kaspa_rpc_core::RpcUtxoEntry::new(
+                1_000 + u64::from(n),
+                kaspa_txscript::pay_to_address_script(&address),
+                daa,
+                false,
+                None,
+            ),
+        })
+    }
+
+    fn unit_meta(paid_to: &str, direct: Vec<u8>, since_unix_ms: u64, since_daa: u64) -> LegMeta {
+        LegMeta {
+            paid_to: paid_to.to_string(),
+            direct: direct.into_iter().map(|n| unit_coin(n, 900_000)).collect(),
+            earlier: vec![],
+            outputs: vec![(1, 5, None)],
+            since_unix_ms,
+            since_daa,
+        }
+    }
+
+    /// **The record of our sends comes back as it left.** A leg still in its
+    /// submit and a leg of unknown fate come back as legs of unknown fate (each
+    /// may have left), with their keys, coins and times; a sent leg comes back
+    /// carried; the notices and the spent coins as they were.
+    #[tokio::test]
+    async fn the_record_of_our_sends_comes_back_as_it_left() {
+        let dir = std::env::temp_dir().join(format!("kv-sends-unit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = dir.join("activity.kvlog");
+        let network = NetworkId::new(NetworkType::Mainnet);
+        let mut sends = InFlightSends::load(&store, network);
+        sends.remember_leg(unit_txid(1), unit_meta("kaspa:a", vec![11], 10, 100));
+        sends.submitting(unit_txid(1), vec![unit_coin(11, 900_000).id()]);
+        sends.remember_leg(unit_txid(2), unit_meta("kaspa:b", vec![12], 20, 200));
+        sends.submitting(unit_txid(2), vec![unit_coin(12, 900_000).id()]);
+        sends.fate_unknown(UnknownLeg {
+            txid: unit_txid(2),
+            paid_to: "kaspa:b".into(),
+            held: vec![unit_coin(12, 900_000)],
+            earlier: vec![],
+            since_unix_ms: 25,
+            seq: 0,
+        });
+        sends.submit_returned(&unit_txid(2), true);
+        sends
+            .carried
+            .insert(unit_txid(3), unit_meta("kaspa:c", vec![13], 30, 300));
+        InFlightSends::note_landed(&mut sends.landed, "kaspa:d", 40);
+        sends
+            .retired
+            .push_back((unit_txid(5), "kaspa:e".into(), 50));
+        sends.note_spent_at([unit_coin(16, 0).id()], 600, 700);
+        sends
+            .snapshot(true)
+            .expect("a store")
+            .land()
+            .await
+            .expect("written");
+
+        let back = InFlightSends::load(&store, network);
+        let unknown: HashMap<TransactionId, &UnknownLeg> =
+            back.unknown.iter().map(|leg| (leg.txid, leg)).collect();
+        assert_eq!(unknown.len(), 2, "{:?}", back.unknown);
+        let submitting = unknown[&unit_txid(1)];
+        assert_eq!(submitting.paid_to, "kaspa:a");
+        assert_eq!(submitting.held[0].id(), unit_coin(11, 0).id());
+        assert_eq!(submitting.held[0].utxo.amount, 1_011);
+        assert_eq!(submitting.since_unix_ms, 10);
+        assert_eq!(unknown[&unit_txid(2)].since_unix_ms, 25);
+        assert_eq!(back.meta[&unit_txid(1)].since_daa, 100);
+        assert_eq!(
+            back.carried.keys().copied().collect::<Vec<_>>(),
+            vec![unit_txid(3)]
+        );
+        assert_eq!(back.carried[&unit_txid(3)].since_daa, 300);
+        assert_eq!(back.carried[&unit_txid(3)].outputs, vec![(1, 5, None)]);
+        assert_eq!(back.landed, VecDeque::from([("kaspa:d".to_string(), 40)]));
+        assert_eq!(
+            back.retired,
+            VecDeque::from([(unit_txid(5), "kaspa:e".to_string(), 50)])
+        );
+        assert_eq!(
+            back.spent_by_us,
+            VecDeque::from([SpentByUs {
+                coin: unit_coin(16, 0).id(),
+                seen_at_daa: 600,
+                seen_at_ms: 700,
+            }])
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A carried send is judged by the answer, and by a day on both
+    /// clocks.** One of its outputs listed: it landed. One of its coins gone:
+    /// it landed or a conflict did. Neither, past a day on the wall clock AND
+    /// in DAA: a leg of unknown fate from now, never freed outright. A saved
+    /// time later than the read's is taken as the read's.
+    #[test]
+    fn a_carried_send_is_judged_by_the_answer_and_by_a_day_on_both_clocks() {
+        let mut sends = InFlightSends {
+            carried_for_daa: 100,
+            ..InFlightSends::default()
+        };
+        let carry = |sends: &mut InFlightSends, since_ms: u64, since_daa: u64| {
+            sends.carried.insert(
+                unit_txid(1),
+                unit_meta("kaspa:a", vec![11], since_ms, since_daa),
+            );
+        };
+        let coin_11 = unit_coin(11, 0).id();
+        let never = |_: &UtxoEntryReference, _: &HashSet<TransactionId>| false;
+
+        carry(&mut sends, 1_000, 5_000);
+        let mut proven = HashSet::from([unit_txid(1)]);
+        let judged = sends.judge_carried(&mut proven, never, 5_000, 1_000);
+        assert_eq!(judged.spent, vec![coin_11.clone()]);
+        assert_eq!(judged.ended, vec![unit_txid(1)]);
+        assert!(sends.carried.is_empty() && sends.unknown.is_empty());
+
+        carry(&mut sends, 1_000, 5_000);
+        let judged = sends.judge_carried(&mut HashSet::new(), |_, _| true, 5_000, 1_000);
+        assert_eq!(
+            (judged.spent, judged.ended),
+            (vec![coin_11.clone()], vec![unit_txid(1)])
+        );
+
+        carry(&mut sends, 1_000, 5_000);
+        let day = 1_000 + CARRIED_FOR_MS;
+        for (score, now) in [(5_100, day - 1), (5_099, day)] {
+            let judged = sends.judge_carried(&mut HashSet::new(), never, score, now);
+            assert_eq!(
+                judged,
+                CarriedJudgement::default(),
+                "released at {score}, {now}"
+            );
+            assert_eq!(sends.carried.len(), 1);
+        }
+        let judged = sends.judge_carried(&mut HashSet::new(), never, 5_100, day);
+        assert_eq!(judged.converted, vec![unit_txid(1)]);
+        assert!(sends.carried.is_empty());
+        assert_eq!(sends.unknown.len(), 1);
+        assert_eq!(sends.unknown[0].paid_to, "kaspa:a");
+        assert_eq!(sends.unknown[0].since_unix_ms, day);
+        assert_eq!(sends.unknown[0].held[0].id(), coin_11);
+
+        // A time saved later than any reading (a node's inflated score, a
+        // clock set back) is taken as the reading's: the day runs from there
+        // instead of never.
+        let mut sends = InFlightSends {
+            carried_for_daa: 100,
+            ..InFlightSends::default()
+        };
+        carry(&mut sends, u64::MAX / 2, u64::MAX / 2);
+        let _ = sends.judge_carried(&mut HashSet::new(), never, 7_000, 2_000);
+        assert_eq!(
+            (
+                sends.carried[&unit_txid(1)].since_daa,
+                sends.carried[&unit_txid(1)].since_unix_ms
+            ),
+            (7_000, 2_000)
+        );
+        let judged = sends.judge_carried(&mut HashSet::new(), never, 7_100, 2_000 + CARRIED_FOR_MS);
+        assert_eq!(judged.converted, vec![unit_txid(1)]);
+    }
+
+    /// **Only another wallet's legs are dropped at start**: a leg with any coin
+    /// at a watched address is kept (the window a run starts with can be
+    /// narrower than the one that sent it); one with every coin elsewhere is not
+    /// this wallet's.
+    #[test]
+    fn a_leg_is_dropped_only_when_none_of_its_coins_is_watched() {
+        let watched = Address::try_from(
+            "kaspa:qrqrnyzdwh9ec2q05guzy3vv33f86nvdyw52qwlmk0mewzx3dgdss3pmcd692",
+        )
+        .expect("address");
+        let elsewhere = Address::new(
+            kaspa_addresses::Prefix::Mainnet,
+            kaspa_addresses::Version::PubKey,
+            &[0x42; 32],
+        );
+        let at = |address: &Address, n: u8| {
+            UtxoEntryReference::from(kaspa_rpc_core::RpcUtxosByAddressesEntry {
+                address: Some(address.clone()),
+                outpoint: kaspa_rpc_core::RpcTransactionOutpoint {
+                    transaction_id: unit_txid(n),
+                    index: 0,
+                },
+                utxo_entry: kaspa_rpc_core::RpcUtxoEntry::new(
+                    1,
+                    kaspa_txscript::pay_to_address_script(address),
+                    900_000,
+                    false,
+                    None,
+                ),
+            })
+        };
+        let leg = |txid: u8, held: Vec<UtxoEntryReference>| UnknownLeg {
+            txid: unit_txid(txid),
+            paid_to: "kaspa:a".into(),
+            held,
+            earlier: vec![],
+            since_unix_ms: 1,
+            seq: 0,
+        };
+        let mut sends = InFlightSends::default();
+        sends.fate_unknown(leg(1, vec![at(&watched, 11), at(&elsewhere, 12)]));
+        sends.fate_unknown(leg(2, vec![at(&elsewhere, 13)]));
+        let mut mixed = unit_meta("kaspa:b", vec![], 1, 1);
+        mixed.direct = vec![at(&elsewhere, 14), at(&watched, 15)];
+        sends.carried.insert(unit_txid(3), mixed);
+        let mut foreign = unit_meta("kaspa:b", vec![], 1, 1);
+        foreign.direct = vec![at(&elsewhere, 16)];
+        sends.carried.insert(unit_txid(4), foreign);
+
+        sends.keep_watched(&HashSet::from([watched]));
+        let unknown: Vec<TransactionId> = sends.unknown.iter().map(|leg| leg.txid).collect();
+        assert_eq!(unknown, vec![unit_txid(1)]);
+        assert_eq!(sends.carried_txids(), vec![unit_txid(3)]);
+    }
+
+    /// **One record of a store's sends per process**: a second engine on the
+    /// same files shares the first's record while it lives, and a later one
+    /// reads the files afresh.
+    #[test]
+    fn one_store_has_one_record_of_its_sends() {
+        let dir = std::env::temp_dir().join(format!("kv-sends-shared-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = dir.join("activity.kvlog");
+        let network = NetworkId::new(NetworkType::Mainnet);
+        let first = InFlightSends::shared(&store, network);
+        let second = InFlightSends::shared(&store, network);
+        assert!(Arc::ptr_eq(&first, &second), "two records of one store");
+        let other = InFlightSends::shared(&dir.join("other.kvlog"), network);
+        assert!(!Arc::ptr_eq(&first, &other));
+        drop((first, second));
+        let third = InFlightSends::shared(&store, network);
+        assert!(!Arc::ptr_eq(&third, &other));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The span of a day never panics**, on any network: the pin's
+    /// parameters by id do on an unknown testnet suffix.
+    #[test]
+    fn a_days_span_is_had_on_any_network() {
+        for network in [
+            NetworkId::new(NetworkType::Mainnet),
+            NetworkId::with_suffix(NetworkType::Testnet, 10),
+            NetworkId::with_suffix(NetworkType::Testnet, 12),
+            NetworkId::with_suffix(NetworkType::Testnet, 99),
+        ] {
+            assert!(carried_for_daa(network) > 0, "{network}");
+        }
+        assert_eq!(
+            carried_for_daa(NetworkId::new(NetworkType::Mainnet)),
+            864_000
+        );
+    }
+
+    /// **A carried chain settles parents first, by the read's own rule.** Its
+    /// later leg spends a batch output of its earlier one, which has no score
+    /// of its own: that coin's absence counts once the earlier leg is proven
+    /// by the same answer, though `may_land` still names it mid-judgement.
+    #[test]
+    fn a_carried_chain_settles_parents_first() {
+        let receive = Address::try_from(
+            "kaspa:qrqrnyzdwh9ec2q05guzy3vv33f86nvdyw52qwlmk0mewzx3dgdss3pmcd692",
+        )
+        .expect("address");
+        let batch = UtxoEntryReference::from(kaspa_rpc_core::RpcUtxosByAddressesEntry {
+            address: Some(receive.clone()),
+            outpoint: kaspa_rpc_core::RpcTransactionOutpoint {
+                transaction_id: unit_txid(1),
+                index: 0,
+            },
+            utxo_entry: kaspa_rpc_core::RpcUtxoEntry::new(
+                1,
+                kaspa_txscript::pay_to_address_script(&receive),
+                UNACCEPTED_DAA_SCORE,
+                false,
+                None,
+            ),
+        });
+        let mut sends = InFlightSends::default();
+        sends
+            .carried
+            .insert(unit_txid(1), unit_meta("", vec![11], 1, 1));
+        let mut last = unit_meta("kaspa:a", vec![], 1, 1);
+        last.earlier = vec![batch.clone()];
+        sends.carried.insert(unit_txid(2), last);
+
+        // The answer lists neither the earlier leg's coin nor the batch output.
+        let asked = HashSet::from([receive]);
+        let unspent: HashSet<UtxoEntryId> = HashSet::new();
+        let evidence = ReadEvidence {
+            asked: &asked,
+            unspent: &unspent,
+            score_read: 1_000_000,
+            indexed_after: 100,
+        };
+        let may_land: HashSet<TransactionId> = sends.carried_txids().into_iter().collect();
+        assert!(
+            !evidence.spent(&batch, &may_land, &HashSet::new()),
+            "a batch output whose creator nothing proves counted as spent"
+        );
+        // Nor when its creator may no longer land but this answer does not
+        // prove it (seen accepted elsewhere, before this read).
+        assert!(
+            !evidence.spent(&batch, &HashSet::new(), &HashSet::new()),
+            "a batch output counted as spent on another answer's word"
+        );
+        let judged = sends.judge_carried(
+            &mut HashSet::new(),
+            |coin, proven| evidence.spent(coin, &may_land, proven),
+            1_000_000,
+            1_000,
+        );
+        assert_eq!(judged.ended, vec![unit_txid(1), unit_txid(2)]);
+        assert!(sends.carried.is_empty());
+    }
+
+    /// **A coin our accepted send spent is withheld until the reading node
+    /// has passed the acceptance by the margin**, one DAA either side, and for
+    /// an hour at most: the score is the node's word. A coin noted twice keeps
+    /// the later score; the list keeps the newest.
+    #[test]
+    fn a_coin_our_send_spent_is_withheld_until_the_node_passes_its_acceptance() {
+        let mut sends = InFlightSends::default();
+        let coin = unit_coin(11, 0).id();
+        let t = 1_000_000;
+        sends.note_spent_at([coin.clone()], 1_000, t);
+        assert_eq!(sends.spent_withheld(1_099, 100, t), vec![coin.clone()]);
+        assert!(sends.spent_withheld(1_100, 100, t).is_empty());
+        sends.note_spent_at([coin.clone()], 1_050, t);
+        assert_eq!(sends.spent_by_us.len(), 1);
+        assert_eq!(sends.spent_withheld(1_149, 100, t), vec![coin.clone()]);
+        assert_eq!(
+            sends.spent_withheld(0, 100, t + SPENT_FOR_MS - 1),
+            vec![coin.clone()]
+        );
+        assert!(
+            sends.spent_withheld(0, 100, t + SPENT_FOR_MS).is_empty(),
+            "an inflated score withheld a coin past the hour"
+        );
+        assert!(sends.spent_by_us.is_empty());
+        for n in 0..SPENT_KEPT + 10 {
+            sends.note_spent_at([UtxoEntryId::new(unit_txid(1), n as u32 + 1)], 2_000, t);
+        }
+        assert_eq!(sends.spent_by_us.len(), SPENT_KEPT);
+        assert!(
+            !sends
+                .spent_by_us
+                .iter()
+                .any(|kept| kept.coin == UtxoEntryId::new(unit_txid(1), 1)),
+            "the oldest coin was kept past the cap"
+        );
+    }
 
     /// **A leg of unknown fate leads a build to its own destination and trails
     /// any other, and is retired only on evidence**: a read's answer that no

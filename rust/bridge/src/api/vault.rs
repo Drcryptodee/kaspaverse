@@ -294,9 +294,11 @@ pub(crate) fn wallet_store_path() -> Result<PathBuf, AppError> {
     Ok(vault_dir()?.join("wallet").join("activity.kvlog"))
 }
 
-/// App-private path for the change-address cursor (P1.6, D-041): the next-unused
-/// change index, persisted so fresh-per-send change survives a restart. Public
-/// data (an index), in the same `wallet/` subdir — no encryption (INV-3).
+/// App-private path for the change-address cursor: one past the highest change
+/// index an earlier build handed out (it advanced once per send while change
+/// went to a fresh `change/N`; sends now return change to `receive/0`). Read
+/// only, as a floor of the change window. Public data (an index), in the same
+/// `wallet/` subdir, no encryption (INV-3).
 pub(crate) fn change_cursor_path() -> Result<PathBuf, AppError> {
     Ok(vault_dir()?.join("wallet").join("change.cursor"))
 }
@@ -338,9 +340,7 @@ pub(crate) fn lock_grace_secs() -> u32 {
 
 /// Persist the auto-lock grace, clamped to [`MAX_LOCK_GRACE_SECS`].
 ///
-/// Clamped, not refused — unlike [`set_change_cursor`], because the two failures
-/// are opposites. A cursor past its ceiling must not advance (advancing would
-/// reuse a spent index); a grace past its ceiling is a request for *less*
+/// Clamped, not refused: a grace past its ceiling is a request for *less*
 /// security than the app allows, and the safe answer is to grant the most it
 /// will, not to leave whatever was there before.
 pub(crate) fn set_lock_grace_secs(secs: u32) -> Result<(), AppError> {
@@ -423,16 +423,9 @@ pub(crate) fn transport_decryptor() -> Result<kaspaverse_core::TransportDecrypto
 /// have been Track 1's original defect wearing a fresh button.
 pub(crate) const MAX_SCAN_MARK: u32 = 2048;
 
-/// The largest change cursor this app will believe — and therefore the largest
-/// it will ever WRITE. Not a policy limit: the cursor advances by exactly one
-/// per fully-broadcast send (D-041), so reaching it takes 100 000 sends from
-/// this device.
-///
-/// The two must be the same number. A writer that can produce a value its own
-/// reader rejects turns the 100 000th send into a cursor that reads back as
-/// unset — silently dropping to the discovery mark and reusing change indices
-/// the wallet already spent from. [`set_change_cursor`] refuses to pass it
-/// instead, which repeats one index but says so.
+/// The largest change cursor this app will believe. An earlier build advanced
+/// it by one per fully broadcast send and refused to write past this, so no
+/// file this app wrote holds more.
 pub(crate) const MAX_CHANGE_CURSOR: u32 = 100_000;
 
 /// Validate a persisted count: **out of range reads as UNSET, never clamped.**
@@ -450,9 +443,8 @@ pub(crate) const MAX_CHANGE_CURSOR: u32 = 100_000;
 /// bytes survive, and the only user escape (clear app data) destroys
 /// `vault.kvsb`. Zero is the honest reading of a value this app could not have
 /// written, and it heals: discovery re-probes and writes a sane mark, the next
-/// send writes a sane cursor. Neither loses funds — the window is rebuilt from
-/// the chain, and `wallet::next_change_index` floors the cursor at the
-/// discovered mark, so a cursor read as 0 still lands past the funded history.
+/// send no longer writes the cursor. Neither loses funds: the window is rebuilt
+/// from the chain, and discovery's mark floors it past the funded history.
 fn persisted_count(raw: u32, ceiling: u32) -> u32 {
     if raw > ceiling {
         log::warn!("vault: persisted count {raw} is past its {ceiling} ceiling — reading as unset");
@@ -461,9 +453,10 @@ fn persisted_count(raw: u32, ceiling: u32) -> u32 {
     raw
 }
 
-/// Read the persisted change cursor (the next-unused change index). A missing,
-/// malformed or out-of-range file reads as 0 — a fresh wallet has used no change
-/// addresses, and an impossible one is not evidence (see [`persisted_count`]).
+/// Read the persisted change cursor (one past the highest change index an
+/// earlier build handed out). A missing, malformed or out-of-range file reads
+/// as 0: a fresh wallet has used no change addresses, and an impossible value is
+/// not evidence (see [`persisted_count`]).
 pub(crate) fn change_cursor() -> u32 {
     let raw = change_cursor_path()
         .ok()
@@ -472,26 +465,6 @@ pub(crate) fn change_cursor() -> u32 {
         .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .unwrap_or(0);
     persisted_count(raw, MAX_CHANGE_CURSOR)
-}
-
-/// Persist the change cursor atomically — advanced only after a fully-broadcast
-/// send (D-041), so an abandoned/failed send never burns an index.
-///
-/// Refuses to write past [`MAX_CHANGE_CURSOR`], so the file can never hold a
-/// value [`change_cursor`] reads as unset. Reaching that is 100 000 sends from
-/// one device; past it, change addresses repeat from the last index, which is a
-/// linkability regression stated in the log rather than a silent fall back to
-/// indices the wallet's own history already spent from.
-pub(crate) fn set_change_cursor(next: u32) -> Result<(), AppError> {
-    if next > MAX_CHANGE_CURSOR {
-        log::warn!(
-            "vault: change cursor is at its {MAX_CHANGE_CURSOR} ceiling — not advancing; \
-             change addresses repeat from here (D-041 fresh-per-send no longer holds)"
-        );
-        return Ok(());
-    }
-    atomic_write(&change_cursor_path()?, &next.to_le_bytes())
-        .map_err(|e| AppError::io("write change cursor", e))
 }
 
 /// App-private path for the discovery high-water marks: the highest FUNDED
@@ -509,8 +482,8 @@ pub(crate) fn scan_window_path() -> Result<PathBuf, AppError> {
 /// back to the fixed gap limit.
 ///
 /// **Deliberately not `change.cursor`.** That file counts change indices *this
-/// app* burned on its own sends (D-041); it is written only after a successful
-/// broadcast and knows nothing about a wallet used elsewhere. Conflating the two
+/// app* burned on its own sends, back when each send's change went to a fresh
+/// address, and knows nothing about a wallet used elsewhere. Conflating the two
 /// is precisely what let a restored wallet watch 30 addresses while its funds
 /// sat at change index 77 — a local send-counter was standing in for a fact
 /// about the chain. Two files, two meanings, neither pretending to be the other.
@@ -589,8 +562,8 @@ pub(crate) fn set_scan_high_water(receive_hi: u32, change_hi: u32) -> Result<(),
 /// only public [`Address`] values are returned. The single derivation site (the
 /// two-consumer seam, now wired): the SAME window is watched by the `UtxoContext`
 /// (via the engine) and registered with the `VaultSigner` ([`build_wallet_signer`]).
-/// `change_count` widens with the change cursor (D-041) so used change addresses
-/// are re-watched after a restart. Errors if locked.
+/// `change_count` floors at the change cursor's last value, so change addresses
+/// an earlier build handed out stay watched. Errors if locked.
 /// Returns `(all_watched, change_only)`: the full receive+change window to watch,
 /// and — separately — the change addresses, so the sync engine can tell our own
 /// returning change from a real deposit (a UTXO at a change address is never a
@@ -728,7 +701,7 @@ thread_local! {
 /// file intact, never a half-written one (P1.1-audit corruption vector). Temp
 /// file in the SAME directory → fsync data → rename (atomic on POSIX) → fsync
 /// the directory so the rename itself is durable. std-only (no new dep).
-/// `pub(crate)` so the wallet/send lanes reuse it (the change cursor, P1.6).
+/// `pub(crate)` so the other app-private stores reuse it.
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let dir = path
         .parent()
@@ -1846,20 +1819,18 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_cursor_never_writes_a_value_its_own_reader_would_reject() {
+    fn the_cursor_reads_back_whatever_an_earlier_build_could_have_written() {
         let (_g, _dir) = enter();
-        // The writer's whole range round-trips.
+        let path = change_cursor_path().unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // An earlier build wrote every value up to the ceiling, never past it.
         for value in [0u32, 1, 77, MAX_CHANGE_CURSOR - 1, MAX_CHANGE_CURSOR] {
-            set_change_cursor(value).unwrap();
+            atomic_write(&path, &value.to_le_bytes()).unwrap();
             assert_eq!(change_cursor(), value);
         }
-        // And past the ceiling it holds rather than writing something that
-        // reads back as unset — which would drop the next send to the discovery
-        // mark and reuse indices the wallet already spent from.
-        set_change_cursor(MAX_CHANGE_CURSOR + 1).unwrap();
-        assert_eq!(change_cursor(), MAX_CHANGE_CURSOR);
-        set_change_cursor(u32::MAX).unwrap();
-        assert_eq!(change_cursor(), MAX_CHANGE_CURSOR);
+        // A value no build wrote is not evidence: it reads as unset.
+        atomic_write(&path, &(MAX_CHANGE_CURSOR + 1).to_le_bytes()).unwrap();
+        assert_eq!(change_cursor(), 0);
     }
 
     #[test]

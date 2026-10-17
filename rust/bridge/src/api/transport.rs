@@ -54,7 +54,7 @@ use tokio::sync::broadcast::{self, error::RecvError};
 
 use crate::api::error::AppError;
 use crate::api::send::{
-    commit_and_advance, next_nonce, project_signable, shortfall_message, take_stashed,
+    commit_and_watch, next_nonce, project_signable, shortfall_message, take_stashed,
     validate_mainnet_address, SendOutcomeDto, SignableKind, SignableSummaryDto,
 };
 use crate::api::{dag, vault, wallet};
@@ -7570,7 +7570,7 @@ pub async fn transport_commit(nonce: u64) -> Result<SendOutcomeDto, AppError> {
     }
     let prepared = take_stashed(&PENDING_TRANSPORT, nonce)?;
     let intent = take_intent(nonce);
-    let outcome = commit_and_advance(prepared).await;
+    let outcome = commit_and_watch(prepared).await;
 
     let clean = !outcome.partial && outcome.error.is_none();
     if let (true, Some(intent), Some(txid)) = (clean, intent, outcome.final_txid.clone()) {
@@ -8509,6 +8509,13 @@ pub fn transport_wipe_preview() -> Result<WipeReportDto, AppError> {
 ///   (`consensus-auditor`, 2026-08-17, dispositioned). IDEAS_BACKLOG carries
 ///   its trigger.
 /// - The vault, keys and coins. This erases messages, never money.
+/// - The record of the wallet's sends in flight (`wallet/activity.sends`): a
+///   send to a conversation or a contact is keyed there by that conversation's
+///   id or that contact's address, public on the wire, until its fate is
+///   settled, and a notice that one landed keeps its key until it is read or
+///   newer ones push it out. Removing the key would let a retry pay twice.
+///   Records of it that could not be decoded are kept in `wallet/unreadable/`
+///   with their keys, and nothing erases those but clearing the app's data.
 ///
 /// **What it cannot do:** reach the chain. Every message is public ciphertext
 /// on a public DAG, permanently, and anyone holding the seed can decrypt it

@@ -41,7 +41,9 @@ use kaspa_wallet_core::utxo::{OutgoingTransaction, UtxoEntryId, UtxoEntryReferen
 use crate::error::{ChainError, Result};
 use crate::spend_policy;
 use crate::wallet_lane::{Lane, NotAdmitted, LANE_HOLD_WITHIN, LANE_STEP_WITHIN};
-use crate::wallet_sync::{take_out, Anchoring, UnknownLeg, WalletEngine};
+use crate::wallet_sync::{
+    now_unix_ms, persist_in_flight, take_out, Anchoring, LegMeta, UnknownLeg, WalletEngine,
+};
 use crate::Rpc;
 
 /// What crosses to the confirm screen — Rust's decode of the built transaction
@@ -242,6 +244,28 @@ impl PreparedSend {
                     unanswered: None,
                 };
             }
+            // Logged before the request: a read whose snapshot this leg
+            // postdates withholds what it spends, whatever becomes of it. And
+            // on disk before it leaves: a relaunch after a crash inside the
+            // submit still holds it as a leg that may have left. Written before
+            // admission, so no write sits between admission's look at the
+            // processor and the submit. A write that fails refuses the leg
+            // here, before anything is broadcast.
+            let logged = match LoggedLeg::begin(&self.lane, pt, self.leg_meta(pt, &earlier)).await {
+                Ok(logged) => logged,
+                Err(e) => {
+                    log::warn!("send: a leg was not sent: its record was not written ({e})");
+                    return SendOutcome {
+                        final_txid,
+                        submitted,
+                        total,
+                        partial: submitted > 0,
+                        error: Some(NOT_RECORDED.to_string()),
+                        submitted_txids,
+                        unanswered: None,
+                    };
+                }
+            };
             // Before the broadcast, and so before anything leaves the wallet:
             // the lane must be able to take the submit. The guard holds a
             // close of the processor back until this leg's submit returns.
@@ -249,6 +273,7 @@ impl PreparedSend {
                 Ok(fence) => fence,
                 Err(why) => {
                     log::info!("send: a leg was not sent ({why:?}); nothing left for it");
+                    logged.refused().await;
                     return SendOutcome {
                         final_txid,
                         submitted,
@@ -264,9 +289,6 @@ impl PreparedSend {
             // round trip, the hold that bounds `LANE_HOLD_WITHIN` (PRE3-LANE;
             // until now only probes stood in for it). Public txid only, INV-3.
             crate::spans::mark_with("submit_start", &pt.id().to_string());
-            // Logged before the request: a read whose snapshot this leg
-            // postdates withholds what it spends, whatever becomes of it.
-            let logged = LoggedLeg::begin(&self.lane, pt);
             match pt.try_submit(self.rpc.rpc_api()).await {
                 Ok(txid) => {
                     submitted += 1;
@@ -283,6 +305,7 @@ impl PreparedSend {
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .own_send_seen(&tx_id, &[]);
                     logged.returned(true);
+                    persist_in_flight(&self.lane.in_flight).await;
                     // V1 span: the node acked this submit RPC — the anchor
                     // that decomposes broadcast-lag from chain-lag in the
                     // submit→accepted baseline (public txid only, INV-3).
@@ -377,17 +400,39 @@ impl PreparedSend {
                     let unanswered = may_have_reached_a_node(&e);
                     if self.note_failed(pt, &e) {
                         self.take_back_earlier_outputs(pt, &earlier).await;
-                        let (direct, earlier_coins): (Vec<_>, Vec<_>) = pt
+                        // Every input this send's own earlier legs did not
+                        // make is checked: those the map no longer holds come
+                        // off the spendable list the cancel just put them on. A
+                        // batch output another chain of ours built is taken out
+                        // whole instead: the copy this leg carries has no score
+                        // (`UNACCEPTED_DAA_SCORE`, `generator.rs:1233` @
+                        // `01b532e`), and no probe may write it over the copy a
+                        // read filed. The next read files it again, erring low.
+                        let (scoreless, returned): (Vec<_>, Vec<_>) = pt
                             .utxo_entries()
                             .values()
+                            .filter(|coin| !earlier.contains(&coin.id().transaction_id))
                             .cloned()
-                            .partition(|coin| !earlier.contains(&coin.id().transaction_id));
+                            .partition(|coin| {
+                                coin.block_daa_score()
+                                    == kaspa_consensus_core::constants::UNACCEPTED_DAA_SCORE
+                            });
+                        if !scoreless.is_empty() {
+                            if let Err(e) = take_out(&self.lane.context, scoreless).await {
+                                log::warn!(
+                                    "send: another chain's output on a cancelled leg was not \
+                                     taken out ({e})"
+                                );
+                            }
+                            if let Err(e) = self.lane.context.update_balance().await {
+                                log::warn!("send: balance refresh after a cancel failed ({e})");
+                            }
+                        }
+                        self.keep_held_after_cancel(returned).await;
                         // Every direct input anchors a retry, on the list or
                         // not: one off it (a reopen took it out) is not spent
-                        // for that. Those the map no longer holds come off the
-                        // spendable list (a phantom), and a read settles them.
-                        self.keep_held_after_cancel(direct.clone()).await;
-                        let held = direct;
+                        // for that, and a read settles it.
+                        let (held, earlier_coins) = split_inputs(pt, &earlier);
                         if unanswered {
                             self.lane
                                 .in_flight
@@ -412,6 +457,7 @@ impl PreparedSend {
                         self.drop_filed_earlier_outputs(pt, &earlier).await;
                     }
                     logged.returned(unanswered);
+                    persist_in_flight(&self.lane.in_flight).await;
                     return SendOutcome {
                         final_txid,
                         submitted,
@@ -469,6 +515,47 @@ fn may_have_reached_a_node(e: &kaspa_wallet_core::error::Error) -> bool {
 }
 
 impl PreparedSend {
+    /// What the store keeps of leg `pt`: its key, its inputs split as a
+    /// cancel splits them, its outputs, and when.
+    fn leg_meta(
+        &self,
+        pt: &PendingTransaction,
+        earlier: &HashSet<kaspa_consensus_core::tx::TransactionId>,
+    ) -> LegMeta {
+        let (direct, earlier_coins) = split_inputs(pt, earlier);
+        let prefix = kaspa_addresses::Prefix::from(pt.network_type());
+        let outputs = pt
+            .transaction()
+            .outputs
+            .iter()
+            .enumerate()
+            .map(|(index, output)| {
+                (
+                    index as u32,
+                    output.value,
+                    extract_script_pub_key_address(&output.script_public_key, prefix).ok(),
+                )
+            })
+            .collect();
+        LegMeta {
+            paid_to: if pt.is_final() {
+                self.anchor_key.clone()
+            } else {
+                String::new()
+            },
+            direct,
+            earlier: earlier_coins,
+            outputs,
+            since_unix_ms: now_unix_ms(),
+            since_daa: self
+                .lane
+                .processor
+                .current_daa_score()
+                .unwrap_or(0)
+                .max(self.lane.newest_admitted_daa()),
+        }
+    }
+
     /// Keep on the lane the pin's record of a leg it kept after the submit,
     /// so the reopen after a close can hand it back
     /// (`WalletEngine::resume_sends`). Called with the fence held, so no close
@@ -568,7 +655,8 @@ impl PreparedSend {
         let context = &self.lane.context;
         // `update` answers whether the map holds the coin and moves nothing
         // between lists; it replaces the entry with the leg's own copy, the
-        // same coin (`:328-353`).
+        // same coin at the same score (`:328-353`): no scoreless batch output
+        // reaches here.
         let mut held = Vec::new();
         for coin in &coins {
             if context
@@ -627,6 +715,29 @@ impl PreparedSend {
     }
 }
 
+/// **Leg `pt`'s inputs, as its own coins and as outputs of earlier legs**
+/// (`earlier`: the txids of this send's legs before it). A batch output the
+/// pin's Generator built (`UNACCEPTED_DAA_SCORE`, `generator.rs:1233` @
+/// `01b532e`) counts as an earlier leg's output whoever built it: no read can
+/// show it gone on its own score, so it anchors a retry only for the
+/// earlier-leg window.
+fn split_inputs(
+    pt: &PendingTransaction,
+    earlier: &HashSet<kaspa_consensus_core::tx::TransactionId>,
+) -> (Vec<UtxoEntryReference>, Vec<UtxoEntryReference>) {
+    partition_inputs(pt.utxo_entries().values().cloned(), earlier)
+}
+
+fn partition_inputs(
+    coins: impl Iterator<Item = UtxoEntryReference>,
+    earlier: &HashSet<kaspa_consensus_core::tx::TransactionId>,
+) -> (Vec<UtxoEntryReference>, Vec<UtxoEntryReference>) {
+    coins.partition(|coin| {
+        !earlier.contains(&coin.id().transaction_id)
+            && coin.block_daa_score() != kaspa_consensus_core::constants::UNACCEPTED_DAA_SCORE
+    })
+}
+
 /// **A leg in the submit log until its outcome is on record**
 /// (`InFlightSends::submitting`). Its return is noted once that outcome is
 /// recorded ([`Self::returned`]); dropped before then (a commit dropped
@@ -639,16 +750,52 @@ struct LoggedLeg<'a> {
 }
 
 impl<'a> LoggedLeg<'a> {
-    fn begin(lane: &'a Lane, pt: &PendingTransaction) -> Self {
-        lane.in_flight
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .submitting(pt.id(), pt.utxo_entries().keys().cloned().collect());
-        Self {
+    /// Log the leg and land the store's copy of it. If the copy cannot be
+    /// written the leg is forgotten and refused: nothing has left.
+    async fn begin(
+        lane: &'a Lane,
+        pt: &PendingTransaction,
+        meta: LegMeta,
+    ) -> std::io::Result<LoggedLeg<'a>> {
+        let snapshot = {
+            let mut in_flight = lane
+                .in_flight
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            in_flight.remember_leg(pt.id(), meta);
+            in_flight.submitting(pt.id(), pt.utxo_entries().keys().cloned().collect());
+            in_flight.snapshot(false)
+        };
+        // Built before the write is awaited: a commit dropped during it still
+        // returns the leg to the log ([`Drop`]).
+        let mut logged = Self {
             lane,
             txid: pt.id(),
             noted: false,
+        };
+        if let Some(snapshot) = snapshot {
+            if let Err(e) = snapshot.land().await {
+                logged.noted = true;
+                lane.in_flight
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .forget_leg(&pt.id());
+                return Err(e);
+            }
         }
+        Ok(logged)
+    }
+
+    /// The leg was refused before its request: nothing of it is kept, on
+    /// record or on disk.
+    async fn refused(mut self) {
+        self.noted = true;
+        self.lane
+            .in_flight
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .forget_leg(&self.txid);
+        persist_in_flight(&self.lane.in_flight).await;
     }
 
     /// The leg's submit returned, its outcome on record: the log keeps it only
@@ -673,6 +820,10 @@ impl Drop for LoggedLeg<'_> {
         self.note(true);
     }
 }
+
+/// The cause shown beneath the receipt when a leg was refused because its
+/// record could not be written to the phone first.
+const NOT_RECORDED: &str = "This phone could not save the send first. Try again.";
 
 /// The cause shown beneath the receipt when a leg was refused before its
 /// broadcast (the receipt itself says what left: nothing, or the legs before).
@@ -1055,8 +1206,10 @@ impl WalletEngine {
                 .in_flight
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take_landed(&anchor_key, crate::wallet_sync::now_unix_ms())
+                .take_landed(&anchor_key, now_unix_ms())
         {
+            // Told once, across a relaunch too.
+            persist_in_flight(&lane.in_flight).await;
             return Err(ChainError::EarlierPaymentWentThrough);
         }
 
@@ -3605,6 +3758,46 @@ mod tests {
 
     fn mainnet() -> NetworkId {
         NetworkId::new(NetworkType::Mainnet)
+    }
+
+    /// **A batch output counts as an earlier leg's output whoever built it.**
+    /// A coin of the leg's own anchors a retry until evidence retires it; an
+    /// earlier leg's output, and a batch output another chain of ours built
+    /// (no read can show it gone on its own score), only for the earlier-leg
+    /// window.
+    #[test]
+    fn a_batch_output_is_split_as_an_earlier_legs_output() {
+        let coin = |n: u8, daa: u64| {
+            UtxoEntryReference::from(kaspa_rpc_core::RpcUtxosByAddressesEntry {
+                address: None,
+                outpoint: kaspa_rpc_core::RpcTransactionOutpoint {
+                    transaction_id: kaspa_consensus_core::tx::TransactionId::from_bytes([n; 32]),
+                    index: 0,
+                },
+                utxo_entry: kaspa_rpc_core::RpcUtxoEntry::new(
+                    1,
+                    Default::default(),
+                    daa,
+                    false,
+                    None,
+                ),
+            })
+        };
+        let own = coin(1, 900_000);
+        let this_chain = coin(2, kaspa_consensus_core::constants::UNACCEPTED_DAA_SCORE);
+        let another_chain = coin(3, kaspa_consensus_core::constants::UNACCEPTED_DAA_SCORE);
+        let earlier = HashSet::from([kaspa_consensus_core::tx::TransactionId::from_bytes([2; 32])]);
+        let (direct, from_earlier) = partition_inputs(
+            [own.clone(), this_chain.clone(), another_chain.clone()].into_iter(),
+            &earlier,
+        );
+        assert_eq!(
+            direct.iter().map(|c| c.id()).collect::<Vec<_>>(),
+            vec![own.id()]
+        );
+        let mut from_earlier: Vec<_> = from_earlier.iter().map(|c| c.id()).collect();
+        from_earlier.sort_by_key(|id| id.transaction_id);
+        assert_eq!(from_earlier, vec![this_chain.id(), another_chain.id()]);
     }
 
     fn addr(s: &str) -> Address {

@@ -173,7 +173,7 @@ async fn connected_engine(
     fake.retain_listeners_on_unregister();
     let ctl = RpcCtl::new();
     let store = tmp(name);
-    let _ = std::fs::remove_file(&store);
+    support::remove_store(&store);
     let engine =
         WalletEngine::new(fake.rpc(ctl.clone()), network_id, store.clone()).expect("engine");
     let events = engine.subscribe();
@@ -237,7 +237,7 @@ async fn the_next_socket_serves(
         .await
         .expect("stop() returned inside its bound")
         .expect("stop");
-    let _ = std::fs::remove_file(&store);
+    support::remove_store(&store);
 }
 
 /// Case 1: a frame the retired socket delivers after the close.
@@ -324,7 +324,7 @@ async fn a_close_during_a_slow_negotiation_never_dangles_a_listener() {
     let subscribe = fake.hold_daa_subscribe();
     let ctl = RpcCtl::new();
     let store = tmp("slow-negotiation.kvlog");
-    let _ = std::fs::remove_file(&store);
+    support::remove_store(&store);
     let engine =
         WalletEngine::new(fake.rpc(ctl.clone()), network_id, store.clone()).expect("engine");
     let events = engine.subscribe();

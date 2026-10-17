@@ -44,6 +44,13 @@ use kaspa_wallet_core::rpc::{Rpc, RpcCtl};
 use kaspa_wrpc_client::prelude::*;
 use kaspaverse_chain::Address;
 
+/// Remove the activity log at `store` and the records of our sends beside it.
+pub fn remove_store(store: &std::path::Path) {
+    let _ = std::fs::remove_file(store);
+    let _ = std::fs::remove_file(kaspaverse_chain::sends_path(store));
+    let _ = std::fs::remove_file(kaspaverse_chain::spent_path(store));
+}
+
 /// One recorded RPC interaction, tagged with the connection epoch that was
 /// current when it arrived.
 #[derive(Debug, Clone)]
@@ -139,6 +146,8 @@ pub struct FakeRpc {
     hold_vcc: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
     /// What `get_sink_blue_score` answers.
     sink_blue_score: AtomicU64,
+    /// The virtual DAA score `get_server_info` answers.
+    virtual_daa_score: AtomicU64,
     /// When set, chain-walk pages and block reads are served one at a time
     /// in arrival order, as a node serves one connection
     /// (`rpc/wrpc/server/src/service.rs:121-127` @ `01b532e`: messages are
@@ -240,6 +249,7 @@ impl FakeRpc {
             hold_submit: Mutex::new(None),
             hold_vcc: Mutex::new(None),
             sink_blue_score: AtomicU64::new(1_000),
+            virtual_daa_score: AtomicU64::new(1_000_000),
             serialize: AtomicBool::new(false),
             connection: tokio::sync::Mutex::new(()),
             vcc_answered: AtomicU64::new(0),
@@ -330,6 +340,13 @@ impl FakeRpc {
     /// The sink blue score the node reports from now on.
     pub fn set_sink_blue_score(&self, blue_score: u64) {
         self.sink_blue_score.store(blue_score, Ordering::SeqCst);
+    }
+
+    /// The virtual DAA score the node reports at the next connect: below the
+    /// network's, it is a node that trails.
+    pub fn set_virtual_daa_score(&self, virtual_daa_score: u64) {
+        self.virtual_daa_score
+            .store(virtual_daa_score, Ordering::SeqCst);
     }
 
     /// Fail the next `n` UTXO-set reads (each recorded first).
@@ -604,6 +621,14 @@ impl FakeRpc {
             .count()
     }
 
+    /// UTXO-set reads recorded in any epoch.
+    pub fn utxo_scans_all(&self) -> usize {
+        self.calls()
+            .iter()
+            .filter(|c| matches!(c, RecordedCall::UtxoScan { .. }))
+            .count()
+    }
+
     pub fn vcc_calls(&self, epoch: u64) -> usize {
         self.calls()
             .iter()
@@ -741,7 +766,7 @@ impl RpcApi for FakeRpc {
             network_id: self.network_id,
             has_utxo_index: true,
             is_synced,
-            virtual_daa_score: 1_000_000,
+            virtual_daa_score: self.virtual_daa_score.load(Ordering::SeqCst),
         })
     }
 
