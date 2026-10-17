@@ -33,9 +33,9 @@ selftest() {
     cp "$ROOT/docs/research/FRESHNESS.md" "$t/docs/research/FRESHNESS.md"
     cp "$ROOT/docs/sessions/NEXT_SESSION.md" "$ROOT/docs/sessions/INDEX.md" "$t/docs/sessions/"
     cp "$ROOT"/docs/phases/*.md "$t/docs/phases/"
-    cp "$ROOT"/tools/*.sh "$ROOT"/tools/*.py "$t/tools/" 2>/dev/null; cp "$ROOT/rust/Cargo.toml" "$t/rust/"
+    cp "$ROOT"/tools/*.sh "$ROOT"/tools/*.py "$t/tools/" 2>/dev/null; cp -r "$ROOT/tools/perf" "$t/tools/"; cp "$ROOT/rust/Cargo.toml" "$t/rust/"
     cp "$ROOT/CLAUDE.md" "$ROOT/AGENTS.md" "$t/"; cp "$ROOT/.claude/playbook/INDEX.md" "$ROOT/.claude/playbook/PLAYBOOK.md" "$t/.claude/playbook/"
-    for s in "$ROOT"/.claude/skills/*/; do mkdir -p "$t/.claude/skills/$(basename "$s")"; cp "$s/SKILL.md" "$t/.claude/skills/$(basename "$s")/"; done
+    for s in "$ROOT"/.claude/skills/*/; do mkdir -p "$t/.claude/skills/$(basename "$s")"; cp "$s"/*.md "$t/.claude/skills/$(basename "$s")/"; done  # reference files too: a lesson's destination can live in one
     # the baton's target must exist in the scaffold (the pointer sits on the line after the heading)
     local target; target=$(python3 -c 'import re,sys; m=re.search(r"## Paste this next\s+`([^`]+)`", open(sys.argv[1]).read()); print(m.group(1) if m else "")' "$t/docs/sessions/NEXT_SESSION.md")
     [ -n "$target" ] && mkdir -p "$t/$(dirname "$target")" && : > "$t/$target"
@@ -87,6 +87,8 @@ p = sys.argv[1]; s = open(p).read()
 open(p, "w").write(re.sub(r"(## Paste this next\s+`)[^`]+`", r"\g<1>docs/sessions/nope_PROMPT.md`", s, count=1))  # gate-allow:internal-path — gate-allow:dangling-path — a planted missing prompt in the census selftest, meant not to resolve
 PY
   run "C8 the baton points at a missing prompt"       'C8 NEXT_SESSION.md points at docs/sessions/nope_PROMPT.md' 1 "$work/c8"  # gate-allow:internal-path — gate-allow:dangling-path — the planted missing prompt the row expects, meant not to resolve
+  scaffold "$work/c8b";    for i in $(seq 1 60); do echo "padding $i"; done >> "$work/c8b/docs/sessions/NEXT_SESSION.md"
+  run "C8 the baton grew past its line budget"       'C8 NEXT_SESSION.md is [0-9]+ lines; the pointer.s budget is 50' 1 "$work/c8b"
   scaffold "$work/c9";     python3 - "$work/c9/docs/sessions/INDEX.md" <<'PY'
 import re, sys
 p = sys.argv[1]; s = open(p).read()

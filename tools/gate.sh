@@ -1803,6 +1803,14 @@ drift_census_lane() {
   local out rc
   out="$(bash "$ROOT/tools/drift_census.sh" --gate 2>&1)"; rc=$?
   printf '%s\n' "$out" | sed 's/^/   /'
+  [ "$rc" = 0 ] || return "$rc"
+  # The census proves itself where the record exists: its selftest plants each defect in a
+  # scratch copy and demands red. Run outside the gate, it went red unseen when skills split
+  # into reference files. A public clone has no record to scaffold from, so it skips.
+  [ -f "$ROOT/docs/DECISION_LOG.md" ] || { echo "   selftest skipped: no record in this clone"; return 0; }
+  out="$(bash "$ROOT/tools/drift_census.sh" --selftest 2>&1)"; rc=$?
+  printf '%s\n' "$out" | tail -1 | sed 's/^/   /'
+  [ "$rc" = 0 ] || printf '%s\n' "$out" | grep -A4 'FAIL' | sed 's/^/   /'
   return "$rc"
 }
 run_check "drift census (living pointers)" drift_census_lane

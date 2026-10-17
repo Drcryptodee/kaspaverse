@@ -35,6 +35,8 @@ FALLBACK_LANES = {"rust workspace", "flutter app"}
 STALE_DAYS = 21
 RECORD_STALE_DAYS = 7
 LESSON_DESTINATION_FROM = 206  # rows from this id on carry a destination that must cite the id
+NEXT_SESSION_MAX_LINES = 50  # the thin pointer: prompt, model line, ecosystem line, expected state
+PROMPT_MAX_WORDS = 600       # the prompt template's budget; advisory
 TOTAL_CHECKS = 9  # C1…C9; the clean line reports this minus the checks a public clone skips
 
 fails, notes = [], []
@@ -215,6 +217,12 @@ def c8_baton():
         fail(f"C8 NEXT_SESSION.md points at {m.group(1)}, which does not exist")
     if "Suggested model & effort" not in ns:
         fail("C8 NEXT_SESSION.md carries no `Suggested model & effort` line (update-context §10a)")
+    lines = ns.count("\n")
+    if lines > NEXT_SESSION_MAX_LINES:
+        fail(f"C8 NEXT_SESSION.md is {lines} lines; the pointer's budget is {NEXT_SESSION_MAX_LINES} (update-context §10: what a sitting left in the register stays there)")
+    target = read(m.group(1))
+    if target is not None and len(target.split()) > PROMPT_MAX_WORDS:
+        note(f"C8 {os.path.basename(m.group(1))} is {len(target.split())} words; the prompt template's budget is {PROMPT_MAX_WORDS} (update-context §10)")
 
 
 # ── C9 session index: a chronology row number is claimed once, and the rows rise ─────────
