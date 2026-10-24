@@ -137,6 +137,7 @@ expect_lane "internal-record boundary (D-102)"
 expect_lane "internal-record pointers (D-102 / L88)"
 expect_lane "repo-path resolution (L88 / F48)"
 expect_lane "drift census (living pointers)"
+expect_lane "workflow helpers (guard, audit-scope)"
 
 # ── Rust workspace ──────────────────────────────────────────────
 if [ -f "$ROOT/rust/Cargo.toml" ]; then
@@ -1814,6 +1815,26 @@ drift_census_lane() {
   return "$rc"
 }
 run_check "drift census (living pointers)" drift_census_lane
+
+# ── Workflow helpers' own tests: the guard hook and the audit-scope marker ──
+# The guard hook refuses the session's dangerous commands and the audit-scope script takes
+# each audit round's mark; both carry a test that ran only by hand, where a regression
+# would go unseen. They live in the internal record, so a public clone has neither and the
+# lane reports a skip note and stays green. Where `.claude/` is on disk, a missing test is a
+# red, never a skip: the absence would read as agreement.
+workflow_helpers_lane() {
+  local rc=0 out t
+  [ -d "$ROOT/.claude" ] || { echo "   skipped: no .claude/ in this clone (the internal record is absent by design)"; return 0; }  # gate-allow:internal-path — the lane names the record it tests
+  for t in .claude/hooks/guard_test.py .claude/lib/audit-scope_test.sh; do  # gate-allow:internal-path — the two tests this lane runs
+    [ -f "$ROOT/$t" ] || { echo "   $t is missing while .claude/ is present — failing closed"; return 1; }
+  done
+  out="$(python3 "$ROOT/.claude/hooks/guard_test.py" 2>&1)" || rc=1  # gate-allow:internal-path — the guard hook's table
+  printf '%s\n' "$out" | grep -E 'WRONGLY|NOT REFUSED|guard_test:' | sed 's/^/   /'
+  out="$(bash "$ROOT/.claude/lib/audit-scope_test.sh" 2>&1)" || rc=1  # gate-allow:internal-path — the audit-scope marker's cases
+  printf '%s\n' "$out" | grep -E 'FAIL|PASS' | sed 's/^/   audit-scope: /'
+  return "$rc"
+}
+run_check "workflow helpers (guard, audit-scope)" workflow_helpers_lane
 
 # ── §-anchor resolution (Group U-2; the L78 prescription, built) ──────────────
 # The repo-path lane above proves a named FILE exists. This one proves the SECTION

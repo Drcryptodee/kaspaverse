@@ -35,7 +35,10 @@ FALLBACK_LANES = {"rust workspace", "flutter app"}
 STALE_DAYS = 21
 RECORD_STALE_DAYS = 7
 LESSON_DESTINATION_FROM = 206  # rows from this id on carry a destination that must cite the id
+# Words that say a destination is not built yet; a row marked absorbed may carry none.
+ABSORBED_PENDING = re.compile(r"→|->|\bcandidate\b|\bpending\b|TRIGGER|not yet|\bunbuilt\b|\bplanned\b|\bdeferred\b|\bproposed\b|IDEAS_BACKLOG|\bto be\b|\bwill\b", re.I)
 NEXT_SESSION_MAX_LINES = 50  # the thin pointer: prompt, model line, ecosystem line, expected state
+ROUTER_MAX_LINES = 120      # the router's own cap; it reached 155 lines while nothing counted it
 PROMPT_MAX_WORDS = 600       # the prompt template's budget; advisory
 TOTAL_CHECKS = 9  # C1…C9; the clean line reports this minus the checks a public clone skips
 
@@ -67,12 +70,42 @@ def c1_ledger_ids():
     log = read("docs", "DECISION_LOG.md")
     if log is None:
         return note("C1 skipped: docs/DECISION_LOG.md absent (public clone)")  # gate-allow:internal-path — the census reads the record; naming its files is its job
-    # A claim is a header `## D-NNN · date` (or the older `## D-NNN — date`); an addendum
-    # header (`### D-NNN addendum · …`) extends an entry and claims nothing.
-    ids = [int(m) for m in re.findall(r"^#{2,3} D-(\d+) [·—-] ", log, flags=re.M)]
+    # A claim is a header `## D-NNN · date` (or the older `## D-NNN — date`, or the first
+    # era's `- **D-NNN · date` list item); an addendum header (`### D-NNN addendum · …`)
+    # extends an entry and claims nothing. The closed eras live in archive volumes the
+    # log's header names: an id is claimed once across ALL of them, so every named
+    # volume is read, and a volume named but absent, or present but unnamed, is a red. A
+    # census that silently read the live tail alone would pass a reused archived id.
+    named = sorted(set(re.findall(r"`(docs/archive/DECISION_LOG_[A-Za-z0-9_-]+\.md)`", log)))  # gate-allow:internal-path — C1 reads the decision volumes the log's header names
+    arch = p("docs", "archive")
+    present = sorted(f"docs/archive/{f}" for f in (os.listdir(arch) if os.path.isdir(arch) else [])  # gate-allow:internal-path — C1 lists the volumes on disk to compare with the header
+                     if re.fullmatch(r"DECISION_LOG_[A-Za-z0-9_-]+\.md", f))
+    for v in sorted(set(named) - set(present)):
+        fail(f"C1 DECISION_LOG's header names the volume {v}, which is absent (its ids could be claimed again)")
+    for v in sorted(set(present) - set(named)):
+        fail(f"C1 {v} is a decision volume the log's header does not name (a reader of the header would miss it)")
+    for v in named:
+        body = read(*v.split("/"))
+        if body is not None:
+            log += "\n" + body
+    ids = [int(m) for m in re.findall(r"^(?:#{2,3} |- \*\*)D-(\d+) [·—-] ", log, flags=re.M)]
     seen, dupes = set(), set()
     for n in ids:
         (dupes if n in seen else seen).add(n)
+    # The digest of what binds holds a line per claimed id and names no other.
+    dig = read("docs", "DECISION_DIGEST.md")
+    if dig is None:
+        fail("C1 docs/DECISION_DIGEST.md is absent while the log is present (the digest of what binds)")  # gate-allow:internal-path — the census reads the record; naming its files is its job
+    else:
+        listed = {int(n) for n in re.findall(r"^- \*\*D-(\d+)\*\*", dig, flags=re.M)}
+        if not listed:
+            fail("C1 cannot look: DECISION_DIGEST.md lists no `- **D-NNN**` line")
+        for n in sorted(seen - listed):
+            fail(f"C1 D-{n:03d} is claimed in the log and has no line in DECISION_DIGEST.md")
+        for n in sorted(listed - seen):
+            fail(f"C1 DECISION_DIGEST.md lists D-{n:03d}, which the log never claims")
+        for n in sorted({int(x) for x in re.findall(r"(?:amended, last by|superseded by) D-(\d+)", dig)} - seen):
+            fail(f"C1 DECISION_DIGEST.md names D-{n:03d} as an amender, which the log never claims")
     new_dupes = sorted(dupes - HISTORICAL_DUPLICATE_D)
     if new_dupes:
         fail(f"C1 DECISION_LOG claims a D-number twice: {', '.join('D-%d' % n for n in new_dupes)} (two sittings wrote the same id — renumber the later one before it leaves the machine)")
@@ -167,9 +200,20 @@ def c6_lesson_destinations():
     skills = {s for s in os.listdir(sk) if os.path.isdir(os.path.join(sk, s))}
     for line in les.splitlines():
         m = re.match(r"^\| L(\d+) \|(.*)\|(.*)\|\s*$", line)
-        if not m or int(m.group(1)) < LESSON_DESTINATION_FROM:
+        if not m:
             continue
         lid, dest = int(m.group(1)), m.group(3)
+        # `**Absorbed.**` opening the destination cell claims the lesson now lives where it
+        # points: a reader may skip the row. The claim is checked at any id, a
+        # pending clause under it is a red, and so is a mark with nothing checkable to hold.
+        absorbed = dest.lstrip().startswith("**Absorbed.**")
+        if not absorbed and lid < LESSON_DESTINATION_FROM:
+            continue
+        if absorbed:
+            if ABSORBED_PENDING.search(dest):
+                fail(f"C6 L{lid} is marked absorbed, but its destination still names pending work ({ABSORBED_PENDING.search(dest).group(0)!r})")
+            if not (set(re.findall(r"`([a-z][a-z0-9-]+)`", dest)) & skills) and not re.search(r"`tools/[A-Za-z0-9_./-]+\.(?:sh|py)`", dest):
+                fail(f"C6 L{lid} is marked absorbed, but names no skill or tool the census can check")
         # A destination is a skill the lesson lands in. A `distill` CANDIDATE is a proposal
         # to the playbook's only write path, not a destination: skip a name whose own
         # clause (split on `;`) says "candidate".
@@ -220,6 +264,9 @@ def c8_baton():
     lines = ns.count("\n")
     if lines > NEXT_SESSION_MAX_LINES:
         fail(f"C8 NEXT_SESSION.md is {lines} lines; the pointer's budget is {NEXT_SESSION_MAX_LINES} (update-context §10: what a sitting left in the register stays there)")
+    router = read("CLAUDE.md")  # gate-allow:internal-path — C8 counts the router's lines against its cap
+    if router is not None and router.count("\n") > ROUTER_MAX_LINES:
+        fail(f"C8 CLAUDE.md is {router.count(chr(10))} lines; its cap is {ROUTER_MAX_LINES} (route the growth to a doc)")  # gate-allow:internal-path — the census reads the record; naming its files is its job
     target = read(m.group(1))
     if target is not None and len(target.split()) > PROMPT_MAX_WORDS:
         note(f"C8 {os.path.basename(m.group(1))} is {len(target.split())} words; the prompt template's budget is {PROMPT_MAX_WORDS} (update-context §10)")
@@ -312,10 +359,17 @@ def a5_recent_supersessions():
         d = _dt.date.fromisoformat(m.group(2))
         if (TODAY - d).days > 14:
             continue
-        if re.search(r"\b(supersed|revers|amend|retire|struck|replaces)\w*", e, flags=re.I):
-            hits.append(m.group(1))
+        if not re.search(r"\b(supersed|revers|amend|retire|struck|replaces)\w*", e, flags=re.I):
+            continue
+        # Discharged by the entry's own line, or, since the log is append-only, by an
+        # addendum to it (`### D-NNN addendum · …`) carrying the line; "Supersedes nothing"
+        # discharges a word that named no established fact.
+        own = [e] + re.findall(rf"^#{{2,3}} {m.group(1)} addendum\b.*?(?=^#{{2,3}} D-\d+ |\Z)", log, flags=re.M | re.S)
+        if any(re.search(r"Propagated to:|Supersedes nothing", x) for x in own):
+            continue
+        hits.append(m.group(1))
     if hits:
-        note("A5 recent decisions that supersede or amend something: " + ", ".join(hits) + " — each should carry a `Propagated to:` line and a `tools/who_cites.sh` pass over what it replaced")
+        note("A5 recent decisions that supersede or amend something and carry no `Propagated to:` line: " + ", ".join(hits) + " — run `tools/who_cites.sh` over what each replaced and add the line (an addendum, the log being append-only), or `Supersedes nothing`")
 
 
 def main():

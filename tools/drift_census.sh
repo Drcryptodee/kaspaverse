@@ -27,7 +27,8 @@ selftest() {
   scaffold() { # a minimal tree the census reads, copied from the real one
     local t=$1
     mkdir -p "$t/docs/research" "$t/docs/sessions" "$t/docs/phases" "$t/tools" "$t/rust" "$t/.claude/playbook" "$t/.claude/skills"
-    cp "$ROOT/docs/DECISION_LOG.md" "$ROOT/docs/LESSONS.md" "$t/docs/"
+    cp "$ROOT/docs/DECISION_LOG.md" "$ROOT/docs/DECISION_DIGEST.md" "$ROOT/docs/LESSONS.md" "$t/docs/"
+    mkdir -p "$t/docs/archive"; cp "$ROOT"/docs/archive/DECISION_LOG_*.md "$t/docs/archive/"  # the closed eras: C1 reads every volume
     cp "$ROOT/docs/research/FRESHNESS.md" "$ROOT/docs/research/UPSTREAM_REVS.json" "$t/docs/research/"
     for f in "$ROOT"/docs/research/*.md; do : > "$t/docs/research/$(basename "$f")"; done
     cp "$ROOT/docs/research/FRESHNESS.md" "$t/docs/research/FRESHNESS.md"
@@ -50,6 +51,16 @@ selftest() {
   scaffold "$work/clean";  run "clean scaffold is clean" 'DRIFT clean' 0 "$work/clean"
   scaffold "$work/c1";     printf '\n## D-9999 · 2026-01-01 · a\n\n## D-9999 · 2026-01-02 · b\n' >> "$work/c1/docs/DECISION_LOG.md"
   run "C1 a decision id claimed twice"                'C1 DECISION_LOG claims a D-number twice: D-9999' 1 "$work/c1"
+  scaffold "$work/c1v";    printf '\n## D-076 · 2026-10-24 · an id an archive volume already holds\n' >> "$work/c1v/docs/DECISION_LOG.md"
+  run "C1 a live id that an archive volume claims"    'C1 DECISION_LOG claims a D-number twice: D-76' 1 "$work/c1v"
+  scaffold "$work/c1w";    rm "$work/c1w"/docs/archive/DECISION_LOG_2_*.md
+  run "C1 a named volume is missing, so it cannot look" 'C1 DECISION_LOG.s header names the volume docs/archive/DECISION_LOG_2_' 1 "$work/c1w"  # gate-allow:internal-path — the selftest names the volume it removes
+  scaffold "$work/c1x";    : > "$work/c1x/docs/archive/DECISION_LOG_9_unnamed.md"
+  run "C1 a volume the header does not name"          'C1 docs/archive/DECISION_LOG_9_unnamed.md is a decision volume the log.s header does not name' 1 "$work/c1x"  # gate-allow:internal-path — gate-allow:dangling-path — a planted unnamed volume in the census selftest, meant not to resolve
+  scaffold "$work/c1d";    printf '\n## D-9996 · 2026-10-24 · a decision with no digest line\n' >> "$work/c1d/docs/DECISION_LOG.md"
+  run "C1 a claimed id with no digest line"          'C1 D-9996 is claimed in the log and has no line in DECISION_DIGEST.md' 1 "$work/c1d"
+  scaffold "$work/c1e";    printf -- '- **D-9995** · a line for a decision never made · as written\n' >> "$work/c1e/docs/DECISION_DIGEST.md"
+  run "C1 a digest line for an unclaimed id"         'C1 DECISION_DIGEST.md lists D-9995, which the log never claims' 1 "$work/c1e"
   scaffold "$work/c1b";    printf '| L9999 | a | b |\n| L9999 | c | d |\n' >> "$work/c1b/docs/LESSONS.md"
   run "C1 a lesson id claimed twice"                  'C1 LESSONS claims an L-number twice: L9999' 1 "$work/c1b"
   scaffold "$work/c2";     : > "$work/c2/docs/research/zz_unstamped_doc.md"
@@ -79,6 +90,10 @@ PY
   run "C5 two active phases"                          'C5 expected exactly one \*_ACTIVE.md' 1 "$work/c5"
   scaffold "$work/c6";     printf '| L9998 | a lesson | **`update-context`** gains a step |\n' >> "$work/c6/docs/LESSONS.md"
   run "C6 a destination skill that never cites the lesson" 'C6 L9998 names `update-context` as a destination' 1 "$work/c6"
+  scaffold "$work/c6b";    printf '| L0 | a lesson | **Absorbed.** **`update-context`** gains a step (built) |\n' >> "$work/c6b/docs/LESSONS.md"
+  run "C6 an absorbed mark whose destination never cites it" 'C6 L0 names `update-context` as a destination' 1 "$work/c6b"
+  scaffold "$work/c6c";    printf '| L0 | a lesson | **Absorbed.** `update-context` gains a step; the rest → a later sitting |\n' >> "$work/c6c/docs/LESSONS.md"
+  run "C6 an absorbed mark over a pending clause"     'C6 L0 is marked absorbed, but its destination still names pending work' 1 "$work/c6c"
   scaffold "$work/c7";     sed -i -E '/"our_pin"/,/\}/ s/"rusty_kaspa": "[0-9a-f]{7}/"rusty_kaspa": "0000000/' "$work/c7/docs/research/UPSTREAM_REVS.json"  # our_pin only, any rev: a literal went stale at the v2.1.0 re-pin (D-324)
   run "C7 the record disagrees with the manifest pin" 'C7 UPSTREAM_REVS.json records our pin as 0000000' 1 "$work/c7"
   scaffold "$work/c8";     python3 - "$work/c8/docs/sessions/NEXT_SESSION.md" <<'PY'
@@ -89,6 +104,8 @@ PY
   run "C8 the baton points at a missing prompt"       'C8 NEXT_SESSION.md points at docs/sessions/nope_PROMPT.md' 1 "$work/c8"  # gate-allow:internal-path — gate-allow:dangling-path — the planted missing prompt the row expects, meant not to resolve
   scaffold "$work/c8b";    for i in $(seq 1 60); do echo "padding $i"; done >> "$work/c8b/docs/sessions/NEXT_SESSION.md"
   run "C8 the baton grew past its line budget"       'C8 NEXT_SESSION.md is [0-9]+ lines; the pointer.s budget is 50' 1 "$work/c8b"
+  scaffold "$work/c8c";    for i in $(seq 1 10); do echo "padding $i"; done >> "$work/c8c/CLAUDE.md"
+  run "C8 the router grew past its cap"              'C8 CLAUDE.md is [0-9]+ lines; its cap is 120' 1 "$work/c8c"  # gate-allow:internal-path — the selftest names the file it pads
   scaffold "$work/c9";     python3 - "$work/c9/docs/sessions/INDEX.md" <<'PY'
 import re, sys
 p = sys.argv[1]; s = open(p).read()
