@@ -134,7 +134,7 @@ passing unnoticed. The gate lane checks these too.
 
 ```
 PATCHED  bbc996232ec642a8a7cf4ac8167df5247b73448c6f1c8efba775a7fe8792217a  Cargo.toml
-PATCHED  b7b1c24afc0c2fb9c90ddb15bdc38ac193d82b437970d0f37cc9c816e51ddc5e  src/connect.rs
+PATCHED  8cd9dac29eeae5c6a5db331276b5fe90aef1a618b8114f356bdb2c794f68809a  src/connect.rs
 PATCHED  77b1ba53a8232e2833918e927748864a6f4580d54b98b9588e42b349e81f3e13  src/lib.rs
 ```
 

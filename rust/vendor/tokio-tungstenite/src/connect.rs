@@ -335,14 +335,17 @@ mod happy_eyeballs_tests {
     use std::time::Instant;
     use tokio::net::TcpListener;
 
-    /// A listener whose accept backlog is deliberately full, so further SYNs are
-    /// dropped in silence rather than refused — a blackhole, on loopback, without
-    /// root. This is the condition the patch exists for: `connect` to this address
-    /// neither succeeds nor errors, it simply never returns.
+    /// An address whose SYNs the kernel drops in silence rather than refusing them —
+    /// a blackhole, on loopback, without root. This is the condition the patch exists
+    /// for: `connect` to this address neither succeeds nor errors, it simply never
+    /// returns. The mechanism is the kernel's, so it differs by OS, and
+    /// `the_blackhole_harness_actually_blackholes` proves it on whichever one runs.
     ///
-    /// Returned guards must be held: dropping the listener would turn the
-    /// blackhole into a fast `ECONNREFUSED` and the test would prove nothing.
-    async fn blackholed_v6() -> (SocketAddr, TcpListener, Vec<tokio::net::TcpStream>) {
+    /// Here: a listener whose accept backlog is deliberately full. Returned guards
+    /// must be held: dropping the listener would turn the blackhole into a fast
+    /// `ECONNREFUSED` and the test would prove nothing.
+    #[cfg(not(target_os = "macos"))]
+    async fn blackholed() -> (SocketAddr, Option<TcpListener>, Vec<tokio::net::TcpStream>) {
         // Backlog of 1, NOT `TcpListener::bind` — that asks for 1024, and a queue
         // that deep cannot be filled by a test. This is the whole trick.
         let socket = tokio::net::TcpSocket::new_v6().expect("v6 socket");
@@ -367,10 +370,29 @@ mod happy_eyeballs_tests {
             }
         }
 
-        (addr, listener, stuffers)
+        (addr, Some(listener), stuffers)
     }
 
-    /// A live listener that accepts, on the other family.
+    /// macOS answers a SYN to a full accept queue with a SYN cookie
+    /// (`net.inet.tcp.syncookie=1`, the default), so the connect completes and the
+    /// backlog trick cannot blackhole. Instead: an address in 127/8 that is not
+    /// assigned to `lo0` (only 127.0.0.1 is, by default). The route hands the SYN to
+    /// `lo0`, no local address claims it, and it is dropped in silence without
+    /// leaving the host. Nothing needs holding.
+    #[cfg(target_os = "macos")]
+    async fn blackholed() -> (SocketAddr, Option<TcpListener>, Vec<tokio::net::TcpStream>) {
+        ("127.0.0.2:9".parse().unwrap(), None, Vec::new())
+    }
+
+    /// A live listener that accepts, on the family the blackhole is not on.
+    async fn live_other_family(dead: SocketAddr) -> (SocketAddr, TcpListener) {
+        let bind = if dead.is_ipv6() { "127.0.0.1:0" } else { "[::1]:0" };
+        let listener = TcpListener::bind(bind).await.expect("bind loopback");
+        let addr = listener.local_addr().unwrap();
+        (addr, listener)
+    }
+
+    /// A live listener that accepts, on IPv4.
     async fn live_v4() -> (SocketAddr, TcpListener) {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind 127.0.0.1");
         let addr = listener.local_addr().unwrap();
@@ -382,7 +404,7 @@ mod happy_eyeballs_tests {
     /// the point where a refused connection would have returned.
     #[tokio::test]
     async fn the_blackhole_harness_actually_blackholes() {
-        let (dead, _listener, _stuffers) = blackholed_v6().await;
+        let (dead, _listener, _stuffers) = blackholed().await;
 
         let outcome = tokio::time::timeout(
             Duration::from_millis(750),
@@ -405,16 +427,16 @@ mod happy_eyeballs_tests {
     /// must fall through after the 300 ms stagger and connect.
     #[tokio::test]
     async fn a_blackholed_preferred_family_does_not_hide_a_live_one() {
-        let (dead_v6, _listener, _stuffers) = blackholed_v6().await;
-        let (live_v4_addr, _live) = live_v4().await;
+        let (dead, _listener, _stuffers) = blackholed().await;
+        let (live, _live) = live_other_family(dead).await;
 
         let started = Instant::now();
-        let stream = race_address_families(vec![dead_v6, live_v4_addr])
+        let stream = race_address_families(vec![dead, live])
             .await
-            .expect("the live v4 address must win");
+            .expect("the live address on the other family must win");
         let elapsed = started.elapsed();
 
-        assert_eq!(stream.peer_addr().unwrap(), live_v4_addr);
+        assert_eq!(stream.peer_addr().unwrap(), live);
         assert!(
             elapsed < Duration::from_millis(500),
             "fell through in {:?}; the whole point is the ~300 ms stagger, \
@@ -430,12 +452,12 @@ mod happy_eyeballs_tests {
     /// the claim that the serial walk was broken; here that claim is executable.
     #[tokio::test]
     async fn the_serial_walk_this_patch_replaced_does_hang() {
-        let (dead_v6, _listener, _stuffers) = blackholed_v6().await;
-        let (live_v4_addr, _live) = live_v4().await;
+        let (dead, _listener, _stuffers) = blackholed().await;
+        let (live, _live) = live_other_family(dead).await;
 
         let outcome = tokio::time::timeout(
             Duration::from_millis(750),
-            connect_sequentially(&[dead_v6, live_v4_addr]),
+            connect_sequentially(&[dead, live]),
         )
         .await;
 
