@@ -67,6 +67,35 @@ echo "• toolchain: rustc=${RUSTC_V:-missing}" \
      "cargo-ndk=$(command -v cargo-ndk >/dev/null && echo yes || echo no)" \
      "cargo-deny=$(command -v cargo-deny >/dev/null && echo yes || echo no)" \
      "frb-codegen=$(command -v flutter_rust_bridge_codegen >/dev/null && echo yes || echo no)"
+# Host userland. The gate and these scripts assume bash 4+, GNU coreutils, sed, grep and
+# find, binutils' readelf and Python 3.12+: Linux has them, macOS needs them from Homebrew
+# (CONTRIBUTING.md). Some uses fail SILENTLY without them (here: `timeout` hides the
+# remote-gate, advisory and upstream lines, `date -d` reads the beacon as always stale,
+# `df -BG` drops the disk line), so each tool is probed by what it must do.
+HOST_MISSING=()
+probe() { local name="$1"; shift; "$@" >/dev/null 2>&1 || HOST_MISSING+=("$name"); }
+[ "${BASH_VERSINFO[0]}" -ge 4 ] || HOST_MISSING+=("bash 4+ (this is $BASH_VERSION)")
+probe 'timeout'          timeout 5 true
+probe 'GNU sed'          bash -c '[ "$(printf "a\na\n" | sed "0,/a/s//b/")" = "$(printf "b\na")" ]'
+probe 'grep -P'          bash -c '[ "$(printf "a1\n" | grep -oP "a\\K1")" = 1 ]'
+probe 'stat -c'          stat -c %Y /
+probe 'date -d'          bash -c '[ "$(date -u -d 2026-01-01 +%s)" = 1767225600 ]'
+probe 'GNU wc'           bash -c '[ "$(printf "a\n" | wc -l)" = 1 ]'
+probe 'find -printf'     bash -c '[ "$(find / -maxdepth 0 -printf x)" = x ]'
+probe 'mktemp --suffix'  mktemp -u --suffix=.x
+probe 'sha256sum'        bash -c '[ "$(printf "" | sha256sum | cut -c1-8)" = e3b0c442 ]'
+probe 'df -BG'           df -BG --output=avail /
+probe 'readelf'          readelf --version
+probe 'python3 3.12+'    python3 -c 'import sys; sys.exit(sys.version_info < (3, 12))'
+# Never GNU ls on macOS: cargokit's darwin branch hashes `ls -lTR`, GNU ls reads -T as a
+# tab size, and the build-tool cache then never invalidates.
+[ "$(uname -s)" = Darwin ] && ls --version >/dev/null 2>&1 && HOST_MISSING+=("BSD ls (GNU ls is first on PATH)")
+if [ "${#HOST_MISSING[@]}" -eq 0 ]; then
+  echo "• host tools: ok (bash ${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}, $(python3 -c 'import sys; print("python %d.%d" % sys.version_info[:2])'), GNU userland)"
+else
+  HOST_LIST="$(printf '%s, ' "${HOST_MISSING[@]}")"
+  echo "• host tools: MISSING ${HOST_LIST%, } ← the gate and tools/ assume them (CONTRIBUTING.md, Build)"
+fi
 # adb lives in the local SDK install (P0.3), not on PATH in fresh shells.
 # Env var first, then both SDK roots this project has used — see gate.sh's NDK
 # discovery for why a single hardcoded root is not enough (2026-08-12 migration).

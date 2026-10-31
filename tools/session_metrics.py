@@ -31,7 +31,12 @@ import os
 import re
 import sys
 
-ROOT = os.path.expanduser('~/.claude/projects/-home-user-kaspa-verse')
+# Claude Code keeps a project's transcripts under its path with every character other than
+# a letter or digit turned into '-': `-home-user-kaspa-verse` on Ubuntu, `-Users-<name>-kaspa-verse`
+# on macOS.
+PROJECT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+ROOT = os.path.join(os.environ.get('CLAUDE_CONFIG_DIR') or os.path.expanduser('~/.claude'),
+                    'projects', re.sub(r'[^A-Za-z0-9]', '-', PROJECT))
 IDLE_GAP = 600
 CODE_EXT = r'\.(rs|dart|kt|kts|java|swift|py|sh|ag|sil|c|h|gradle|toml)\b'
 P = r'[\w./~-]*' + CODE_EXT
@@ -236,7 +241,7 @@ def main():
     elif not args.all:
         paths = paths[-1:]
     if not paths:
-        print('session_metrics: no transcript matched', file=sys.stderr)
+        print(f'session_metrics: no transcript matched in {ROOT}', file=sys.stderr)
         return 1
     for p in paths:
         sid, title, a, agents = sitting(p, since, until)

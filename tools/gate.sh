@@ -722,12 +722,13 @@ fi
 # `cargo deny`; pub has pubspec.lock; Gradle had a version STRING, which is a
 # request and not an assertion, while AGP + Kotlin are the largest bodies of
 # third-party code the Android build downloads and executes.
-# android/gradle/verification-metadata.xml pins 690 components / 1261 artifacts
+# android/gradle/verification-metadata.xml pins 690 components / 1262 artifacts
 # by sha256 (D-204). The two lanes BELOW (kotlin compile, android lint) enforce
 # it on every run: adoption needed no new lane and no new network call, because
 # those two already resolve from the network. CI is cold on every push (it
-# caches cargo and Flutter, never ~/.gradle), so CI verifies all 1261 freshly
-# fetched artifacts — that is where this mechanism has its teeth.
+# caches cargo and Flutter, never ~/.gradle), so CI verifies all 1261 artifacts a
+# Linux build fetches, freshly — that is where this mechanism has its teeth. (The
+# 1262nd is aapt2's macOS jar, which only a Mac build fetches.)
 #
 # What THIS lane adds is the part the generator cannot keep honest by itself.
 # `gradle --write-verification-metadata sha256` has a blind spot: it never
@@ -792,7 +793,7 @@ gradle_dep_verification() {
   # independently mutated the file into a green-but-verifying-nothing state that the
   # verify-metadata check above does not see. A single
   #   <trusted-artifacts><trust group=".*" regex="true"/></trusted-artifacts>
-  # exempts EVERY artifact while all 1261 hashes stay in place; <also-trust> adds a
+  # exempts EVERY artifact while all 1262 hashes stay in place; <also-trust> adds a
   # second accepted digest to a pinned entry; and md5/sha1 assertions are forgeable.
   # <trust*> is Gradle's own documented escape hatch when verification fails, which
   # makes it the reflex fix — so it is asserted ABSENT. Adopting PGP or a narrow
@@ -835,6 +836,30 @@ gradle_dep_verification() {
       echo "   Re-add it with sha256 $want"
       bad=1
     fi
+  done
+  # The generator's second blind spot is the host. aapt2 ships one jar per build OS and
+  # Gradle resolves only the running host's, so a file regenerated on the Ubuntu box
+  # pins `-linux.jar` alone and the Mac's next build stops at verification (and the
+  # reverse reds cold CI). Every aapt2 version is asserted as a pair, so a regeneration
+  # reds on the host that ran it. The osx digest: Gradle's cache, a fresh download and
+  # Google's published .sha256 agreed.
+  local v versions=""
+  versions="$(grep -oE 'name="aapt2-[0-9][^"]*-(linux|osx)\.jar"' "$f" \
+              | sed -E 's/^name="aapt2-(.*)-(linux|osx)\.jar"$/\1/' | sort -u)"
+  if [ -z "$versions" ]; then
+    echo "   no aapt2 jar is pinned at all, so the host-pair check cannot look. AGP resolves"
+    echo "   aapt2 on every Android build; find where it went before trusting this lane."
+    bad=1
+  fi
+  for v in $versions; do
+    for ext in linux osx; do
+      if ! grep -A1 -F "name=\"aapt2-$v-$ext.jar\"" "$f" | grep -qE '<sha256 value="[0-9a-f]{64}"'; then
+        echo "   aapt2 $v has no sha256 pin for its -$ext.jar. A regeneration on one host"
+        echo "   drops the other host's jar. Re-add it: Google Maven publishes"
+        echo "   com/android/tools/build/aapt2/$v/aapt2-$v-$ext.jar.sha256; check it against a download."
+        bad=1
+      fi
+    done
   done
   return $bad
 }
@@ -1276,13 +1301,18 @@ require_git_repo() {
 repo_hygiene() {
   local bad=0
   local tracked
+  # `:(icase)` on every entry: on APFS a secret's name in another case IS the secret, and
+  # `git update-index --add` stages it under that spelling, which a plain pathspec never
+  # matches. On a case-sensitive host it reds on a variant spelling too. ASCII case only:
+  # a Unicode case variant still passes here (the guard folds those at staging).
+  local -a secret_shaped=(
+    ':(icase)*.keystore' ':(icase)*.jks' ':(icase)*.p12' ':(icase)*.pem'
+    ':(icase)*key.properties' ':(icase).env' ':(icase).env.*' ':(icase)id_rsa*'
+    ':(icase)docs/environment.local.md') # gate-allow:internal-path — asserted ABSENT, not offered
   require_git_repo || { echo "   not a git repository — hygiene unverifiable, failing closed"; return 1; }
   # Pinned --git-dir/--work-tree, same reason as internal_record(): the ops mirror shares
   # this working tree, so an inherited GIT_DIR must not be able to steer this check.
-  tracked="$(git --git-dir="$ROOT/.git" --work-tree="$ROOT" ls-files -- \
-    '*.keystore' '*.jks' '*.p12' '*.pem' \
-    '*key.properties' '.env' '.env.*' 'id_rsa*' \
-    'docs/environment.local.md')" # gate-allow:internal-path — asserted ABSENT, not offered
+  tracked="$(git --git-dir="$ROOT/.git" --work-tree="$ROOT" ls-files -- "${secret_shaped[@]}")"
   if [ -n "$tracked" ]; then
     echo "   secret-shaped files are git-tracked:"; echo "$tracked" | sed 's/^/     /'
     bad=1
@@ -1305,10 +1335,7 @@ repo_hygiene() {
   if [ -d "$OPS_GIT_DIR" ] && \
      git --git-dir="$OPS_GIT_DIR" --work-tree="$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
     local ops_tracked
-    ops_tracked="$(git --git-dir="$OPS_GIT_DIR" --work-tree="$ROOT" ls-files -- \
-      '*.keystore' '*.jks' '*.p12' '*.pem' \
-      '*key.properties' '.env' '.env.*' 'id_rsa*' \
-      'docs/environment.local.md')" # gate-allow:internal-path — asserted ABSENT from the ops index too
+    ops_tracked="$(git --git-dir="$OPS_GIT_DIR" --work-tree="$ROOT" ls-files -- "${secret_shaped[@]}")"
     if [ -n "$ops_tracked" ]; then
       echo "   secret-shaped files are tracked in the INTERNAL RECORD (ops mirror):"
       echo "$ops_tracked" | sed 's/^/     /'
@@ -1610,7 +1637,15 @@ repo_path_targets() {
   # `:` is in the boundary class so a package URI is not read as a repo path:
   # `package:integration_test/integration_test.dart` collides with the tracked
   # `integration_test/` directory and is a pub package, not a file in this tree.
-  re="(^|[^A-Za-z0-9_./+:-])(\\./)?($anchors)/[A-Za-z0-9_./+-]*\\.($REPO_PATH_EXTS)\\b"
+  #
+  # No `\b`: it is a GNU extension, and macOS git's ERE (libc regex, Apple and
+  # Homebrew builds alike) has none, so the pattern matched nothing there. The match
+  # takes the extension's whole word tail instead, and the loop trims the token back to
+  # its last listed extension that ends at a non-word byte, which is where `\b` stopped:
+  # `x/a.md.sha256` cites `x/a.md`, while `x.mdx` and `x.md_y` drop out. A
+  # consumed tail is word characters only, never the boundary byte the next match on
+  # the line needs.
+  re="(^|[^A-Za-z0-9_./+:-])(\\./)?($anchors)/[A-Za-z0-9_./+-]*\\.($REPO_PATH_EXTS)[A-Za-z0-9_]*"
 
   # L106, encoded into the lane instead of trusted at review time. `checked` below is a
   # COUNT, and the whole F2/F9 class is a check whose count silently becomes zero: if the
@@ -1661,6 +1696,10 @@ repo_path_targets() {
     tok="${tok#"${tok%%[A-Za-z0-9_.]*}"}"   # drop the leading word-boundary byte
     tok="${tok#./}"
     case "$tok" in *...*) continue ;; esac   # `android/.../Foo.kt` — an ellipsis, not a path
+    if ! [[ "${tok##*.}" =~ ^($REPO_PATH_EXTS)$ ]]; then   # the word tail ran past a listed extension
+      [[ "$tok" =~ ^(.*\.($REPO_PATH_EXTS))[^A-Za-z0-9_] ]] || continue
+      tok="${BASH_REMATCH[1]}"
+    fi
     checked=$((checked+1))
     [ -e "$ROOT/$tok" ] && continue
 

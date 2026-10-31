@@ -21,6 +21,13 @@ You need:
 These are the versions CI installs (`.github/workflows/gate.yml`). `tools/gate.sh` compares
 yours against them and warns on any difference, which CI treats as a failure.
 
+The scripts in `tools/` assume bash 4 or newer, GNU userland and Python 3.12 or newer, as on
+Linux. On macOS, install them with Homebrew (`brew install bash coreutils gnu-sed grep
+findutils binutils python`) and put links to the GNU `timeout`, `stat`, `date`, `mktemp`, `wc`,
+`sha256sum`, `df`, `sed`, `grep`, `find` and `readelf` ahead of the system ones on `PATH`. Do not
+shadow `ls`: the vendored cargokit runs the BSD `ls -lTR` on macOS. `tools/preflight.sh` checks
+each one and names any that is missing.
+
 Android only, arm64 only, on a physical device. x86_64 emulators cannot run the upstream
 hashing crate at the pinned revision.
 
