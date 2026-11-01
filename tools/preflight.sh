@@ -13,6 +13,30 @@ echo "• branch:  $(git branch --show-current 2>/dev/null || echo 'NO GIT')"
 echo "• dirty:   $(git status --porcelain 2>/dev/null | wc -l) uncommitted paths"
 echo "• last 5 commits:"
 git log --oneline -5 2>/dev/null | sed 's/^/    /' || echo "    (none)"
+# Sync with origin. The work lives on two machines, one at a time, and the agent pulls both
+# repos fast-forward only before this runs; this line proves the pulls happened. One fetch
+# per repo, hard-timeouted and never fatal, then each branch against its upstream. Behind
+# means a pull was skipped; ahead means a wrap was never pushed; diverged means both
+# machines committed. None of them is settled by a force. Offline, it compares against the
+# last fetch and says so.
+sync_state() { # $1: label; the rest: the git command that selects the repository
+  local label="$1"; shift
+  local up ahead behind note=""
+  up="$("$@" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)" \
+    || { printf '%s: no upstream' "$label"; return; }
+  timeout 20 "$@" fetch --quiet 2>/dev/null || note=" (fetch failed: last fetch)"
+  read -r ahead behind <<< "$("$@" rev-list --left-right --count "HEAD...$up" 2>/dev/null)"
+  if [ -z "$ahead" ]; then printf '%s: unreadable' "$label"
+  elif [ "$ahead" = 0 ] && [ "$behind" = 0 ]; then printf '%s = %s%s' "$label" "$up" "$note"
+  elif [ "$ahead" = 0 ]; then printf '%s BEHIND %s by %s%s  <- pull --ff-only before anything else' "$label" "$up" "$behind" "$note"
+  elif [ "$behind" = 0 ]; then printf '%s AHEAD of %s by %s%s  <- an unpushed wrap: gate, then push' "$label" "$up" "$ahead" "$note"
+  else printf '%s DIVERGED from %s (+%s/-%s)%s  <- both machines committed: rebase onto origin, never force' "$label" "$up" "$ahead" "$behind" "$note"
+  fi
+}
+OPS_GIT_DIR="${KASPAVERSE_OPS_GIT_DIR:-$HOME/.kaspaverse-ops.git}"
+SYNC_LINE="$(sync_state public git -C "$ROOT")"
+[ -d "$OPS_GIT_DIR" ] && SYNC_LINE="$SYNC_LINE · $(sync_state ops git --git-dir="$OPS_GIT_DIR")"
+echo "• sync:    $SYNC_LINE"
 # The engineering record went ops-mirror-only at D-102, so `docs/` is simply ABSENT in a
 # public clone. Guard every docs-dependent line the same way the playbook line below is
 # guarded, rather than printing instructions nobody can follow ("check PHASE_INDEX",
